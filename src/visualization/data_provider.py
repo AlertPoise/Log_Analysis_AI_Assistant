@@ -42,30 +42,14 @@ def get_dashboard_data(path: str = "data/sample_logs.json") -> Dict[str, Any]:
         )
 
     try:
-        result = analyze_behavior_for_frontend(payload)
+        if _has_target_users(payload):
+            return _get_multi_user_dashboard_data(payload)
+        return _get_single_user_dashboard_data(payload)
     except Exception as exc:
         return _build_mock_fallback(
             code="BEHAVIOR_API_ERROR",
             message="Behavior API invocation failed.",
             details=str(exc),
-        )
-
-    if not result.get("success"):
-        return _build_mock_fallback(
-            code="BEHAVIOR_ANALYSIS_FAILED",
-            message="Behavior analysis returned an unsuccessful result.",
-            details=result.get("error"),
-            raw_behavior_result=result,
-        )
-
-    try:
-        return _transform_behavior_result(result)
-    except Exception as exc:
-        return _build_mock_fallback(
-            code="DASHBOARD_TRANSFORM_ERROR",
-            message="Failed to convert behavior analysis result for dashboard rendering.",
-            details=str(exc),
-            raw_behavior_result=result,
         )
 
 
@@ -117,6 +101,111 @@ def _transform_behavior_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "raw_behavior_result": result,
         "error": None,
     }
+
+
+def _get_single_user_dashboard_data(payload: Dict[str, Any]) -> Dict[str, Any]:
+    result = analyze_behavior_for_frontend(payload)
+    if not result.get("success"):
+        raise ValueError(result.get("error"))
+    return _transform_behavior_result(result)
+
+
+def _get_multi_user_dashboard_data(payload: Dict[str, Any]) -> Dict[str, Any]:
+    history_logs = payload.get("history_logs", [])
+    detection_logs = payload.get("detection_logs", [])
+    target_users = _extract_target_users(payload)
+    if not target_users:
+        return _get_single_user_dashboard_data(payload)
+
+    per_user_results: Dict[str, Dict[str, Any]] = {}
+    aggregated_users: List[Dict[str, Any]] = []
+    aggregated_events: List[Dict[str, Any]] = []
+    aggregated_distribution = {"low": 0, "medium": 0, "high": 0}
+    max_risk_score = 0.0
+    overall_risk_level = "unknown"
+
+    for user in target_users:
+        result = analyze_behavior_for_frontend(
+            {
+                "target_user": user,
+                "history_logs": history_logs,
+                "detection_logs": detection_logs,
+            }
+        )
+        if not result.get("success"):
+            raise ValueError({"user": user, "error": result.get("error")})
+
+        per_user_results[user] = result
+        dashboard_result = _transform_behavior_result(result)
+        aggregated_users.extend(dashboard_result["anomaly_users"])
+        aggregated_events.extend(dashboard_result["anomaly_events"])
+        _merge_risk_distribution(aggregated_distribution, dashboard_result["risk_distribution"])
+
+        user_summary = dashboard_result["summary"]
+        user_score = _clamp_score(user_summary.get("max_risk_score", 0.0))
+        user_level = _normalize_risk_level(user_summary.get("overall_risk_level"))
+        if user_score > max_risk_score:
+            max_risk_score = user_score
+        if _RISK_ORDER[user_level] > _RISK_ORDER[overall_risk_level]:
+            overall_risk_level = user_level
+
+    aggregated_users.sort(
+        key=lambda item: (
+            -float(item.get("risk_score", 0.0) or 0.0),
+            -int(item.get("anomaly_count", 0) or 0),
+            str(item.get("username") or ""),
+        )
+    )
+    aggregated_events.sort(
+        key=lambda item: (
+            -float(item.get("risk_score", 0.0) or 0.0),
+            str(item.get("timestamp") or ""),
+            str(item.get("username") or ""),
+        )
+    )
+
+    security_score = max(0, min(100, 100 - round(max_risk_score * 100)))
+    high_risk_users = sum(1 for item in aggregated_users if item.get("risk_level") == "high")
+
+    return {
+        "source": "behavior",
+        "success": True,
+        "target_user": None,
+        "target_users": target_users,
+        "summary": {
+            "total_logs": len(history_logs) + len(detection_logs),
+            "anomaly_count": len(aggregated_events),
+            "high_risk_users": high_risk_users,
+            "security_score": security_score,
+            "max_risk_score": max_risk_score,
+            "overall_risk_level": overall_risk_level,
+        },
+        "risk_distribution": aggregated_distribution,
+        "anomaly_users": aggregated_users,
+        "anomaly_events": aggregated_events,
+        "raw_behavior_result": {
+            "mode": "multi_user",
+            "results": per_user_results,
+        },
+        "error": None,
+    }
+
+
+def _has_target_users(payload: Dict[str, Any]) -> bool:
+    return bool(_extract_target_users(payload))
+
+
+def _extract_target_users(payload: Dict[str, Any]) -> List[str]:
+    raw_users = payload.get("target_users")
+    if not isinstance(raw_users, list):
+        return []
+
+    users: List[str] = []
+    for item in raw_users:
+        normalized = str(item or "").strip()
+        if normalized and normalized not in users:
+            users.append(normalized)
+    return users
 
 
 def _normalize_anomalies(anomalies: Any) -> List[Dict[str, Any]]:
@@ -174,6 +263,11 @@ def _build_risk_distribution(anomalies: List[Dict[str, Any]]) -> Dict[str, int]:
         if risk_level in distribution:
             distribution[risk_level] += 1
     return distribution
+
+
+def _merge_risk_distribution(target: Dict[str, int], source: Dict[str, int]) -> None:
+    for level in ("low", "medium", "high"):
+        target[level] += int(source.get(level, 0) or 0)
 
 
 def _highest_risk_level(anomalies: List[Dict[str, Any]]) -> str:

@@ -29,6 +29,14 @@ def test_get_dashboard_data_uses_behavior_source_when_sample_logs_exist() -> Non
     assert data["summary"]["total_logs"] > 0
 
 
+def test_get_dashboard_data_returns_multiple_anomaly_users_when_target_users_exist() -> None:
+    data = get_dashboard_data()
+
+    usernames = {item["username"] for item in data["anomaly_users"]}
+    assert len(usernames) >= 2
+    assert "zhangsan" in usernames
+
+
 def test_get_dashboard_data_falls_back_to_mock_when_file_missing() -> None:
     data = get_dashboard_data("not_exists.json")
 
