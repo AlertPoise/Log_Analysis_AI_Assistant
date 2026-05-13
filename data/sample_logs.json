@@ -1,0 +1,98 @@
+{
+  "target_user": "zhangsan",
+  "history_logs": [
+    {
+      "id": 1,
+      "timestamp": "2026-04-01 09:00:00",
+      "username": "zhangsan",
+      "src_ip": "10.0.0.1",
+      "src_city": "北京",
+      "event_type": "LOGIN_SUCCESS",
+      "result": "SUCCESS",
+      "client_software": "FortiClient 7.2"
+    },
+    {
+      "id": 2,
+      "timestamp": "2026-04-01 09:30:00",
+      "account": "zhangsan",
+      "remote_addr": "10.0.0.1",
+      "location": "北京",
+      "action": "LOGIN",
+      "status": "SUCCESS",
+      "user_agent": "FortiClient 7.2"
+    },
+    {
+      "id": 3,
+      "timestamp": "2026-04-01 10:00:00",
+      "user": "zhangsan",
+      "ip": "10.0.0.1",
+      "location": "北京",
+      "action": "API_CALL",
+      "endpoint": "/api/orders",
+      "status": "SUCCESS",
+      "method": "GET"
+    },
+    {
+      "id": 4,
+      "timestamp": "2026-04-01 10:20:00",
+      "username": "zhangsan",
+      "source_ip": "10.0.0.1",
+      "location": "北京",
+      "action": "API_CALL",
+      "endpoint": "/api/reports/summary",
+      "status": "SUCCESS",
+      "method": "GET"
+    },
+    {
+      "id": 5,
+      "timestamp": "2026-04-01 11:00:00",
+      "username": "zhangsan",
+      "source_ip": "10.0.0.1",
+      "location": "北京",
+      "action": "LOGIN",
+      "status": "SUCCESS"
+    }
+  ],
+  "detection_logs": [
+    {
+      "id": 101,
+      "timestamp": "2026-04-02 03:00:00",
+      "username": "zhangsan",
+      "source_ip": "8.8.8.8",
+      "location": "广州",
+      "action": "LOGIN",
+      "status": "SUCCESS"
+    },
+    {
+      "id": 102,
+      "timestamp": "2026-04-02 03:08:00",
+      "username": "zhangsan",
+      "source_ip": "8.8.8.8",
+      "location": "广州",
+      "action": "API_CALL",
+      "endpoint": "/api/admin/export",
+      "status": "SUCCESS",
+      "method": "POST"
+    },
+    {
+      "id": 103,
+      "timestamp": "2026-04-02 03:12:00",
+      "username": "zhangsan",
+      "src_ip": "8.8.4.4",
+      "src_city": "广州",
+      "event_type": "LOGIN_FAIL",
+      "result": "FAIL"
+    },
+    {
+      "id": 104,
+      "timestamp": "2026-04-02 09:30:00",
+      "username": "zhangsan",
+      "source_ip": "10.0.0.1",
+      "location": "北京",
+      "action": "API_CALL",
+      "endpoint": "/api/orders",
+      "status": "SUCCESS",
+      "method": "GET"
+    }
+  ]
+}
