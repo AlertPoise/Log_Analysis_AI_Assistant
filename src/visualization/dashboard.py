@@ -16,6 +16,8 @@ import time
 import io
 import logging
 
+from src.visualization.data_provider import get_dashboard_data
+
 # 设置日志配置
 import os
 
@@ -38,6 +40,24 @@ logging.basicConfig(
     handlers=handlers
 )
 logger = logging.getLogger(__name__)
+
+RISK_LEVEL_LABELS = {
+    "high": "🔴 高危",
+    "medium": "🟠 中危",
+    "low": "🟡 低危",
+    "unknown": "⚪ 未知",
+}
+
+ANOMALY_TYPE_LABELS = {
+    "unusual_time": "非常用时间",
+    "unusual_ip": "非常用 IP",
+    "unusual_location": "非常用地点",
+    "multi_ip_login": "多 IP 登录",
+    "high_frequency": "高频 API 调用",
+    "failed_login_spike": "失败登录激增",
+    "sensitive_action": "敏感操作",
+    "unknown": "未知异常",
+}
 
 # 尝试导入存储模块
 try:
@@ -789,7 +809,66 @@ def search_history_logs(start_time=None, end_time=None, username=None, source_ip
     return get_sample_search_results()
 
 
-def create_sidebar():
+def format_risk_level(level):
+    """将风险等级格式化为前端展示文案。"""
+    normalized = str(level or "unknown").strip().lower()
+    return RISK_LEVEL_LABELS.get(normalized, RISK_LEVEL_LABELS["unknown"])
+
+
+def format_anomaly_type(anomaly_type):
+    """将异常类型格式化为前端展示文案。"""
+    normalized = str(anomaly_type or "unknown").strip().lower()
+    return ANOMALY_TYPE_LABELS.get(normalized, normalized.replace("_", " ").title())
+
+
+def build_anomaly_users_dataframe(dashboard_data):
+    """将 dashboard 数据转换为异常用户排行表。"""
+    ranking_rows = []
+    for index, user in enumerate(dashboard_data.get("anomaly_users", []), start=1):
+        reasons = user.get("reasons") or []
+        ranking_rows.append(
+            {
+                "排名": index,
+                "用户名": user.get("username") or "-",
+                "异常评分": float(user.get("risk_score", 0.0) or 0.0),
+                "风险等级": format_risk_level(user.get("risk_level")),
+                "异常事件数": int(user.get("anomaly_count", 0) or 0),
+                "风险原因": "；".join(str(reason) for reason in reasons) if reasons else "-",
+            }
+        )
+
+    return pd.DataFrame(ranking_rows)
+
+
+def build_risk_distribution_dataframe(dashboard_data):
+    """将 dashboard 数据转换为风险分布图表数据。"""
+    risk_distribution = dashboard_data.get("risk_distribution", {})
+    return pd.DataFrame(
+        {
+            "风险等级": [
+                RISK_LEVEL_LABELS["high"],
+                RISK_LEVEL_LABELS["medium"],
+                RISK_LEVEL_LABELS["low"],
+            ],
+            "事件数": [
+                int(risk_distribution.get("high", 0) or 0),
+                int(risk_distribution.get("medium", 0) or 0),
+                int(risk_distribution.get("low", 0) or 0),
+            ],
+        }
+    )
+
+
+def get_user_anomaly_events(dashboard_data, username):
+    """获取指定用户的异常事件。"""
+    return [
+        event
+        for event in dashboard_data.get("anomaly_events", [])
+        if event.get("username") == username
+    ]
+
+
+def create_sidebar(dashboard_data):
     """创建侧边栏导航"""
     with st.sidebar:
         st.markdown("---")
@@ -814,16 +893,17 @@ def create_sidebar():
         st.markdown("---")
 
         # 系统状态
+        summary = dashboard_data.get("summary", {})
         st.subheader("📊 系统状态")
-        st.metric("今日日志总量", "125,458", "+12%")
-        st.metric("当前 QPS", "1,258", "+5%")
-        st.metric("异常事件数", "68", "-8%")
+        st.metric("日志总量", str(summary.get("total_logs", 0)))
+        st.metric("安全评分", str(summary.get("security_score", 100)))
+        st.metric("异常事件数", str(summary.get("anomaly_count", 0)))
 
         st.markdown("---")
         st.caption("© 日志分析 AI 助手")
 
 
-def show_realtime_logs():
+def show_realtime_logs(dashboard_data):
     """显示实时日志流"""
     st.header("📡 实时日志流")
     st.markdown("实时展示日志数据，支持筛选和自动刷新")
@@ -862,20 +942,20 @@ def show_realtime_logs():
     # 统计信息
     st.divider()
     st.subheader("📊 实时统计")
+    summary = dashboard_data.get("summary", {})
 
-    # 从接口获取统计数据
     stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
     with stat_col1:
-        st.metric("今日日志总量", "125,458", "+12%")
+        st.metric("日志总量", str(summary.get("total_logs", 0)))
     with stat_col2:
         st.metric("当前 QPS", "1,258", "+5%")
     with stat_col3:
-        st.metric("异常日志数", "68", "-8%")
+        st.metric("异常事件数", str(summary.get("anomaly_count", 0)))
     with stat_col4:
-        st.metric("高危事件数", "15", "+2")
+        st.metric("安全评分", str(summary.get("security_score", 100)))
 
 
-def show_ueba_ranking():
+def show_ueba_ranking(dashboard_data):
     """显示 UEBA 异常用户排行"""
     st.header("👥 UEBA 异常用户排行")
     st.markdown("基于用户行为基线，识别异常用户并排序")
@@ -892,17 +972,14 @@ def show_ueba_ranking():
 
     # 异常用户 TOP10 排行
     st.subheader("🔴 异常用户 TOP10")
+    df_ranking = build_anomaly_users_dataframe(dashboard_data)
+    if risk_filter:
+        df_ranking = df_ranking[df_ranking["风险等级"].isin(risk_filter)]
+    df_ranking = df_ranking.reset_index(drop=True)
 
-    # 从接口获取异常用户数据
-    ranking_result = get_anomaly_users(time_range)
-
-    # 检查返回的数据格式（可能是字典或列表）
-    if isinstance(ranking_result, dict):
-        # 模拟数据格式
-        df_ranking = pd.DataFrame(ranking_result)
-    else:
-        # 实时数据格式（列表）
-        df_ranking = pd.DataFrame(ranking_result)
+    if df_ranking.empty:
+        st.info("当前没有可展示的异常用户。")
+        return
 
     # 使用进度条展示异常评分
     st.dataframe(
@@ -922,40 +999,39 @@ def show_ueba_ranking():
     selected_user = st.selectbox("选择用户查看详情", df_ranking["用户名"].tolist()[:5])
 
     if selected_user:
+        selected_user_row = df_ranking[df_ranking["用户名"] == selected_user].iloc[0]
+        anomaly_events = get_user_anomaly_events(dashboard_data, selected_user)
+
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("异常评分", "0.95")
+            st.metric("异常评分", f"{selected_user_row['异常评分']:.2f}")
         with col2:
-            st.metric("异常事件数", "15")
+            st.metric("异常事件数", str(int(selected_user_row["异常事件数"])))
         with col3:
-            st.metric("风险等级", "🔴 高危")
+            st.metric("风险等级", selected_user_row["风险等级"])
         with col4:
-            st.metric("处置状态", "待处置")
+            st.metric("分析来源", dashboard_data.get("source", "unknown"))
 
         st.divider()
 
         # 异常行为列表
         st.markdown("**🚨 异常行为列表：**")
 
-        anomaly_events = [
-            {"时间": "2024-01-21 03:15", "类型": "异常时间登录",
-             "描述": "凌晨 3 点在异地 IP 登录", "IP": "10.0.0.100", "地点": "广州"},
-            {"时间": "2024-01-21 03:20", "类型": "高频 API 调用",
-             "描述": "5 分钟内调用 API 50 次", "IP": "10.0.0.100", "地点": "广州"},
-            {"时间": "2024-01-21 03:25", "类型": "敏感数据访问",
-             "描述": "访问敏感数据接口 /api/sensitive/data", "IP": "10.0.0.100", "地点": "广州"},
-        ]
+        if not anomaly_events:
+            st.info("当前用户暂无异常事件详情。")
 
         for i, event in enumerate(anomaly_events):
-            with st.expander(f"⚠️ {event['时间']} - {event['类型']}"):
+            event_title = format_anomaly_type(event.get("anomaly_type"))
+            with st.expander(f"⚠️ {event.get('timestamp', '')} - {event_title}"):
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.markdown(f"**时间**: {event['时间']}")
-                    st.markdown(f"**类型**: {event['类型']}")
-                    st.markdown(f"**描述**: {event['描述']}")
+                    st.markdown(f"**时间**: {event.get('timestamp', '-')}")
+                    st.markdown(f"**类型**: {event_title}")
+                    st.markdown(f"**描述**: {event.get('reason', '-')}")
                 with col2:
-                    st.markdown(f"**IP**: {event['IP']}")
-                    st.markdown(f"**地点**: {event['地点']}")
+                    st.markdown(f"**用户**: {event.get('username', '-')}")
+                    st.markdown(f"**风险等级**: {format_risk_level(event.get('risk_level'))}")
+                    st.markdown(f"**风险评分**: {float(event.get('risk_score', 0.0) or 0.0):.2f}")
 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -964,28 +1040,26 @@ def show_ueba_ranking():
                 with col2:
                     if st.button("🤖 生成 AI 建议", key=f"ai_{i}"):
                         st.info("🔍 AI 分析中...")
-                        st.success("建议：立即冻结账号，联系用户确认，调查登录来源 IP")
+                        st.success("建议：立即冻结账号，联系用户确认，调查异常访问来源")
 
 
-def show_security_score():
+def show_security_score(dashboard_data):
     """显示安全评分看板"""
     st.header("🛡️ 安全评分看板")
     st.markdown("整体安全态势评分和趋势分析")
 
     # 安全评分卡片
     col1, col2, col3, col4 = st.columns(4)
-
-    # 从接口获取安全指标数据
-    metrics = get_security_metrics()
+    metrics = dashboard_data.get("summary", {})
 
     with col1:
-        st.metric("整体安全评分", str(metrics["security_score"]), "-5", delta_color="inverse")
+        st.metric("整体安全评分", str(metrics.get("security_score", 100)), delta_color="inverse")
     with col2:
-        st.metric("今日异常事件", str(metrics["anomaly_count"]), "+3", delta_color="inverse")
+        st.metric("异常事件数", str(metrics.get("anomaly_count", 0)), delta_color="inverse")
     with col3:
-        st.metric("高危用户数", str(metrics["high_risk_count"]), "-2", delta_color="normal")
+        st.metric("高危用户数", str(metrics.get("high_risk_users", 0)), delta_color="normal")
     with col4:
-        st.metric("已处置事件", str(metrics["disposed_count"]), "+5", delta_color="normal")
+        st.metric("整体风险等级", format_risk_level(metrics.get("overall_risk_level", "unknown")))
 
     st.divider()
 
@@ -1004,8 +1078,7 @@ def show_security_score():
 
     with col1:
         st.subheader("⚠️ 风险等级分布")
-        # 从接口获取风险等级分布数据
-        risk_data = get_risk_distribution()
+        risk_data = build_risk_distribution_dataframe(dashboard_data)
         st.bar_chart(risk_data.set_index("风险等级"))
 
     with col2:
@@ -1019,49 +1092,24 @@ def show_security_score():
     st.subheader("📄 日报生成")
 
     if st.button("📊 生成今日安全简报", type="primary", use_container_width=True):
+        risk_distribution = dashboard_data.get("risk_distribution", {})
         # 待实现接口：从后端获取真实的安全简报数据
-        st.markdown("""
+        st.markdown(f"""
         **今日安全态势简报**
+        📅 日期: {datetime.now().strftime('%Y-%m-%d')}
 
-        📅 日期: 2024-01-21
-
-        🛡️ 整体安全评分: 75/100
+        🛡️ 整体安全评分: {metrics.get("security_score", 100)}/100
 
         📊 关键指标:
-        - 日志总量: 125,458 条 (+12%)
-        - 异常事件: 12 起 (+3)
-        - 高危用户: 5 人 (-2)
-        - 已处置: 8 起 (+5)
+        - 日志总量: {metrics.get("total_logs", 0)} 条
+        - 异常事件: {metrics.get("anomaly_count", 0)} 起
+        - 高危用户: {metrics.get("high_risk_users", 0)} 人
+        - 整体风险等级: {format_risk_level(metrics.get("overall_risk_level", "unknown"))}
 
         🚨 主要威胁:
-        1. 账号接管攻击: 3 起
-        2. 异常访问: 15 起
-        3. 暴力破解: 8 起
-
-        ✅ 处置建议:
-        - 立即冻结高危账号
-        - 加强异地登录验证
-        - 启用多因素认证
-        """)
-    if st.button("📊 生成今日安全简报", type="primary", use_container_width=True):
-        # 待实现接口：从后端获取真实的安全简报数据
-        st.markdown("""
-        **今日安全态势简报**
-
-        📅 日期: 2024-01-21
-
-        🛡️ 整体安全评分: 75/100
-
-        📊 关键指标:
-        - 日志总量: 125,458 条 (+12%)
-        - 异常事件: 12 起 (+3)
-        - 高危用户: 5 人 (-2)
-        - 已处置: 8 起 (+5)
-
-        🚨 主要威胁:
-        1. 账号接管攻击: 3 起
-        2. 异常访问: 15 起
-        3. 暴力破解: 8 起
+        1. 高危事件: {risk_distribution.get("high", 0)} 起
+        2. 中危事件: {risk_distribution.get("medium", 0)} 起
+        3. 低危事件: {risk_distribution.get("low", 0)} 起
 
         ✅ 处置建议:
         - 立即冻结高危账号
@@ -1092,76 +1140,6 @@ def show_ai_suggestions():
     # 根据筛选条件过滤建议（接口已处理过滤，这里保留冗余过滤作为双重保障）
     filtered_suggestions = []
     for suggestion in suggestions:
-        # 状态筛选
-        if status_filter != "全部" and suggestion["处置状态"] != status_filter:
-            continue
-        # 风险等级筛选
-        if risk_filter != "全部" and suggestion["风险等级"] != risk_filter:
-            continue
-        filtered_suggestions.append(suggestion)
-
-    # 按处置状态分类显示
-    status_order = ["待处置", "处置中", "已处置", "误报"]
-    for status in status_order:
-        status_suggestions = [s for s in filtered_suggestions if s["处置状态"] == status]
-        if status_suggestions:
-            # 根据风险等级排序（高危 > 中危 > 低危）
-            risk_order = {"🔴 高危": 0, "🟠 中危": 1, "🟡 低危": 2}
-            status_suggestions.sort(key=lambda x: risk_order[x["风险等级"]])
-
-            # 显示状态分组
-            st.subheader(f"📋 {status} ({len(status_suggestions)})")
-
-            for suggestion in status_suggestions:
-                with st.expander(
-                    f"{suggestion['风险等级']} {suggestion['威胁类型']} - {suggestion['用户']} ({suggestion['生成时间']})",
-                    expanded=False
-                ):
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("风险等级", suggestion["风险等级"])
-                    with col2:
-                        st.metric("置信度", suggestion["置信度"])
-                    with col3:
-                        st.metric("处置状态", suggestion["处置状态"])
-
-                    st.divider()
-
-                    st.markdown(f"**📝 异常描述：**\n{suggestion['异常描述']}")
-                    st.info(f"**🤖 AI 分析：**\n{suggestion['AI 分析']}")
-                    st.warning(f"**💡 处置建议：**\n{suggestion['处置建议']}")
-
-                    st.divider()
-
-                    # 按钮行
-                    col1, col2, col3 = st.columns(3)
-                    show_logs = False
-
-                    with col1:
-                        if st.button("🔍 查看详细日志", key=f"detail_{suggestion['id']}"):
-                            show_logs = True
-                    with col2:
-                        if st.button("⚠️ 标记为误报", key=f"false_{suggestion['id']}"):
-                            pass
-                    with col3:
-                        if st.button("✅ 标记为已处置", key=f"resolve_{suggestion['id']}"):
-                            pass
-
-                    # 日志内容显示在按钮行下方，占满整个宽度
-                    if show_logs:
-                        logs = [
-                            "2024-01-21 03:15:00 LOGIN user=zhangsan ip=10.0.0.100 status=SUCCESS",
-                            "2024-01-21 03:16:00 API_CALL user=zhangsan endpoint=/api/sensitive/data count=1",
-                            "2024-01-21 03:17:00 API_CALL user=zhangsan endpoint=/api/sensitive/data count=2",
-                        ]
-                        st.markdown("**相关日志：**")
-                        for log in logs:
-                            st.code(log)
-            st.divider()
-
-    # 如果没有符合条件的建议
-    if not filtered_suggestions:
-        st.info("没有符合条件的处置建议")
         # 状态筛选
         if status_filter != "全部" and suggestion["处置状态"] != status_filter:
             continue
@@ -1355,15 +1333,20 @@ def show_history_search():
 def main():
     """主函数"""
     init_session_state()
-    create_sidebar()
+    dashboard_data = get_dashboard_data()
+    create_sidebar(dashboard_data)
+
+    if dashboard_data.get("source") == "mock" and dashboard_data.get("error"):
+        error = dashboard_data["error"]
+        st.warning(f"当前展示 fallback 数据: {error.get('message', '未知错误')}")
 
     # 根据选择显示对应页面
     if st.session_state.current_page == "实时日志流":
-        show_realtime_logs()
+        show_realtime_logs(dashboard_data)
     elif st.session_state.current_page == "UEBA 异常排行":
-        show_ueba_ranking()
+        show_ueba_ranking(dashboard_data)
     elif st.session_state.current_page == "安全评分看板":
-        show_security_score()
+        show_security_score(dashboard_data)
     elif st.session_state.current_page == "AI 处置建议":
         show_ai_suggestions()
     elif st.session_state.current_page == "历史查询":
