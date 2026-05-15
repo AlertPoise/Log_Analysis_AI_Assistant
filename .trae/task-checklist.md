@@ -8,6 +8,7 @@
 - ✅ 开发规范制定完成
 - ✅ 可视化模块 UI 开发完成
 - ✅ 可视化模块优化和测试完成
+- ✅ 数据存储模块（Kafka + ClickHouse）测试通过
 - 🔲 核心功能开发中
 
 ## 已完成功能
@@ -76,13 +77,13 @@
 - [ ] 添加解析器单元测试
 
 #### 3. 数据存储模块 (`src/storage/`)
-- [ ] 实现 KafkaClient 的批量发送功能
-- [ ] 实现 KafkaClient 的消费功能
-- [ ] 实现 ClickHouse 连接管理
-- [ ] 实现 ClickHouse 批量插入
-- [ ] 实现 ClickHouse 查询接口
-- [ ] 实现 ClickHouse 聚合查询
-- [ ] 添加存储模块集成测试
+- [x] 实现 KafkaClient 的批量发送功能 ✅
+- [x] 实现 KafkaClient 的消费功能 ✅
+- [x] 实现 ClickHouse 连接管理 ✅
+- [x] 实现 ClickHouse 批量插入 ✅
+- [x] 实现 ClickHouse 查询接口 ✅
+- [x] 实现 ClickHouse 聚合查询 ✅
+- [x] 添加存储模块集成测试 ✅
 
 #### 4. 用户行为建模模块 (`src/behavior/`)
 - [ ] 实现用户画像的数据提取逻辑
@@ -263,5 +264,5 @@ git push origin feature/功能名称
 
 ---
 
-**更新日期**: 2026-03-21
+**更新日期**: 2026-04-29
 **下次更新**: 每日站会后更新进度

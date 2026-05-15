@@ -1,108 +1,25 @@
-# Filebeat 配置文件
-# 用于采集各类日志并发送到 Kafka
 
 filebeat.inputs:
-  # 系统日志
-  - type: log
-    enabled: true
-    paths:
-      - /var/log/syslog
-      - /var/log/auth.log
-    fields:
-      log_type: system
-      source: linux
-    fields_under_root: true
-    multiline.pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
-    multiline.negate: true
-    multiline.match: after
-    
-  # VPN 日志
-  - type: log
-    enabled: true
-    paths:
-      - /var/log/vpn/*.log
-    fields:
-      log_type: vpn
-      source: vpn_server
-    fields_under_root: true
-    
-  # OA 系统日志
-  - type: log
-    enabled: true
-    paths:
-      - /var/log/oa/*.log
-    fields:
-      log_type: oa
-      source: oa_system
-    fields_under_root: true
-    
-  # Nginx 访问日志
-  - type: log
-    enabled: true
-    paths:
-      - /var/log/nginx/access.log
-    fields:
-      log_type: nginx_access
-      source: nginx
-    fields_under_root: true
-    parsers:
-      - nginx:
-          access: true
-          
-  # API 日志
-  - type: log
-    enabled: true
-    paths:
-      - /var/log/api/*.log
-    fields:
-      log_type: api
-      source: api_server
-    fields_under_root: true
-    
-  # Windows 事件日志 (需要在 Windows 上运行 Filebeat)
-  - type: winlog
-    enabled: true
-    event_logs:
-      - name: Application
-        level: warning,error
-      - name: System
-        level: warning,error
-      - name: Security
-    fields:
-      log_type: windows_event
-      source: windows
-    fields_under_root: true
+- type: log
+  enabled: true
+  paths:
+    - /home/syb/Downloads/project/Log_Analysis_AI_Assistant/tests/collectors/sample_logs/*.log
+  fields:
+    log_type: vpn
+  fields_under_root: true
 
-# processors 用于处理日志字段
-processors:
-  - add_host_metadata:
-      when.not.contains.tags: forwarded
-  - add_cloud_metadata: ~
-  - add_docker_metadata: ~
-  - timestamp:
-      field: timestamp
-      layouts:
-        - '2006-01-02 15:04:05'
-        - '2006/01/02 15:04:05'
-      test:
-        - '2024-01-15 10:30:45'
-
-# 输出到 Kafka
 output.kafka:
-  hosts: ["${KAFKA_BOOTSTRAP_SERVERS}"]
-  topic: "${KAFKA_LOGS_TOPIC}"
-  compression: gzip
+  hosts: ["localhost:9092"]
+  topic: "logs_raw"
+  partition.round_robin:
+    reachable_only: false
   required_acks: 1
-  max_retries: 3
-  backoff:
-    init: 1s
-    max: 10s
+  compression: gzip
+  max_message_bytes: 1000000
 
-# logging 配置
-logging.level: info
+logging.level: warning
 logging.to_files: true
 logging.files:
-  path: ${LOG_OUTPUT_DIR}
-  name: filebeat.log
+  path: /home/syb/Downloads/project/Log_Analysis_AI_Assistant/filebeat_logs
+  name: filebeat
   keepfiles: 7
-  permissions: 0644

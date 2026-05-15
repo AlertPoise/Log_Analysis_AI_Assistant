@@ -1,80 +1,64 @@
 """
 采集器基类
-TODO: 定义采集器接口规范
-
-开发任务:
-1. 定义采集器基类接口
-2. 实现日志验证方法
-3. 实现日志丰富方法
+定义了采集器通用接口，实现了日志验证与丰富的基础逻辑。
 """
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Generator
 from datetime import datetime
-
+import re
 
 class BaseCollector(ABC):
     """采集器基类"""
     
     def __init__(self, name: str, config: Dict[str, Any]):
-        """
-        初始化采集器
-        
-        Args:
-            name: 采集器名称
-            config: 采集器配置
-        """
         self.name = name
         self.config = config
         self.is_running = False
         
     @abstractmethod
     def collect(self) -> Generator[Dict[str, Any], None, None]:
-        """
-        采集日志
-        
-        Yields:
-            日志记录字典
-        """
-        # TODO: 实现日志采集逻辑
+        """采集日志，yield 每条日志字典"""
         pass
     
     @abstractmethod
     def start(self):
         """启动采集器"""
-        # TODO: 实现启动逻辑
         pass
     
     @abstractmethod
     def stop(self):
         """停止采集器"""
-        # TODO: 实现停止逻辑
         pass
     
     def validate_log(self, log_data: Dict[str, Any]) -> bool:
         """
-        验证日志数据
-        
-        Args:
-            log_data: 日志数据
-            
-        Returns:
-            是否有效
+        验证日志数据完整性
+        要求必须包含: timestamp, log_type, source, message
         """
-        # TODO: 实现验证逻辑
-        required_fields = ['timestamp', 'log_type', 'source']
-        return all(field in log_data for field in required_fields)
+        required = ['timestamp', 'log_type', 'source', 'message']
+        if not all(k in log_data for k in required):
+            return False
+        # 时间戳格式校验（ISO格式），兼容 'Z' 结尾的 UTC 表示
+        try:
+            ts = log_data['timestamp']
+            # 将 'Z' 替换为 '+00:00'，因为 fromisoformat 不支持 'Z'
+            if ts.endswith('Z'):
+                ts = ts[:-1] + '+00:00'
+            datetime.fromisoformat(ts)
+        except Exception:
+            return False
+        # log_type 必须在预设范围内（可在子类中重写）
+        return True
     
     def enrich_log(self, log_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        丰富日志数据
-        
-        Args:
-            log_data: 原始日志数据
-            
-        Returns:
-            丰富后的日志数据
+        丰富日志：添加采集器名称、采集时间、唯一ID
         """
-        # TODO: 实现日志丰富逻辑
-        log_data['collected_at'] = datetime.now().isoformat()
-        log_data['collector'] = self.name
-        return log_data
+        enriched = log_data.copy()
+        enriched['collector'] = self.name
+        enriched['collected_at'] = datetime.now().isoformat()
+        # 可选：生成简单消息ID
+        import hashlib
+        raw = f"{enriched.get('timestamp')}{enriched.get('source')}{enriched.get('message')}"
+        enriched['msg_id'] = hashlib.md5(raw.encode()).hexdigest()[:16]
+        return enriched

@@ -1,0 +1,75 @@
+# 日志解析器配置文件
+
+# 批处理配置
+batch_size: 1000
+batch_timeout: 5.0
+
+# 数据清洗规则
+cleaning_rules:
+  # 设置默认值
+  - type: default_value
+    field: severity_level
+    default: INFO
+
+  # 字段转换
+  - type: transform
+    field: username
+    function: lowercase
+
+  # 移除敏感字段
+  - type: remove_field
+    field: password
+
+  # 移除调试日志
+  - type: remove_field
+    field: debug_info
+
+# 字段映射
+field_mappings:
+  user: username
+  ip: source_ip
+  src_ip: source_ip
+  dst_ip: destination_ip
+  client_ip: source_ip
+  remote_addr: source_ip
+
+# 过滤器
+filters:
+  # 过滤测试账号
+  - field: username
+    operator: not_equals
+    value: test
+
+  # 过滤健康检查请求
+  - field: uri
+    operator: not_equals
+    value: /health
+
+  # 只保留特定日志类型
+  - field: log_type
+    operator: equals
+    value: vpn
+
+# 启用的解析模式
+enabled_patterns:
+  - vpn_login
+  - oa_access
+  - api_request
+  - nginx_access
+  - syslog_auth
+
+# 日志类型映射
+log_type_mappings:
+  vpn:
+    - vpn
+    - fortinet
+    - cisco_vpn
+  oa:
+    - oa
+    - workflow
+  api:
+    - api
+    - rest
+  system:
+    - syslog
+    - windows_event

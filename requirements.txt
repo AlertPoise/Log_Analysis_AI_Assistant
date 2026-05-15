@@ -1,9 +1,17 @@
-# Behavior 模块运行依赖
-pydantic==2.5.0
-pydantic-settings==2.1.0
-python-dotenv==1.0.0
-python-dateutil==2.8.2
-loguru==0.7.2
+# 项目运行依赖
+kafka-python==2.3.0
+clickhouse-connect>=0.7.0
+elasticsearch>=8.0.0
+streamlit==1.56.0
+fpdf==1.7.2
+loguru>=0.7.2,<1.0.0
 
-# Behavior 模块测试依赖
+# 配置与数据模型
+pydantic>=2.5.0,<3.0.0
+pydantic-settings>=2.1.0,<3.0.0
+python-dotenv==1.0.0
+python-dateutil>=2.8.2,<3.0.0
+PyYAML>=6.0.2,<7.0.0
+
+# 测试依赖
 pytest==7.4.3
