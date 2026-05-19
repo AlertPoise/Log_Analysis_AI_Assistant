@@ -66,10 +66,6 @@ except ImportError as e:
     logger.warning(f"⚠️ 无法导入 AI 模块: {e}")
 
 from fpdf import FPDF
-from src.behavior.api import (
-    analyze_behavior_for_frontend,
-    analyze_behavior_from_clickhouse,
-)
 
 # ClickHouse 客户端辅助函数
 def get_clickhouse_client():
@@ -469,25 +465,36 @@ def build_demo_behavior_payload() -> Dict[str, Any]:
 
 
 def get_behavior_demo_result() -> Dict[str, Any]:
-    """调用 behavior 前端接口生成演示分析结果，失败时返回稳定结构。"""
-    try:
-        result = analyze_behavior_for_frontend(build_demo_behavior_payload())
-        return {**result, "source": "behavior_demo"}
-    except Exception as exc:
-        logger.exception("获取 behavior 演示分析失败")
-        return {
-            "success": False,
-            "source": "behavior_demo",
-            "target_user": None,
-            "baseline": {},
-            "profile": {},
-            "anomalies": [],
-            "summary": {},
-            "error": {
-                "code": "DASHBOARD_BEHAVIOR_DEMO_ERROR",
-                "message": str(exc),
-            },
-        }
+    """返回稳定演示数据；真实 behavior 模块将在下一轮重新设计。"""
+    payload = build_demo_behavior_payload()
+    target_user = payload["target_user"]
+    return {
+        "success": True,
+        "source": "behavior_demo",
+        "target_user": target_user,
+        "baseline": {
+            "sample_count": len(payload["history_logs"]),
+            "is_reliable": False,
+        },
+        "profile": {
+            "username": target_user,
+            "common_locations": ["上海"],
+            "common_ips": ["101.89.15.237", "117.136.0.238"],
+        },
+        "anomalies": [
+            {
+                "timestamp": payload["detection_logs"][0]["timestamp"],
+                "type": "demo_unusual_location",
+                "description": "演示数据：非常用地点登录",
+                "risk_score": 0.82,
+            }
+        ],
+        "summary": {
+            "risk_level": "high",
+            "max_score": 0.82,
+            "message": "旧 behavior 模块已移除，当前为 dashboard 演示占位数据。",
+        },
+    }
 
 
 def convert_behavior_result_for_dashboard(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -508,29 +515,12 @@ def convert_behavior_result_for_dashboard(result: Dict[str, Any]) -> Dict[str, A
 
 
 def get_behavior_analysis_for_dashboard(target_user: str = "zhangsan") -> Dict[str, Any]:
-    """优先读取 ClickHouse behavior，失败时回退到演示分析结果。"""
-    try:
-        clickhouse_result = analyze_behavior_from_clickhouse(target_user)
-    except Exception as exc:
-        logger.exception("获取 ClickHouse behavior 分析失败")
-        clickhouse_result = {
-            "success": False,
-            "source": "clickhouse",
-            "error": str(exc),
-        }
-
-    if clickhouse_result.get("success"):
-        dashboard_data = convert_behavior_result_for_dashboard(clickhouse_result)
-        dashboard_data["source"] = "clickhouse"
-        dashboard_data["fallback_reason"] = None
-        dashboard_data["clickhouse_error"] = None
-        return dashboard_data
-
+    """旧 behavior 模块已移除，暂时回退到演示分析结果。"""
     demo_result = get_behavior_demo_result()
     dashboard_data = convert_behavior_result_for_dashboard(demo_result)
     dashboard_data["source"] = dashboard_data.get("source") or "behavior_demo"
-    dashboard_data["fallback_reason"] = clickhouse_result.get("error")
-    dashboard_data["clickhouse_error"] = clickhouse_result.get("error")
+    dashboard_data["fallback_reason"] = "旧 behavior 模块已移除，等待下一轮重新设计。"
+    dashboard_data["clickhouse_error"] = None
     return dashboard_data
 
 
