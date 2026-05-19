@@ -285,14 +285,14 @@ store.save_xxx()
 代码文件：
 
 ```text
-src/ueba/__init__.py
-src/ueba/config.py
-src/ueba/schemas.py
-src/ueba/repository.py
-src/ueba/aggregate_merger.py
-src/ueba/baseline_builder.py
-src/ueba/baseline_store.py
-src/ueba/service.py
+src/behavior/__init__.py
+src/behavior/config.py
+src/behavior/schemas.py
+src/behavior/repository.py
+src/behavior/aggregate_merger.py
+src/behavior/baseline_builder.py
+src/behavior/baseline_store.py
+src/behavior/service.py
 scripts/build_ueba_baseline.py
 ```
 

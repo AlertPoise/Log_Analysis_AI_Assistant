@@ -93,6 +93,16 @@ WHERE username != ''
 4. 不允许直接拼接用户输入
 ```
 
+参数占位符说明：
+
+```text
+1. 文档中的 {start_time:DateTime}、{end_time:DateTime}、{limit:UInt32} 只表示逻辑参数
+2. 实际代码实现时，必须以项目现有 ClickHouse 封装为准
+3. 当前项目使用 clickhouse_connect / ClickHouseClient 的 client.query(query, parameters=params) 参数化查询方式时，应采用该客户端支持的参数写法
+4. 禁止通过字符串拼接方式把 start_time、end_time、limit 等用户输入直接拼进 SQL
+5. Repository 层负责封装 SQL 参数，不允许上层模块拼 SQL
+```
+
 ---
 
 ## 4. 用户总览统计

@@ -2,10 +2,10 @@
 
 ## 1. 推荐目录结构
 
-建议在项目中新增：
+建议在 behavior 模块目录下实现 UEBA 行为基线能力：
 
 ```text
-src/ueba/
+src/behavior/
 ├── __init__.py
 ├── config.py
 ├── schemas.py

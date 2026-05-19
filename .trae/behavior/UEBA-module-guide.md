@@ -222,10 +222,10 @@ baseline_json
 
 ## 4. 建议目录结构
 
-建议新增 UEBA 模块目录：
+建议在 behavior 模块目录下实现 UEBA 行为基线能力：
 
 ```text
-src/ueba/
+src/behavior/
 ├── __init__.py
 ├── config.py
 ├── schemas.py
@@ -548,12 +548,15 @@ PREWHERE timestamp >= {start_time:DateTime}
 WHERE username != ''
 ```
 
-如果当前数据库客户端不支持 `{name:Type}` 参数语法，也可以使用对应客户端提供的参数化方式。
+这里的 `{start_time:DateTime}`、`{end_time:DateTime}`、`{limit:UInt32}` 只表示逻辑参数。
+
+实际代码实现必须以项目现有 ClickHouse 封装为准。当前项目使用 clickhouse_connect / ClickHouseClient 的 `client.query(query, parameters=params)` 参数化查询方式时，应采用该客户端支持的参数写法。
 
 重点是：
 
 ```text
-必须参数化，不要拼接用户输入的时间字符串。
+必须参数化，不要通过字符串拼接把 start_time、end_time、limit 等用户输入直接拼进 SQL。
+Repository 层负责封装 SQL 参数，不允许上层模块拼 SQL。
 ```
 
 ---
@@ -1923,7 +1926,7 @@ UebaService
 后续可以新增：
 
 ```text
-src/ueba/anomaly_scorer.py
+src/behavior/anomaly_scorer.py
 ```
 
 输入：
@@ -2004,13 +2007,13 @@ IP ASN / 国家 / 城市
 第一版 UEBA 模块完成后，应该至少包含：
 
 ```text
-src/ueba/config.py
-src/ueba/schemas.py
-src/ueba/repository.py
-src/ueba/aggregate_merger.py
-src/ueba/baseline_builder.py
-src/ueba/baseline_store.py
-src/ueba/service.py
+src/behavior/config.py
+src/behavior/schemas.py
+src/behavior/repository.py
+src/behavior/aggregate_merger.py
+src/behavior/baseline_builder.py
+src/behavior/baseline_store.py
+src/behavior/service.py
 scripts/build_ueba_baseline.py
 ```
 
