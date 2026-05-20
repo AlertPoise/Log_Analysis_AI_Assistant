@@ -71,7 +71,7 @@ python scripts/build_ueba_baseline.py \
 后续可以提供 API：
 
 ```text
-POST /api/ueba/baseline/build
+POST /api/behavior/baseline/build
 ```
 
 请求示例：

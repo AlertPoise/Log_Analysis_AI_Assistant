@@ -181,8 +181,8 @@ config.py 只是第一版默认配置来源
 不推荐：
 
 ```python
-from src.ueba.config import READ_BATCH_SIZE
-from src.ueba.config import TOP_IP_LIMIT
+from src.behavior.config import READ_BATCH_SIZE
+from src.behavior.config import TOP_IP_LIMIT
 ```
 
 推荐：
@@ -326,7 +326,7 @@ class UebaBaselineConfig:
 后期可以提供接口：
 
 ```text
-POST /api/ueba/baseline/build
+POST /api/behavior/baseline/build
 ```
 
 请求体示例：

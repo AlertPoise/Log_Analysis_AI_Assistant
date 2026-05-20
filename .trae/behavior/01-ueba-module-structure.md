@@ -89,7 +89,7 @@ config.py 是临时默认配置，不是长期最终配置中心。
 不推荐：
 
 ```python
-from src.ueba.config import TOP_IP_LIMIT
+from src.behavior.config import TOP_IP_LIMIT
 ```
 
 推荐：

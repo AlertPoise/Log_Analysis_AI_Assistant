@@ -5,14 +5,16 @@
 当前 behavior/UEBA 模块开发依据优先级如下：
 
 1. 用户当前明确要求
-2. .trae/behavior/UEBA-module-guide.md
-3. .trae/behavior/00-ueba-overview.md 至 .trae/behavior/05-ueba-script-and-codex-rules.md
-4. .trae/behavior/99-outdated-sources.md
+2. .trae/behavior/99-outdated-sources.md
+3. .trae/behavior/UEBA-module-guide.md
+4. .trae/behavior/00-ueba-overview.md 至 .trae/behavior/05-ueba-script-and-codex-rules.md
 5. .trae/project-rules.md
 6. .trae/ai-assistant-guide.md
 7. 当前真实代码文件树
 
-如果旧 README、旧 API 文档、旧任务清单、旧 SQL 文件、旧可视化适配逻辑与当前 UEBA 第一版目标冲突，必须以用户当前要求和 .trae/behavior 下的模块 prompt 为准。
+如果旧 README、旧 API 文档、旧任务清单、旧 SQL 文件、旧可视化适配逻辑与当前 UEBA 第一版目标冲突，必须以用户当前要求和 .trae/behavior/99-outdated-sources.md 为准。
+
+.trae/behavior/99-outdated-sources.md 的作用是防止过时信息污染当前 UEBA 第一版开发。
 
 ## 2. 当前 UEBA 第一版不可偏离的目标
 
