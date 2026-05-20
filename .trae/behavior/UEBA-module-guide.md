@@ -299,10 +299,13 @@ class UebaBaselineConfig:
     top_vpn_gateway_limit: int = 10
     top_fail_reason_limit: int = 10
     top_client_software_limit: int = 10
+    top_action_limit: int = 20
+    top_result_limit: int = 10
 
     common_hour_min_ratio: float = 0.05
     common_source_ip_min_ratio: float = 0.03
     common_source_city_min_ratio: float = 0.03
+    common_vpn_gateway_min_ratio: float = 0.03
     model_version: str = "ueba_baseline_v1"
 
     write_batch_size: int = 1000
@@ -757,7 +760,7 @@ for row in source_country_rows:
     features[username].source_country_counts[str(row["source_country"])] = int(row["cnt"])
 ```
 
-合并接口：
+合并 VPN 网关：
 
 ```python
 for row in vpn_gateway_rows:
@@ -984,7 +987,6 @@ common_source_countries = build_count_ratio_items(
     total=feature.sample_count,
     limit=config.top_source_country_limit,
 )
-)
 ```
 
 保存格式示例：
@@ -1036,10 +1038,8 @@ def build_distribution(counts: dict[str, int], total: int) -> dict[str, float]:
 
 ```json
 {
-  "API_CALL": 0.81,
-  "LOGIN_SUCCESS": 0.12,
-  "LOGOUT": 0.05,
-  "LOGIN_FAILED": 0.02
+  "LOGIN": 0.95,
+  "REAUTH": 0.05
 }
 ```
 
@@ -1132,19 +1132,16 @@ max_daily_events = max(feature.daily_counts.values(), default=0)
     {"value": "北京", "count": 9500, "ratio": 0.791667}
   ],
   "common_vpn_gateways": [
-    {"value": "/api/login", "count": 3000, "ratio": 0.25},
-    {"value": "/api/order/query", "count": 2400, "ratio": 0.2}
+    {"value": "vpn-gw-01", "count": 3000, "ratio": 0.25},
+    {"value": "ssl-vpn-gateway-a", "count": 2400, "ratio": 0.2}
   ],
   "action_distribution": {
-    "API_CALL": 0.81,
-    "LOGIN_SUCCESS": 0.12,
-    "LOGOUT": 0.05,
-    "LOGIN_FAILED": 0.02
+    "LOGIN": 0.95,
+    "REAUTH": 0.05
   },
   "result_distribution": {
     "SUCCESS": 0.96,
-    "FAILED": 0.03,
-    "ERROR": 0.01
+    "FAIL": 0.04
   },
   "failed_rate": 0.026667,
   "avg_daily_events": 400.0,

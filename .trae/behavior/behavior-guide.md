@@ -878,11 +878,11 @@ BaselineBuildResult
 16. repository.fetch_protocol_distribution()
 17. repository.fetch_daily_event_counts()
 18. repository.fetch_session_metric_summary()
-11. aggregate_merger.merge()
-12. baseline_builder.build_baselines()
-13. baseline_store.save_baselines()
-14. 统计 reliable/unreliable/total_log_count
-15. 返回 BaselineBuildResult
+19. aggregate_merger.merge()
+20. baseline_builder.build_baselines()
+21. baseline_store.save_baselines()
+22. 统计 reliable / unreliable / total_log_count
+23. 返回 BaselineBuildResult
 ```
 
 ### 验收标准
