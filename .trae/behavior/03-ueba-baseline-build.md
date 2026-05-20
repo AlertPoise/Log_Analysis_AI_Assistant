@@ -22,34 +22,24 @@ list[UserBaseline]
 
 该模块不读数据库，不写数据库，只负责业务计算。
 
----
-
-## 2. AggregateMerger 合并结果
-
-在进入基线构建之前，需要先将多个 SQL 聚合结果合并。
-
-合并模块建议命名为：
-
-```text
-aggregate_merger.py
-```
+当前登录主表不包含 `endpoint`、`status`、`location` 字段；基线构建应围绕 `source_ip`、`destination_ip`、`src_country`、`src_city`、`vpn_gateway`、`action`、`event_type`、`result`、`fail_reason`、`auth_method`、`client_software`、`protocol`、`session_duration_sec`、`bytes_sent`、`bytes_recv` 等字段的聚合结果展开。
 
 ---
 
-## 3. AggregateMerger 职责
+## 2. AggregateMerger 职责
 
 `aggregate_merger.py` 负责：
 
 ```text
 1. 接收 repository.py 返回的多组聚合结果
 2. 按 username 创建 UserAggregateFeature
-3. 将小时、IP、地区、接口、行为、状态、每日事件数合并进去
+3. 将小时、来源 IP、目标 IP、来源国家、来源城市、VPN 网关、行为、事件类型、结果、失败原因、认证方式、客户端软件、协议、每日事件数、会话和流量统计合并进去
 4. 返回 dict[str, UserAggregateFeature]
 ```
 
 ---
 
-## 4. 合并入口
+## 3. 合并入口
 
 ```python
 class AggregateMerger:
@@ -57,21 +47,29 @@ class AggregateMerger:
         self,
         user_summary_rows: list[dict],
         hour_rows: list[dict],
-        ip_rows: list[dict],
-        location_rows: list[dict],
-        endpoint_rows: list[dict],
+        source_ip_rows: list[dict],
+        destination_ip_rows: list[dict],
+        source_country_rows: list[dict],
+        source_city_rows: list[dict],
+        vpn_gateway_rows: list[dict],
         action_rows: list[dict],
-        status_rows: list[dict],
+        event_type_rows: list[dict],
+        result_rows: list[dict],
+        fail_reason_rows: list[dict],
+        auth_method_rows: list[dict],
+        client_software_rows: list[dict],
+        protocol_rows: list[dict],
         daily_rows: list[dict],
+        session_metric_rows: list[dict],
     ) -> dict[str, UserAggregateFeature]:
         ...
 ```
 
 ---
 
-## 5. 合并规则
+## 4. 合并规则
 
-### 5.1 先合并用户总览
+### 4.1 先合并用户总览
 
 用户总览是骨架。
 
@@ -85,6 +83,8 @@ for row in user_summary_rows:
         username=username,
         sample_count=int(row["sample_count"]),
         failed_count=int(row["failed_count"]),
+        off_hours_count=int(row.get("off_hours_count", 0)),
+        unusual_ip_count=int(row.get("unusual_ip_count", 0)),
         active_days=int(row["active_days"]),
         first_seen=row.get("first_seen"),
         last_seen=row.get("last_seen"),
@@ -93,98 +93,65 @@ for row in user_summary_rows:
 
 ---
 
-### 5.2 合并小时分布
+### 4.2 合并计数字段
+
+计数字段合并逻辑保持一致：不存在用户则跳过，`cnt` 为空则跳过或按 0 处理。
 
 ```python
-for row in hour_rows:
+for row in source_ip_rows:
     username = row["username"]
     if username not in features:
         continue
+    features[username].source_ip_counts[str(row["source_ip"])] = int(row["cnt"])
 
-    features[username].hour_counts[int(row["active_hour"])] = int(row["cnt"])
+for row in destination_ip_rows:
+    username = row["username"]
+    if username not in features:
+        continue
+    features[username].destination_ip_counts[str(row["destination_ip"])] = int(row["cnt"])
+
+for row in source_country_rows:
+    username = row["username"]
+    if username not in features:
+        continue
+    features[username].source_country_counts[str(row["source_country"])] = int(row["cnt"])
+
+for row in source_city_rows:
+    username = row["username"]
+    if username not in features:
+        continue
+    features[username].source_city_counts[str(row["source_city"])] = int(row["cnt"])
+
+for row in vpn_gateway_rows:
+    username = row["username"]
+    if username not in features:
+        continue
+    features[username].vpn_gateway_counts[str(row["vpn_gateway"])] = int(row["cnt"])
+```
+
+同样方式合并：
+
+```text
+action_counts
+event_type_counts
+result_counts
+fail_reason_counts
+auth_method_counts
+client_software_counts
+protocol_counts
+daily_counts
+```
+
+会话和流量统计应合并到：
+
+```text
+session_metric_summary
+traffic_metric_summary
 ```
 
 ---
 
-### 5.3 合并 IP
-
-```python
-for row in ip_rows:
-    username = row["username"]
-    if username not in features:
-        continue
-
-    features[username].ip_counts[str(row["source_ip"])] = int(row["cnt"])
-```
-
----
-
-### 5.4 合并地区
-
-```python
-for row in location_rows:
-    username = row["username"]
-    if username not in features:
-        continue
-
-    features[username].location_counts[str(row["location"])] = int(row["cnt"])
-```
-
----
-
-### 5.5 合并接口
-
-```python
-for row in endpoint_rows:
-    username = row["username"]
-    if username not in features:
-        continue
-
-    features[username].endpoint_counts[str(row["endpoint_path"])] = int(row["cnt"])
-```
-
----
-
-### 5.6 合并行为类型
-
-```python
-for row in action_rows:
-    username = row["username"]
-    if username not in features:
-        continue
-
-    features[username].action_counts[str(row["action"])] = int(row["cnt"])
-```
-
----
-
-### 5.7 合并状态
-
-```python
-for row in status_rows:
-    username = row["username"]
-    if username not in features:
-        continue
-
-    features[username].status_counts[str(row["status"])] = int(row["cnt"])
-```
-
----
-
-### 5.8 合并每日事件数
-
-```python
-for row in daily_rows:
-    username = row["username"]
-    if username not in features:
-        continue
-
-    features[username].daily_counts[str(row["event_date"])] = int(row["cnt"])
-```
-
----
-
-## 6. 异常聚合行处理原则
+## 5. 异常聚合行处理原则
 
 合并时不要因为单条异常聚合结果导致整个构建失败。
 
@@ -208,7 +175,7 @@ sample_count
 
 ---
 
-## 7. BaselineBuilder 职责
+## 6. BaselineBuilder 职责
 
 `baseline_builder.py` 负责把：
 
@@ -227,36 +194,18 @@ UserBaseline
 ```text
 1. 判断基线可靠性
 2. 计算常用活跃小时
-3. 计算常用 IP
-4. 计算常用地区
-5. 计算常用接口
-6. 计算行为类型分布
-7. 计算状态分布
-8. 计算失败率
-9. 计算每日事件统计
+3. 计算常用来源 IP、目标 IP
+4. 计算常用来源国家、来源城市
+5. 计算常用 VPN 网关
+6. 计算行为、事件类型、结果、失败原因、认证方式、客户端软件、协议分布
+7. 计算失败率、非工作时间比例、异常 IP 标签比例
+8. 计算每日事件统计
+9. 计算会话时长和流量统计
 ```
 
 ---
 
-## 8. BaselineBuilder 类结构
-
-```python
-class BaselineBuilder:
-    def __init__(self, config: UebaBaselineConfig):
-        self.config = config
-
-    def build_baselines(
-        self,
-        features: dict[str, UserAggregateFeature],
-        start_time,
-        end_time,
-    ) -> list[UserBaseline]:
-        ...
-```
-
----
-
-## 9. 可靠性判断
+## 7. 可靠性判断
 
 第一版只根据样本数量判断基线是否可靠。
 
@@ -271,18 +220,9 @@ sample_count < 20：不可靠
 sample_count >= 20：可靠
 ```
 
-后期可以扩展更多判断条件：
-
-```text
-活跃天数
-基线时间跨度
-行为种类数量
-数据稳定性
-```
-
 ---
 
-## 10. Top-N 通用函数
+## 8. Top-N 通用函数
 
 建议实现一个通用函数：
 
@@ -322,14 +262,16 @@ def build_count_ratio_items(
 
 ```text
 常用小时
-常用 IP
-常用地区
-常用接口
+常用来源 IP
+常用目标 IP
+常用来源国家
+常用来源城市
+常用 VPN 网关
 ```
 
 ---
 
-## 11. 常用活跃小时
+## 9. 常用维度
 
 ```python
 common_active_hours = build_count_ratio_items(
@@ -338,80 +280,45 @@ common_active_hours = build_count_ratio_items(
     limit=24,
     min_ratio=config.common_hour_min_ratio,
 )
-```
 
-注意：
-
-```text
-不要保存所有出现过的小时。
-只有占比达到阈值的小时才算常用活跃小时。
-```
-
----
-
-## 12. 常用 IP
-
-```python
-common_ips = build_count_ratio_items(
-    counts=feature.ip_counts,
+common_source_ips = build_count_ratio_items(
+    counts=feature.source_ip_counts,
     total=feature.sample_count,
-    limit=config.top_ip_limit,
-    min_ratio=config.common_ip_min_ratio,
+    limit=config.top_source_ip_limit,
+    min_ratio=config.common_source_ip_min_ratio,
+)
+
+common_destination_ips = build_count_ratio_items(
+    counts=feature.destination_ip_counts,
+    total=feature.sample_count,
+    limit=config.top_destination_ip_limit,
+)
+
+common_source_countries = build_count_ratio_items(
+    counts=feature.source_country_counts,
+    total=feature.sample_count,
+    limit=config.top_country_limit,
+)
+
+common_source_cities = build_count_ratio_items(
+    counts=feature.source_city_counts,
+    total=feature.sample_count,
+    limit=config.top_city_limit,
+    min_ratio=config.common_city_min_ratio,
+)
+
+common_vpn_gateways = build_count_ratio_items(
+    counts=feature.vpn_gateway_counts,
+    total=feature.sample_count,
+    limit=config.top_vpn_gateway_limit,
 )
 ```
 
-保存时不要只保存 IP 字符串，应保存：
-
-```text
-IP
-出现次数
-占比
-```
+当前登录主表没有 `endpoint` 字段，因此第一版不生成 `common_endpoints`。
 
 ---
 
-## 13. 常用地区
-
-```python
-common_locations = build_count_ratio_items(
-    counts=feature.location_counts,
-    total=feature.sample_count,
-    limit=config.top_location_limit,
-    min_ratio=config.common_location_min_ratio,
-)
-```
-
----
-
-## 14. 常用接口
-
-```python
-common_endpoints = build_count_ratio_items(
-    counts=feature.endpoint_counts,
-    total=feature.sample_count,
-    limit=config.top_endpoint_limit,
-    min_ratio=config.common_endpoint_min_ratio,
-)
-```
-
-接口必须在数据库侧或 Repository 层完成归一化。
-
-例如：
-
-```text
-/api/order?id=1
-/api/order?id=2
-```
-
-应该归一为：
-
-```text
-/api/order
-```
-
----
-
-## 15. 行为类型分布
+## 10. 分布计算
 
 ```python
 def build_distribution(counts: dict[str, int], total: int) -> dict[str, float]:
@@ -425,59 +332,39 @@ def build_distribution(counts: dict[str, int], total: int) -> dict[str, float]:
     }
 ```
 
-示例：
-
-```json
-{
-  "API_CALL": 0.81,
-  "LOGIN_SUCCESS": 0.12,
-  "LOGOUT": 0.05,
-  "LOGIN_FAILED": 0.02
-}
-```
-
----
-
-## 16. 状态分布
-
-同样使用 `build_distribution()`。
-
-示例：
-
-```json
-{
-  "SUCCESS": 0.96,
-  "FAILED": 0.03,
-  "ERROR": 0.01
-}
-```
-
----
-
-## 17. 失败率
-
-```python
-if feature.sample_count <= 0:
-    failed_rate = 0.0
-else:
-    failed_rate = feature.failed_count / feature.sample_count
-
-failed_rate = round(failed_rate, 6)
-```
-
----
-
-## 18. 每日事件统计
-
-需要生成：
+用于生成：
 
 ```text
-avg_daily_events
-active_day_avg_events
-max_daily_events
+action_distribution
+event_type_distribution
+result_distribution
+fail_reason_distribution
+auth_method_distribution
+client_software_distribution
+protocol_distribution
 ```
 
-计算方式：
+当前登录主表没有 `status` 字段，因此第一版不生成 `status_distribution`；成功失败应基于 `result` / `event_type`。
+
+---
+
+## 11. 比例和数值统计
+
+```python
+failed_rate = 0.0 if feature.sample_count <= 0 else feature.failed_count / feature.sample_count
+off_hours_rate = 0.0 if feature.sample_count <= 0 else feature.off_hours_count / feature.sample_count
+unusual_ip_rate = 0.0 if feature.sample_count <= 0 else feature.unusual_ip_count / feature.sample_count
+```
+
+注意：
+
+```text
+off_hours_rate 来自 is_off_hours 聚合结果。
+unusual_ip_rate 来自 is_unusual_ip 聚合结果。
+它们是输入侧已有标签的统计结果，不等价于 UEBA 最终异常判定。
+```
+
+每日事件统计：
 
 ```python
 window_days = max((end_time - start_time).days, 1)
@@ -488,42 +375,49 @@ active_day_avg_events = feature.sample_count / active_days
 max_daily_events = max(feature.daily_counts.values(), default=0)
 ```
 
-含义：
+会话和流量统计来自 `session_metric_summary` / `traffic_metric_summary`：
 
 ```text
-avg_daily_events：
-按整个基线窗口平均。
-
-active_day_avg_events：
-只按用户实际活跃天数平均。
-
-max_daily_events：
-基线窗口内单日最大日志数量。
+session_duration_avg
+session_duration_p50
+session_duration_p95
+bytes_sent_avg
+bytes_recv_avg
 ```
 
 ---
 
-## 19. 最终生成 UserBaseline
+## 12. 最终生成 UserBaseline
 
 ```python
 baseline = UserBaseline(
     username=feature.username,
     sample_count=feature.sample_count,
     is_reliable=is_reliable,
-
     common_active_hours=common_active_hours,
-    common_ips=common_ips,
-    common_locations=common_locations,
-    common_endpoints=common_endpoints,
-
+    common_source_ips=common_source_ips,
+    common_destination_ips=common_destination_ips,
+    common_source_countries=common_source_countries,
+    common_source_cities=common_source_cities,
+    common_vpn_gateways=common_vpn_gateways,
     action_distribution=action_distribution,
-    status_distribution=status_distribution,
-
-    failed_rate=failed_rate,
+    event_type_distribution=event_type_distribution,
+    result_distribution=result_distribution,
+    fail_reason_distribution=fail_reason_distribution,
+    auth_method_distribution=auth_method_distribution,
+    client_software_distribution=client_software_distribution,
+    protocol_distribution=protocol_distribution,
+    failed_rate=round(failed_rate, 6),
+    off_hours_rate=round(off_hours_rate, 6),
+    unusual_ip_rate=round(unusual_ip_rate, 6),
     avg_daily_events=round(avg_daily_events, 6),
     active_day_avg_events=round(active_day_avg_events, 6),
     max_daily_events=max_daily_events,
-
+    session_duration_avg=session_duration_avg,
+    session_duration_p50=session_duration_p50,
+    session_duration_p95=session_duration_p95,
+    bytes_sent_avg=bytes_sent_avg,
+    bytes_recv_avg=bytes_recv_avg,
     baseline_start_time=start_time,
     baseline_end_time=end_time,
     model_version=config.model_version,
@@ -532,7 +426,7 @@ baseline = UserBaseline(
 
 ---
 
-## 20. 基线构建原则
+## 13. 基线构建原则
 
 `baseline_builder.py` 必须遵守：
 
@@ -544,4 +438,6 @@ baseline = UserBaseline(
 5. 所有 Top-N 都必须有数量限制。
 6. 所有 ratio 都要防止除零。
 7. 不可靠基线也可以保存，但要标记 is_reliable = false。
+8. 不把 risk_score、risk_tags 当作 UEBA 第一版最终异常结论。
+9. 不按 endpoint、status、location 设计当前登录主表基线。
 ```

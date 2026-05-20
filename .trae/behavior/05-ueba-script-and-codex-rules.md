@@ -35,13 +35,17 @@ scripts/build_ueba_baseline.py
 python scripts/build_ueba_baseline.py \
   --start-time "2026-04-19 00:00:00" \
   --end-time "2026-05-19 00:00:00" \
+  --log-type vpn \
   --min-sample-count 20 \
-  --top-ip-limit 10 \
-  --top-location-limit 10 \
-  --top-endpoint-limit 20
+  --top-source-ip-limit 10 \
+  --top-destination-ip-limit 10 \
+  --top-city-limit 10 \
+  --top-vpn-gateway-limit 10
 ```
 
 如果没有传入 `start-time` 和 `end-time`，可以默认使用最近 30 天。
+
+`log_type` 当前默认可按 `vpn` 设计，但必须通过配置或参数传入，不能永久写死在 SQL 中。
 
 ---
 
@@ -80,11 +84,13 @@ POST /api/behavior/baseline/build
 {
   "start_time": "2026-04-19 00:00:00",
   "end_time": "2026-05-19 00:00:00",
+  "log_type": "vpn",
   "config": {
     "min_sample_count": 20,
-    "top_ip_limit": 10,
-    "top_location_limit": 10,
-    "top_endpoint_limit": 20,
+    "top_source_ip_limit": 10,
+    "top_destination_ip_limit": 10,
+    "top_city_limit": 10,
+    "top_vpn_gateway_limit": 10,
     "common_hour_min_ratio": 0.05,
     "model_version": "ueba_baseline_v1"
   }
@@ -107,11 +113,32 @@ UebaService
 
 ---
 
-## 6. 给 Codex 的开发约束
+## 6. 当前数据库字段约束
+
+当前数据库说明以用户新提供的 `logs_structured` 登录数据主表为准。
+
+必须明确：
+
+```text
+1. config/clickhouse.sql 仍然是过时文件，不得作为当前表结构依据。
+2. 当前登录主表不包含 endpoint、status、location 字段。
+3. 当前不得按 API endpoint 维度设计登录基线。
+4. 当前应基于 result / event_type 统计成功失败。
+5. 当前应基于 src_country / src_city 统计来源位置。
+6. 当前应基于 source_ip、destination_ip、vpn_gateway、auth_method、client_software、protocol 等字段构建登录行为基线。
+7. 当前可统计 is_off_hours、is_unusual_ip 的比例，但它们不能替代 UEBA 自己的基线统计。
+8. 不得把 risk_score、risk_tags 作为 UEBA 第一版最终异常结论。
+```
+
+如果旧 README、旧 API 文档、旧 SQL 文件、旧 dashboard 逻辑与上述字段冲突，以用户当前要求和 `.trae/behavior/99-outdated-sources.md` 为准。
+
+---
+
+## 7. 给 Codex 的开发约束
 
 开发 UEBA 模块时必须遵守以下约束。
 
-### 6.1 不允许一次性读取全部原始日志
+### 7.1 不允许一次性读取全部原始日志
 
 禁止：
 
@@ -125,7 +152,7 @@ SELECT * FROM logs_structured
 
 ---
 
-### 6.2 不允许在 Python 中保存完整用户日志列表
+### 7.2 不允许在 Python 中保存完整用户日志列表
 
 禁止：
 
@@ -136,69 +163,69 @@ user_logs[username].append(log)
 允许：
 
 ```python
-user_features[username].ip_counts[ip] = count
-user_features[username].endpoint_counts[endpoint] = count
+user_features[username].source_ip_counts[ip] = count
+user_features[username].vpn_gateway_counts[gateway] = count
 ```
 
 ---
 
-### 6.3 必须使用数据库侧 GROUP BY
+### 7.3 必须使用数据库侧 GROUP BY
 
 至少要有以下聚合：
 
 ```text
 用户总览统计
 用户小时分布
-用户常用 IP
-用户常用地区
-用户常用接口
+用户常用来源 IP
+用户常用目标 IP
+用户常用来源国家
+用户常用来源城市
+用户常用 VPN 网关
 用户行为类型分布
-用户状态分布
+用户事件类型分布
+用户结果分布
+用户失败原因分布
+用户认证方式、客户端软件、协议分布
 用户每日事件数
+用户会话时长和流量统计
 ```
 
 ---
 
-### 6.4 每个维度必须限制 Top-N
+### 7.4 每个维度必须限制 Top-N
 
 尤其是：
 
 ```text
 source_ip
-location
-endpoint
-action
-status
-```
-
-其中 endpoint 必须重点限制。
-
----
-
-### 6.5 endpoint 必须去参数归一化
-
-禁止直接用完整 URL 聚合：
-
-```text
-/api/order?id=1
-/api/order?id=2
-```
-
-应该归一为：
-
-```text
-/api/order
-```
-
-ClickHouse 示例：
-
-```sql
-replaceRegexpOne(endpoint, '\\?.*$', '') AS endpoint_path
+destination_ip
+src_country
+src_city
+vpn_gateway
+fail_reason
+client_software
 ```
 
 ---
 
-### 6.6 `config.py` 不能写死成长期配置中心
+### 7.5 当前不做 endpoint 归一化
+
+当前登录主表没有 `endpoint` 字段。
+
+因此第一版不得要求：
+
+```text
+endpoint_path
+fetch_top_endpoints()
+common_endpoints
+endpoint 查询参数归一化
+```
+
+如果后续接入 API 日志，API endpoint 相关聚合应作为另一类 `log_type` 或另一张表的扩展，不属于当前登录主表第一版核心字段。
+
+---
+
+### 7.6 `config.py` 不能写死成长期配置中心
 
 允许第一版有默认配置：
 
@@ -211,18 +238,18 @@ UebaBaselineConfig()
 不推荐：
 
 ```python
-from config import TOP_IP_LIMIT
+from config import TOP_SOURCE_IP_LIMIT
 ```
 
 推荐：
 
 ```python
-self.config.top_ip_limit
+self.config.top_source_ip_limit
 ```
 
 ---
 
-### 6.7 基线写入必须批量插入
+### 7.7 基线写入必须批量插入
 
 禁止：
 
@@ -246,23 +273,32 @@ for batch in chunks(rows, batch_size):
 
 ---
 
-### 6.8 复杂字段先存 JSON 字符串
+### 7.8 复杂字段先存 JSON 字符串
 
 以下字段建议存 JSON：
 
 ```text
 common_active_hours
-common_ips
-common_locations
-common_endpoints
+common_source_ips
+common_destination_ips
+common_source_countries
+common_source_cities
+common_vpn_gateways
 action_distribution
-status_distribution
+event_type_distribution
+result_distribution
+fail_reason_distribution
+auth_method_distribution
+client_software_distribution
+protocol_distribution
+session_metric_summary
+traffic_metric_summary
 baseline_json
 ```
 
 ---
 
-### 6.9 Service 层必须作为统一入口
+### 7.9 Service 层必须作为统一入口
 
 外部调用应该走：
 
@@ -280,7 +316,7 @@ store.save_xxx()
 
 ---
 
-## 7. 第一版交付物清单
+## 8. 第一版交付物清单
 
 代码文件：
 
@@ -308,7 +344,7 @@ user_behavior_baselines
 ```text
 1. 指定时间范围构建用户基线
 2. 使用数据库侧聚合，不直接读取全部原始日志
-3. 生成每个用户的常用时间、IP、地区、接口、行为分布、状态分布
+3. 生成每个用户的常用时间、来源 IP、目标 IP、来源国家、来源城市、VPN 网关、行为分布、事件类型分布、结果分布、认证方式分布、客户端软件分布、协议分布、会话与流量统计
 4. 判断基线是否可靠
 5. 批量写入基线表
 6. 返回本次构建统计结果
@@ -316,12 +352,13 @@ user_behavior_baselines
 
 ---
 
-## 8. 给 Codex 的一句话任务描述
+## 9. 给 Codex 的一句话任务描述
 
 ```text
 实现 UEBA 离线用户行为基线构建模块：
-从 ClickHouse 结构化日志表 logs_structured 中按时间范围进行数据库侧聚合，
+从 ClickHouse 结构化日志表 logs_structured 中按时间范围和 log_type 进行数据库侧聚合，
 按用户生成 UserBaseline，
 批量写入 user_behavior_baselines 表，
-要求不一次性读取原始日志、不保存完整日志列表、支持十万级日志数据。
+要求不一次性读取原始日志、不保存完整日志列表、支持十万级日志数据，
+并且当前登录主表不按 endpoint、status、location 作为核心字段设计。
 ```

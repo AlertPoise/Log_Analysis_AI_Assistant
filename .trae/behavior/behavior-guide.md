@@ -33,6 +33,29 @@
 
 ---
 
+## 0.1 当前登录数据主表阶段依据
+
+当前数据库说明以用户新提供的 `logs_structured` 登录 / VPN 行为数据主表为准。
+
+当前主表字段包括：
+
+```text
+timestamp, log_type, username, dept, role, action, event_type, result, fail_reason, source_ip, destination_ip, vpn_gateway, src_country, src_city, protocol, auth_method, client_software, session_id, is_off_hours, is_unusual_ip, session_duration_sec, bytes_sent, bytes_recv, risk_score, risk_tags, raw_message, parser, parse_status, collected_at
+```
+
+阶段性约束：
+
+```text
+1. 当前表是登录 / VPN 行为数据主表。
+2. 当前表没有 endpoint、status、location 字段，不得按这些旧字段设计登录基线。
+3. 登录结果使用 result，事件类型使用 event_type，来源位置使用 src_country、src_city。
+4. is_off_hours、is_unusual_ip 是输入侧已有标签，只能统计比例，不能替代 UEBA 自己的基线统计。
+5. risk_score、risk_tags 只能作为历史风险参考，不作为 UEBA 第一版最终异常结论。
+6. 查询应优先使用 log_type 和 timestamp 时间范围过滤；默认 log_type 可按 vpn 设计，但必须通过配置或参数传入。
+```
+
+---
+
 ## 1. 执行任务前必须阅读的文件
 
 在执行任何代码修改前，GPT / Codex 必须先阅读以下文件：
@@ -256,16 +279,16 @@ src/behavior/config.py
 ```text
 baseline_window_days
 min_sample_count
-top_ip_limit
-top_location_limit
-top_endpoint_limit
-top_action_limit
-top_status_limit
+top_source_ip_limit
+top_destination_ip_limit
+top_country_limit
+top_city_limit
+top_vpn_gateway_limit
+top_fail_reason_limit
+top_client_software_limit
 common_hour_min_ratio
-common_ip_min_ratio
-common_location_min_ratio
-common_endpoint_min_ratio
-endpoint_normalize
+common_source_ip_min_ratio
+common_city_min_ratio
 model_version
 write_batch_size
 ```
@@ -320,16 +343,27 @@ BaselineBuildResult
 username
 sample_count
 failed_count
+off_hours_count
+unusual_ip_count
 active_days
 first_seen
 last_seen
 hour_counts
-ip_counts
-location_counts
-endpoint_counts
+source_ip_counts
+destination_ip_counts
+source_country_counts
+source_city_counts
+vpn_gateway_counts
 action_counts
-status_counts
+event_type_counts
+result_counts
+fail_reason_counts
+auth_method_counts
+client_software_counts
+protocol_counts
 daily_counts
+session_metric_summary
+traffic_metric_summary
 ```
 
 ### `UserBaseline` 至少包含
@@ -339,12 +373,21 @@ username
 sample_count
 is_reliable
 common_active_hours
-common_ips
-common_locations
-common_endpoints
+common_source_ips
+common_destination_ips
+common_source_countries
+common_source_cities
+common_vpn_gateways
 action_distribution
-status_distribution
+event_type_distribution
+result_distribution
+fail_reason_distribution
+auth_method_distribution
+client_software_distribution
+protocol_distribution
 failed_rate
+off_hours_rate
+unusual_ip_rate
 avg_daily_events
 active_day_avg_events
 max_daily_events
@@ -405,12 +448,20 @@ src/behavior/repository.py
 ```text
 fetch_user_summary(start_time, end_time)
 fetch_hour_distribution(start_time, end_time)
-fetch_top_ips(start_time, end_time, limit)
-fetch_top_locations(start_time, end_time, limit)
-fetch_top_endpoints(start_time, end_time, limit)
-fetch_action_distribution(start_time, end_time)
-fetch_status_distribution(start_time, end_time)
-fetch_daily_event_counts(start_time, end_time)
+fetch_top_source_ips(start_time, end_time, limit, log_type)
+fetch_top_destination_ips(start_time, end_time, limit, log_type)
+fetch_top_source_countries(start_time, end_time, limit, log_type)
+fetch_top_source_cities(start_time, end_time, limit, log_type)
+fetch_top_vpn_gateways(start_time, end_time, limit, log_type)
+fetch_action_distribution(start_time, end_time, log_type)
+fetch_event_type_distribution(start_time, end_time, log_type)
+fetch_result_distribution(start_time, end_time, log_type)
+fetch_fail_reason_distribution(start_time, end_time, limit, log_type)
+fetch_auth_method_distribution(start_time, end_time, log_type)
+fetch_client_software_distribution(start_time, end_time, limit, log_type)
+fetch_protocol_distribution(start_time, end_time, log_type)
+fetch_daily_event_counts(start_time, end_time, log_type)
+fetch_session_metric_summary(start_time, end_time, log_type)
 ```
 
 ### 必须实现的聚合维度
@@ -418,12 +469,18 @@ fetch_daily_event_counts(start_time, end_time)
 ```text
 1. 用户总览统计
 2. 用户小时分布
-3. 用户常用 IP Top-N
-4. 用户常用地区 Top-N
-5. 用户常用接口 Top-N
-6. 用户行为类型分布
-7. 用户状态分布
-8. 用户每日事件数
+3. 用户常用来源 IP Top-N
+4. 用户常用目标 IP Top-N
+5. 用户常用来源国家 Top-N
+6. 用户常用来源城市 Top-N
+7. 用户常用 VPN 网关 Top-N
+8. 用户行为类型分布
+9. 用户事件类型分布
+10. 用户结果分布
+11. 用户失败原因分布
+12. 用户认证方式、客户端软件、协议分布
+13. 用户每日事件数
+14. 会话时长与流量统计
 ```
 
 ### 强制约束
@@ -435,8 +492,8 @@ fetch_daily_event_counts(start_time, end_time)
 5. `start_time`、`end_time`、`limit` 必须参数化；
 6. 过滤空用户名；
 7. 字段名差异只允许在 `repository.py` 中通过 SQL 别名适配；
-8. endpoint 必须去掉查询参数后再聚合，例如将 `/api/a?id=1` 和 `/api/a?id=2` 归一化为 `/api/a`；
-9. Top-N 维度必须限制数量，尤其是 endpoint。
+8. 当前登录主表不包含 endpoint、status、location，不得按这些旧字段设计登录基线；
+9. Top-N 维度必须限制数量，尤其是 source_ip、destination_ip、src_city、vpn_gateway、client_software。
 
 ### 验收标准
 
@@ -445,7 +502,7 @@ fetch_daily_event_counts(start_time, end_time)
 3. SQL 中存在 `GROUP BY`；
 4. 查询参数不是字符串拼接；
 5. Top-N 查询有数量限制；
-6. endpoint 返回统一路径，而不是带 query 参数的完整 URL。
+6. 当前登录主表不要求 endpoint 归一化；API endpoint 聚合属于后续扩展。
 
 ---
 
@@ -464,12 +521,20 @@ dict[str, UserAggregateFeature]
 ```text
 user_summary_rows
 hour_rows
-ip_rows
-location_rows
-endpoint_rows
+source_ip_rows
+destination_ip_rows
+source_country_rows
+source_city_rows
+vpn_gateway_rows
 action_rows
-status_rows
+event_type_rows
+result_rows
+fail_reason_rows
+auth_method_rows
+client_software_rows
+protocol_rows
 daily_rows
+session_metric_rows
 ```
 
 ### 输出
@@ -490,13 +555,14 @@ dict[str, UserAggregateFeature]
 
 1. 根据 `user_summary_rows` 创建用户骨架；
 2. 合并小时分布到 `hour_counts`；
-3. 合并 IP 分布到 `ip_counts`；
-4. 合并地区分布到 `location_counts`；
-5. 合并接口分布到 `endpoint_counts`；
-6. 合并行为分布到 `action_counts`；
-7. 合并状态分布到 `status_counts`；
-8. 合并每日事件数到 `daily_counts`；
-9. 对异常聚合行做跳过或降级处理。
+3. 合并来源 IP 分布到 `source_ip_counts`；
+4. 合并目标 IP 分布到 `destination_ip_counts`；
+5. 合并来源国家分布到 `source_country_counts`；
+6. 合并来源城市分布到 `source_city_counts`；
+7. 合并 VPN 网关分布到 `vpn_gateway_counts`；
+8. 合并 action、event_type、result、fail_reason、auth_method、client_software、protocol 分布；
+9. 合并每日事件数、会话时长和流量统计；
+10. 对异常聚合行做跳过或降级处理。
 
 ### 异常处理策略
 
@@ -562,18 +628,32 @@ list[UserBaseline]
 ```text
 1. is_reliable
 2. common_active_hours
-3. common_ips
-4. common_locations
-5. common_endpoints
-6. action_distribution
-7. status_distribution
-8. failed_rate
-9. avg_daily_events
-10. active_day_avg_events
-11. max_daily_events
-12. baseline_start_time
-13. baseline_end_time
-14. model_version
+3. common_source_ips
+4. common_destination_ips
+5. common_source_countries
+6. common_source_cities
+7. common_vpn_gateways
+8. action_distribution
+9. event_type_distribution
+10. result_distribution
+11. fail_reason_distribution
+12. auth_method_distribution
+13. client_software_distribution
+14. protocol_distribution
+15. failed_rate
+16. off_hours_rate
+17. unusual_ip_rate
+18. avg_daily_events
+19. active_day_avg_events
+20. max_daily_events
+21. session_duration_avg
+22. session_duration_p50
+23. session_duration_p95
+24. bytes_sent_avg
+25. bytes_recv_avg
+26. baseline_start_time
+27. baseline_end_time
+28. model_version
 ```
 
 ### 关键规则
@@ -592,9 +672,11 @@ sample_count >= config.min_sample_count
 
 ```text
 common_active_hours
-common_ips
-common_locations
-common_endpoints
+common_source_ips
+common_destination_ips
+common_source_countries
+common_source_cities
+common_vpn_gateways
 ```
 
 每项至少包含：
@@ -609,7 +691,8 @@ ratio
 
 ```text
 action_distribution = action_count / sample_count
-status_distribution = status_count / sample_count
+result_distribution = result_count / sample_count
+event_type_distribution = event_type_count / sample_count
 ```
 
 #### 失败率
@@ -682,12 +765,23 @@ username
 sample_count
 is_reliable
 common_active_hours
-common_ips
-common_locations
-common_endpoints
+common_source_ips
+common_destination_ips
+common_source_countries
+common_source_cities
+common_vpn_gateways
 action_distribution
-status_distribution
+event_type_distribution
+result_distribution
+fail_reason_distribution
+auth_method_distribution
+client_software_distribution
+protocol_distribution
 failed_rate
+off_hours_rate
+unusual_ip_rate
+session_metric_summary
+traffic_metric_summary
 avg_daily_events
 active_day_avg_events
 max_daily_events
@@ -770,12 +864,20 @@ BaselineBuildResult
 2. baseline_store.ensure_table()
 3. repository.fetch_user_summary()
 4. repository.fetch_hour_distribution()
-5. repository.fetch_top_ips()
-6. repository.fetch_top_locations()
-7. repository.fetch_top_endpoints()
-8. repository.fetch_action_distribution()
-9. repository.fetch_status_distribution()
-10. repository.fetch_daily_event_counts()
+5. repository.fetch_top_source_ips()
+6. repository.fetch_top_destination_ips()
+7. repository.fetch_top_source_countries()
+8. repository.fetch_top_source_cities()
+9. repository.fetch_top_vpn_gateways()
+10. repository.fetch_action_distribution()
+11. repository.fetch_event_type_distribution()
+12. repository.fetch_result_distribution()
+13. repository.fetch_fail_reason_distribution()
+14. repository.fetch_auth_method_distribution()
+15. repository.fetch_client_software_distribution()
+16. repository.fetch_protocol_distribution()
+17. repository.fetch_daily_event_counts()
+18. repository.fetch_session_metric_summary()
 11. aggregate_merger.merge()
 12. baseline_builder.build_baselines()
 13. baseline_store.save_baselines()
@@ -806,9 +908,10 @@ BaselineBuildResult
 --start-time
 --end-time
 --min-sample-count
---top-ip-limit
---top-location-limit
---top-endpoint-limit
+--top-source-ip-limit
+--top-destination-ip-limit
+--top-city-limit
+--top-vpn-gateway-limit
 --model-version
 ```
 
@@ -852,9 +955,10 @@ python scripts/build_ueba_baseline.py \
   --start-time "2026-04-19 00:00:00" \
   --end-time "2026-05-19 00:00:00" \
   --min-sample-count 20 \
-  --top-ip-limit 10 \
-  --top-location-limit 10 \
-  --top-endpoint-limit 20
+  --top-source-ip-limit 10 \
+  --top-destination-ip-limit 10 \
+  --top-city-limit 10 \
+  --top-vpn-gateway-limit 10
 ```
 
 ### 验收标准
@@ -896,9 +1000,11 @@ tests/behavior/test_ueba_service.py
 1. sample_count < min_sample_count 时 is_reliable = false
 2. sample_count >= min_sample_count 时 is_reliable = true
 3. common_active_hours 按 ratio 阈值过滤
-4. common_ips/common_locations/common_endpoints 按 Top-N 和 ratio 过滤
-5. endpoint 使用 endpoint_path
-6. failed_rate 正确
+4. common_source_ips、common_destination_ips、common_source_countries、common_source_cities、common_vpn_gateways 按 Top-N 和 ratio 过滤
+5. result_distribution、event_type_distribution 正确
+6. off_hours_rate、unusual_ip_rate 正确
+7. session_duration_sec、bytes_sent、bytes_recv 统计正确
+8. failed_rate 正确
 7. avg_daily_events 正确
 8. active_day_avg_events 正确
 9. max_daily_events 正确
@@ -931,7 +1037,7 @@ service mock 编排测试
 
 ### 目标
 
-验证 Repository 生成和执行的是聚合查询，而不是原始日志查询；验证参数化查询、Top-N、endpoint 归一化等约束。
+验证 Repository 生成和执行的是聚合查询，而不是原始日志查询；验证参数化查询、Top-N、log_type 与时间范围过滤等约束。
 
 ### 输入
 
@@ -961,8 +1067,10 @@ tests/behavior/test_ueba_repository.py
 3. query 中包含时间过滤
 4. query 使用 parameters
 5. Top-N 查询包含 LIMIT 或等价限制
-6. endpoint 查询包含去参数归一化逻辑
-7. 空 username 被过滤
+6. 查询包含 log_type 过滤
+7. 使用 result / event_type 统计成功失败
+8. 使用 src_country / src_city 统计来源位置
+9. 空 username 被过滤
 ```
 
 ### 验收标准
@@ -978,7 +1086,7 @@ tests/behavior/test_ueba_repository.py
 
 ### 目标
 
-准备能覆盖正常用户、不可靠用户、多 endpoint 查询参数、多状态、多日期的结构化日志数据，用于真实链路验证。
+准备能覆盖正常用户、不可靠用户、多来源 IP、多目标 IP、多来源国家城市、多 VPN 网关、多认证方式、多客户端软件、多协议、多结果和多日期的结构化登录日志数据，用于真实链路验证。
 
 ### 输入
 
@@ -999,18 +1107,21 @@ logs_structured 测试表
 1. zhangsan：样本数 >= 20，可靠基线
 2. lisi：样本数 < 20，不可靠基线
 3. wangwu：多个 IP、多个地区
-4. zhaoliu：大量 endpoint 带 query 参数
+4. zhaoliu：多个 vpn_gateway、auth_method、client_software、protocol
 5. 空 username：应被过滤
-6. status 包含 SUCCESS、FAILED、ERROR、failure、fail
-7. 多日期数据：验证 avg_daily_events、active_day_avg_events、max_daily_events
+6. result 包含 SUCCESS、FAIL，event_type 包含 LOGIN_SUCCESS、LOGIN_FAIL
+7. src_country、src_city 覆盖多个来源位置
+8. session_duration_sec、bytes_sent、bytes_recv 覆盖会话与流量统计
+9. 多日期数据：验证 avg_daily_events、active_day_avg_events、max_daily_events
 ```
 
 ### 验收标准
 
 1. Repository 聚合查询能查出结果；
-2. endpoint query 参数被归一化；
-3. 空 username 不进入基线；
-4. 至少出现可靠和不可靠两类基线。
+2. result / event_type 能正确统计成功失败；
+3. src_country / src_city 能正确统计来源位置；
+4. 空 username 不进入基线；
+5. 至少出现可靠和不可靠两类基线。
 
 ---
 
@@ -1042,9 +1153,10 @@ python scripts/build_ueba_baseline.py \
   --start-time "2026-04-19 00:00:00" \
   --end-time "2026-05-19 00:00:00" \
   --min-sample-count 20 \
-  --top-ip-limit 10 \
-  --top-location-limit 10 \
-  --top-endpoint-limit 20
+  --top-source-ip-limit 10 \
+  --top-destination-ip-limit 10 \
+  --top-city-limit 10 \
+  --top-vpn-gateway-limit 10
 ```
 
 ### 预期输出结构
@@ -1071,8 +1183,8 @@ python scripts/build_ueba_baseline.py \
 3. 数据库中存在 `user_behavior_baselines`；
 4. 表中能查到各用户基线；
 5. 可靠和不可靠用户统计正确；
-6. endpoint 已归一化；
-7. 复杂字段是 JSON 字符串。
+6. 新登录字段对应的复杂字段是 JSON 字符串；
+7. endpoint 不作为当前登录主表核心字段。
 
 ---
 
@@ -1108,7 +1220,7 @@ service.py
 2. 是否存在 user_logs[username].append(log)
 3. 是否保存每个用户完整历史日志列表
 4. 是否所有 Top-N 都有限制
-5. endpoint 是否归一化
+5. 是否错误按 endpoint 设计当前登录基线
 6. 是否逐条 insert
 7. 是否把旧 dashboard 表名作为当前输出表
 8. 是否把 config.py 写成不可覆盖的全局配置中心
@@ -1229,7 +1341,7 @@ Codex 后续开发约束
 6. 在 scripts/build_ueba_baseline.py 中写业务逻辑
 7. 在 service.py 中堆复杂 SQL 或复杂算法
 8. 在 repository.py 之外适配数据库字段差异
-9. 忽略 endpoint 查询参数归一化
+9. 把 endpoint、status、location 当作当前登录主表核心字段
 10. 对 user_behavior_baselines 逐条 insert
 ```
 

@@ -22,7 +22,7 @@ Python 只负责处理聚合后的结果
 推荐链路：
 
 ```text
-logs_structured 原始结构化日志
+logs_structured 原始结构化登录日志
     ↓
 ClickHouse GROUP BY 聚合
     ↓
@@ -35,52 +35,109 @@ Python 获取聚合结果
 
 ---
 
-## 2. 假设日志表结构
+## 2. 当前 logs_structured 登录数据主表
 
-第一版假设结构化日志表为：
-
-```text
-logs_structured
-```
+当前阶段以用户新提供的 `logs_structured` 登录 / VPN 行为数据主表为准。
 
 字段如下：
 
 ```text
-timestamp   DateTime
-username    String
-source_ip   String
-location    String
-action      String
-endpoint    String
-status      String
+timestamp DateTime64(3)       日志生成时间
+log_type String               日志类型，当前默认可按 vpn 设计，但必须通过配置或参数传入
+action String                 行为动作，例如 LOGIN
+event_type String             事件类型，例如 LOGIN_SUCCESS / LOGIN_FAIL
+result String                 登录结果，例如 SUCCESS / FAIL
+username String               用户名
+dept String                   部门
+role String                   角色
+fail_reason String            失败原因
+source_ip String              来源 IP
+destination_ip String         目标 IP
+vpn_gateway String            VPN 网关
+src_country String            来源国家
+src_city String               来源城市
+protocol String               协议
+auth_method String            认证方式
+client_software String        客户端软件
+session_id String             会话 ID
+is_off_hours Bool             输入侧已有非工作时间标签
+is_unusual_ip Bool            输入侧已有异常 IP 标签
+session_duration_sec Int32    会话时长
+bytes_sent UInt64             发送字节数
+bytes_recv UInt64             接收字节数
+risk_score UInt8              历史风险评分参考
+risk_tags String              历史风险标签参考
+raw_message String            原始日志消息
+parser String                 解析器名称
+parse_status String           解析状态
+collected_at DateTime64(3)    采集入库时间
 ```
 
-如果实际字段不一致，必须在 `repository.py` 里通过 SQL 别名适配。
+必须明确：
 
-例如：
-
-```sql
-SELECT
-    user_name AS username,
-    src_ip AS source_ip,
-    api_path AS endpoint,
-    result AS status
-FROM logs_structured
+```text
+1. 当前表是登录 / VPN 行为数据主表。
+2. 当前表没有 endpoint 字段，不能按 API endpoint 维度设计登录基线。
+3. 当前表没有 status 字段，登录结果字段是 result，事件字段是 event_type。
+4. 当前表没有 location 字段，来源位置应使用 src_country、src_city。
+5. is_off_hours、is_unusual_ip 是输入侧已有标签或解析侧特征，不能替代 UEBA 自己的基线统计。
+6. risk_score、risk_tags 是已有风险字段，只能作为历史风险参考，不作为 UEBA 第一版最终异常结论。
+7. raw_message 不作为常规基线聚合维度。
+8. parser、parse_status 可用于数据质量过滤或统计，但不是用户行为核心维度。
+9. 当前排序键是 (log_type, timestamp)，聚合查询应优先使用 log_type 和时间范围过滤。
 ```
 
-不要让上层模块关心真实数据库字段名。
+如果后续接入 API 日志，API endpoint 相关聚合应作为另一类 `log_type` 或另一张表的扩展，不属于当前登录主表第一版核心字段。
 
 ---
 
-## 3. 统一时间过滤
+## 3. Repository 逻辑字段映射
 
-所有聚合 SQL 必须使用相同的时间窗口。
+当前登录表建议在 Repository 层映射为以下 UEBA 逻辑字段：
 
-ClickHouse 推荐：
+```text
+event_time ← timestamp
+log_type ← log_type
+username ← username
+dept ← dept
+role ← role
+source_ip ← source_ip
+destination_ip ← destination_ip
+source_country ← src_country
+source_city ← src_city
+action ← action
+event_type ← event_type
+result ← result
+fail_reason ← fail_reason
+vpn_gateway ← vpn_gateway
+protocol ← protocol
+auth_method ← auth_method
+client_software ← client_software
+session_id ← session_id
+session_duration_sec ← session_duration_sec
+bytes_sent ← bytes_sent
+bytes_recv ← bytes_recv
+is_off_hours ← is_off_hours
+is_unusual_ip ← is_unusual_ip
+parser ← parser
+parse_status ← parse_status
+collected_at ← collected_at
+```
+
+字段名差异只允许在 `repository.py` 中适配，不要让上层 Merger、Builder、Store 感知数据库字段差异。
+
+---
+
+## 4. 统一过滤与参数化查询
+
+所有聚合 SQL 必须使用相同的时间窗口和日志类型过滤。
+
+逻辑表达建议：
 
 ```sql
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
+PREWHERE log_type = {log_type:String}
+    AND timestamp >= {start_time:DateTime64(3)}
+    AND timestamp < {end_time:DateTime64(3)}
 WHERE username != ''
 ```
 
@@ -88,26 +145,27 @@ WHERE username != ''
 
 ```text
 1. 必须有 start_time 和 end_time
-2. 必须过滤空 username
-3. 必须使用参数化查询
-4. 不允许直接拼接用户输入
+2. 必须有 log_type，当前默认可为 vpn，但必须通过配置或参数传入，不能永久写死
+3. 必须过滤空 username
+4. 必须使用参数化查询
+5. 不允许直接拼接用户输入
 ```
 
 参数占位符说明：
 
 ```text
-1. 文档中的 {start_time:DateTime}、{end_time:DateTime}、{limit:UInt32} 只表示逻辑参数
+1. 文档中的 {start_time:DateTime64(3)}、{end_time:DateTime64(3)}、{log_type:String}、{limit:UInt32} 只表示逻辑参数
 2. 实际代码实现时，必须以项目现有 ClickHouse 封装为准
 3. 当前项目使用 clickhouse_connect / ClickHouseClient 的 client.query(query, parameters=params) 参数化查询方式时，应采用该客户端支持的参数写法
-4. 禁止通过字符串拼接方式把 start_time、end_time、limit 等用户输入直接拼进 SQL
+4. 禁止通过字符串拼接方式把 start_time、end_time、log_type、limit 等用户输入直接拼进 SQL
 5. Repository 层负责封装 SQL 参数，不允许上层模块拼 SQL
 ```
 
 ---
 
-## 4. 用户总览统计
+## 5. 用户总览统计
 
-### 4.1 用途
+### 5.1 用途
 
 生成每个用户的基础统计骨架。
 
@@ -119,9 +177,11 @@ WHERE username != ''
 最后出现时间
 失败数量
 活跃天数
+非工作时间数量
+异常 IP 标签数量
 ```
 
-### 4.2 SQL
+### 5.2 SQL
 
 ```sql
 SELECT
@@ -129,45 +189,28 @@ SELECT
     count() AS sample_count,
     min(timestamp) AS first_seen,
     max(timestamp) AS last_seen,
-    countIf(lower(status) IN ('failed', 'fail', 'error', 'failure')) AS failed_count,
-    uniqExact(toDate(timestamp)) AS active_days
+    countIf(result = 'FAIL' OR event_type = 'LOGIN_FAIL') AS failed_count,
+    uniqExact(toDate(timestamp)) AS active_days,
+    countIf(is_off_hours) AS off_hours_count,
+    countIf(is_unusual_ip) AS unusual_ip_count
 FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
+PREWHERE log_type = {log_type:String}
+    AND timestamp >= {start_time:DateTime64(3)}
+    AND timestamp < {end_time:DateTime64(3)}
 WHERE username != ''
 GROUP BY username;
 ```
 
-### 4.3 Repository 接口
+### 5.3 Repository 接口
 
 ```python
-def fetch_user_summary(self, start_time, end_time) -> list[dict]:
+def fetch_user_summary(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
     ...
 ```
 
 ---
 
-## 5. 用户小时分布统计
-
-### 5.1 用途
-
-统计用户在一天中的哪些小时更活跃。
-
-第一版建议叫：
-
-```text
-active_hours
-```
-
-不建议叫：
-
-```text
-login_hours
-```
-
-原因是结构化日志中不一定只有登录日志。
-
-### 5.2 SQL
+## 6. 用户小时分布统计
 
 ```sql
 SELECT
@@ -175,8 +218,9 @@ SELECT
     toHour(timestamp) AS active_hour,
     count() AS cnt
 FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
+PREWHERE log_type = {log_type:String}
+    AND timestamp >= {start_time:DateTime64(3)}
+    AND timestamp < {end_time:DateTime64(3)}
 WHERE username != ''
 GROUP BY
     username,
@@ -186,22 +230,14 @@ ORDER BY
     active_hour;
 ```
 
-### 5.3 Repository 接口
-
 ```python
-def fetch_hour_distribution(self, start_time, end_time) -> list[dict]:
+def fetch_hour_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
     ...
 ```
 
 ---
 
-## 6. 用户常用 IP Top-N
-
-### 6.1 用途
-
-统计每个用户最常见的来源 IP。
-
-### 6.2 SQL
+## 7. 用户常用来源 IP Top-N
 
 ```sql
 SELECT
@@ -215,8 +251,9 @@ FROM
         source_ip,
         count() AS cnt
     FROM logs_structured
-    PREWHERE timestamp >= {start_time:DateTime}
-        AND timestamp < {end_time:DateTime}
+    PREWHERE log_type = {log_type:String}
+        AND timestamp >= {start_time:DateTime64(3)}
+        AND timestamp < {end_time:DateTime64(3)}
     WHERE username != ''
       AND source_ip != ''
     GROUP BY
@@ -229,42 +266,35 @@ FROM
 LIMIT {limit:UInt32} BY username;
 ```
 
-### 6.3 Repository 接口
-
 ```python
-def fetch_top_ips(self, start_time, end_time, limit: int) -> list[dict]:
+def fetch_top_source_ips(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
     ...
 ```
 
 ---
 
-## 7. 用户常用地区 Top-N
-
-### 7.1 用途
-
-统计每个用户最常见的来源地区。
-
-### 7.2 SQL
+## 8. 用户常用目标 IP Top-N
 
 ```sql
 SELECT
     username,
-    location,
+    destination_ip,
     cnt
 FROM
 (
     SELECT
         username,
-        location,
+        destination_ip,
         count() AS cnt
     FROM logs_structured
-    PREWHERE timestamp >= {start_time:DateTime}
-        AND timestamp < {end_time:DateTime}
+    PREWHERE log_type = {log_type:String}
+        AND timestamp >= {start_time:DateTime64(3)}
+        AND timestamp < {end_time:DateTime64(3)}
     WHERE username != ''
-      AND location != ''
+      AND destination_ip != ''
     GROUP BY
         username,
-        location
+        destination_ip
     ORDER BY
         username ASC,
         cnt DESC
@@ -272,60 +302,35 @@ FROM
 LIMIT {limit:UInt32} BY username;
 ```
 
-### 7.3 Repository 接口
-
 ```python
-def fetch_top_locations(self, start_time, end_time, limit: int) -> list[dict]:
+def fetch_top_destination_ips(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
     ...
 ```
 
 ---
 
-## 8. 用户常用接口 Top-N
-
-### 8.1 用途
-
-统计每个用户最常访问的 API 接口。
-
-### 8.2 endpoint 归一化要求
-
-接口可能包含查询参数，例如：
-
-```text
-/api/order?id=1
-/api/order?id=2
-/api/order?id=3
-```
-
-如果直接聚合，会导致接口基线碎片化。
-
-因此应先去除查询参数：
-
-```sql
-replaceRegexpOne(endpoint, '\\?.*$', '') AS endpoint_path
-```
-
-### 8.3 SQL
+## 9. 用户常用来源国家 Top-N
 
 ```sql
 SELECT
     username,
-    endpoint_path,
+    src_country AS source_country,
     cnt
 FROM
 (
     SELECT
         username,
-        replaceRegexpOne(endpoint, '\\?.*$', '') AS endpoint_path,
+        src_country,
         count() AS cnt
     FROM logs_structured
-    PREWHERE timestamp >= {start_time:DateTime}
-        AND timestamp < {end_time:DateTime}
+    PREWHERE log_type = {log_type:String}
+        AND timestamp >= {start_time:DateTime64(3)}
+        AND timestamp < {end_time:DateTime64(3)}
     WHERE username != ''
-      AND endpoint != ''
+      AND src_country != ''
     GROUP BY
         username,
-        endpoint_path
+        src_country
     ORDER BY
         username ASC,
         cnt DESC
@@ -333,113 +338,191 @@ FROM
 LIMIT {limit:UInt32} BY username;
 ```
 
-### 8.4 Repository 接口
-
 ```python
-def fetch_top_endpoints(self, start_time, end_time, limit: int) -> list[dict]:
+def fetch_top_source_countries(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
     ...
 ```
 
 ---
 
-## 9. 用户行为类型分布
-
-### 9.1 用途
-
-统计用户平时主要有哪些行为类型。
-
-例如：
-
-```text
-LOGIN_SUCCESS
-LOGIN_FAILED
-API_CALL
-LOGOUT
-```
-
-### 9.2 SQL
+## 10. 用户常用来源城市 Top-N
 
 ```sql
 SELECT
     username,
-    action,
-    count() AS cnt
-FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
-WHERE username != ''
-  AND action != ''
-GROUP BY
-    username,
-    action
-ORDER BY
-    username ASC,
-    cnt DESC;
+    src_city AS source_city,
+    cnt
+FROM
+(
+    SELECT
+        username,
+        src_city,
+        count() AS cnt
+    FROM logs_structured
+    PREWHERE log_type = {log_type:String}
+        AND timestamp >= {start_time:DateTime64(3)}
+        AND timestamp < {end_time:DateTime64(3)}
+    WHERE username != ''
+      AND src_city != ''
+    GROUP BY
+        username,
+        src_city
+    ORDER BY
+        username ASC,
+        cnt DESC
+)
+LIMIT {limit:UInt32} BY username;
 ```
-
-### 9.3 Repository 接口
 
 ```python
-def fetch_action_distribution(self, start_time, end_time) -> list[dict]:
+def fetch_top_source_cities(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
     ...
-```
-
-如果 action 类型过多，可以增加：
-
-```sql
-LIMIT {limit:UInt32} BY username
 ```
 
 ---
 
-## 10. 用户状态分布
-
-### 10.1 用途
-
-统计用户行为成功、失败、错误等状态占比。
-
-### 10.2 SQL
+## 11. 用户常用 VPN 网关 Top-N
 
 ```sql
 SELECT
     username,
-    status,
-    count() AS cnt
-FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
-WHERE username != ''
-  AND status != ''
-GROUP BY
-    username,
-    status
-ORDER BY
-    username ASC,
-    cnt DESC;
+    vpn_gateway,
+    cnt
+FROM
+(
+    SELECT
+        username,
+        vpn_gateway,
+        count() AS cnt
+    FROM logs_structured
+    PREWHERE log_type = {log_type:String}
+        AND timestamp >= {start_time:DateTime64(3)}
+        AND timestamp < {end_time:DateTime64(3)}
+    WHERE username != ''
+      AND vpn_gateway != ''
+    GROUP BY
+        username,
+        vpn_gateway
+    ORDER BY
+        username ASC,
+        cnt DESC
+)
+LIMIT {limit:UInt32} BY username;
 ```
 
-### 10.3 Repository 接口
-
 ```python
-def fetch_status_distribution(self, start_time, end_time) -> list[dict]:
+def fetch_top_vpn_gateways(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
     ...
 ```
 
 ---
 
-## 11. 用户每日事件数
+## 12. 行为、事件、结果与失败原因分布
 
-### 11.1 用途
+### 12.1 action 分布
 
-用于计算：
-
-```text
-平均每日事件数
-活跃日平均事件数
-最大单日事件数
+```sql
+SELECT username, action, count() AS cnt
+FROM logs_structured
+PREWHERE log_type = {log_type:String}
+    AND timestamp >= {start_time:DateTime64(3)}
+    AND timestamp < {end_time:DateTime64(3)}
+WHERE username != '' AND action != ''
+GROUP BY username, action
+ORDER BY username ASC, cnt DESC;
 ```
 
-### 11.2 SQL
+```python
+def fetch_action_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+    ...
+```
+
+### 12.2 event_type 分布
+
+```sql
+SELECT username, event_type, count() AS cnt
+FROM logs_structured
+PREWHERE log_type = {log_type:String}
+    AND timestamp >= {start_time:DateTime64(3)}
+    AND timestamp < {end_time:DateTime64(3)}
+WHERE username != '' AND event_type != ''
+GROUP BY username, event_type
+ORDER BY username ASC, cnt DESC;
+```
+
+```python
+def fetch_event_type_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+    ...
+```
+
+### 12.3 result 分布
+
+```sql
+SELECT username, result, count() AS cnt
+FROM logs_structured
+PREWHERE log_type = {log_type:String}
+    AND timestamp >= {start_time:DateTime64(3)}
+    AND timestamp < {end_time:DateTime64(3)}
+WHERE username != '' AND result != ''
+GROUP BY username, result
+ORDER BY username ASC, cnt DESC;
+```
+
+```python
+def fetch_result_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+    ...
+```
+
+### 12.4 fail_reason Top-N
+
+```sql
+SELECT
+    username,
+    fail_reason,
+    cnt
+FROM
+(
+    SELECT
+        username,
+        fail_reason,
+        count() AS cnt
+    FROM logs_structured
+    PREWHERE log_type = {log_type:String}
+        AND timestamp >= {start_time:DateTime64(3)}
+        AND timestamp < {end_time:DateTime64(3)}
+    WHERE username != ''
+      AND fail_reason != ''
+    GROUP BY username, fail_reason
+    ORDER BY username ASC, cnt DESC
+)
+LIMIT {limit:UInt32} BY username;
+```
+
+```python
+def fetch_fail_reason_distribution(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
+    ...
+```
+
+---
+
+## 13. 认证方式、客户端软件、协议分布
+
+```python
+def fetch_auth_method_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+    ...
+
+def fetch_client_software_distribution(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
+    ...
+
+def fetch_protocol_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+    ...
+```
+
+对应 SQL 应分别基于 `auth_method`、`client_software`、`protocol` 做用户维度聚合；`client_software` 可按 Top-N 限制数量。
+
+---
+
+## 14. 用户每日事件数
 
 ```sql
 SELECT
@@ -447,8 +530,9 @@ SELECT
     toDate(timestamp) AS event_date,
     count() AS cnt
 FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
+PREWHERE log_type = {log_type:String}
+    AND timestamp >= {start_time:DateTime64(3)}
+    AND timestamp < {end_time:DateTime64(3)}
 WHERE username != ''
 GROUP BY
     username,
@@ -458,51 +542,99 @@ ORDER BY
     event_date ASC;
 ```
 
-### 11.3 Repository 接口
-
 ```python
-def fetch_daily_event_counts(self, start_time, end_time) -> list[dict]:
+def fetch_daily_event_counts(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
     ...
 ```
 
 ---
 
-## 12. Repository 类建议
+## 15. 会话时长与流量统计
+
+```sql
+SELECT
+    username,
+    avg(session_duration_sec) AS session_duration_avg,
+    max(session_duration_sec) AS session_duration_max,
+    quantileExact(0.5)(session_duration_sec) AS session_duration_p50,
+    quantileExact(0.95)(session_duration_sec) AS session_duration_p95,
+    avg(bytes_sent) AS bytes_sent_avg,
+    avg(bytes_recv) AS bytes_recv_avg,
+    max(bytes_sent) AS bytes_sent_max,
+    max(bytes_recv) AS bytes_recv_max
+FROM logs_structured
+PREWHERE log_type = {log_type:String}
+    AND timestamp >= {start_time:DateTime64(3)}
+    AND timestamp < {end_time:DateTime64(3)}
+WHERE username != ''
+GROUP BY username;
+```
+
+```python
+def fetch_session_metric_summary(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+    ...
+```
+
+返回值可拆分到 `session_metric_summary` 和 `traffic_metric_summary`。
+
+---
+
+## 16. Repository 类建议
 
 ```python
 class UebaRepository:
-    def __init__(self, client, database: str = "log_analysis"):
-        self.client = client
-        self.database = database
-
-    def fetch_user_summary(self, start_time, end_time) -> list[dict]:
+    def fetch_user_summary(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
         ...
 
-    def fetch_hour_distribution(self, start_time, end_time) -> list[dict]:
+    def fetch_hour_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
         ...
 
-    def fetch_top_ips(self, start_time, end_time, limit: int) -> list[dict]:
+    def fetch_top_source_ips(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
         ...
 
-    def fetch_top_locations(self, start_time, end_time, limit: int) -> list[dict]:
+    def fetch_top_destination_ips(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
         ...
 
-    def fetch_top_endpoints(self, start_time, end_time, limit: int) -> list[dict]:
+    def fetch_top_source_countries(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
         ...
 
-    def fetch_action_distribution(self, start_time, end_time) -> list[dict]:
+    def fetch_top_source_cities(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
         ...
 
-    def fetch_status_distribution(self, start_time, end_time) -> list[dict]:
+    def fetch_top_vpn_gateways(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
         ...
 
-    def fetch_daily_event_counts(self, start_time, end_time) -> list[dict]:
+    def fetch_action_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+        ...
+
+    def fetch_event_type_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+        ...
+
+    def fetch_result_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+        ...
+
+    def fetch_fail_reason_distribution(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
+        ...
+
+    def fetch_auth_method_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+        ...
+
+    def fetch_client_software_distribution(self, start_time, end_time, limit: int, log_type: str = "vpn") -> list[dict]:
+        ...
+
+    def fetch_protocol_distribution(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+        ...
+
+    def fetch_daily_event_counts(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
+        ...
+
+    def fetch_session_metric_summary(self, start_time, end_time, log_type: str = "vpn") -> list[dict]:
         ...
 ```
 
 ---
 
-## 13. 聚合方案优势
+## 17. 聚合方案优势
 
 使用数据库侧聚合后，Python 处理的数据规模从：
 
@@ -516,26 +648,15 @@ class UebaRepository:
 用户数 × 每个维度的聚合结果
 ```
 
-例如：
+并且这些聚合行都很短，不包含完整日志正文。
+
+随着日志从十万增长到百万，Python 侧数据量主要取决于：
 
 ```text
-500 个用户
-每个用户最多：
-24 个小时分布
-10 个 IP
-10 个地区
-20 个接口
-若干 action
-若干 status
-30 天每日统计
+用户数
+Top-N 限制
+时间窗口天数
+行为类型数量
 ```
 
-Python 侧处理的是较短的聚合行，而不是完整日志正文。
-
-这样可以有效避免：
-
-```text
-内存暴涨
-处理速度过慢
-Python 对大批量原始日志循环处理压力过大
-```
+这就是数据库侧聚合方案的核心优势。

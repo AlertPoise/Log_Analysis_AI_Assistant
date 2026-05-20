@@ -117,18 +117,17 @@ class UebaBaselineConfig:
     baseline_window_days: int = 30
     min_sample_count: int = 20
 
-    top_ip_limit: int = 10
-    top_location_limit: int = 10
-    top_endpoint_limit: int = 20
-    top_action_limit: int = 20
-    top_status_limit: int = 20
+    top_source_ip_limit: int = 10
+    top_destination_ip_limit: int = 10
+    top_country_limit: int = 10
+    top_city_limit: int = 10
+    top_vpn_gateway_limit: int = 10
+    top_fail_reason_limit: int = 10
+    top_client_software_limit: int = 10
 
     common_hour_min_ratio: float = 0.05
-    common_ip_min_ratio: float = 0.03
-    common_location_min_ratio: float = 0.03
-    common_endpoint_min_ratio: float = 0.02
-
-    endpoint_normalize: bool = True
+    common_source_ip_min_ratio: float = 0.03
+    common_city_min_ratio: float = 0.03
     model_version: str = "ueba_baseline_v1"
 
     write_batch_size: int = 1000
@@ -142,14 +141,16 @@ class UebaBaselineConfig:
 |---|---|
 | `baseline_window_days` | 默认基线时间窗口 |
 | `min_sample_count` | 用户日志量低于该值时认为基线不可靠 |
-| `top_ip_limit` | 每个用户最多保存多少个常用 IP |
-| `top_location_limit` | 每个用户最多保存多少个常用地区 |
-| `top_endpoint_limit` | 每个用户最多保存多少个常用接口 |
+| `top_source_ip_limit` | 每个用户最多保存多少个常用来源 IP |
+| `top_destination_ip_limit` | 每个用户最多保存多少个常用目标 IP |
+| `top_country_limit` | 每个用户最多保存多少个常用来源国家 |
+| `top_city_limit` | 每个用户最多保存多少个常用来源城市 |
+| `top_vpn_gateway_limit` | 每个用户最多保存多少个常用 VPN 网关 |
+| `top_fail_reason_limit` | 每个用户最多保存多少个失败原因 |
+| `top_client_software_limit` | 每个用户最多保存多少个客户端软件 |
 | `common_hour_min_ratio` | 某小时占比达到多少才算常用活跃小时 |
-| `common_ip_min_ratio` | 某 IP 占比达到多少才算常用 IP |
-| `common_location_min_ratio` | 某地区占比达到多少才算常用地区 |
-| `common_endpoint_min_ratio` | 某接口占比达到多少才算常用接口 |
-| `endpoint_normalize` | 是否对 endpoint 去参数归一化 |
+| `common_source_ip_min_ratio` | 某来源 IP 占比达到多少才算常用来源 IP |
+| `common_city_min_ratio` | 某来源城市占比达到多少才算常用来源城市 |
 | `model_version` | 当前基线模型版本 |
 | `write_batch_size` | 批量写入数据库时的批大小 |
 
@@ -192,9 +193,11 @@ class CountRatioItem:
 
 ```text
 常用小时
-常用 IP
-常用地区
-常用接口
+常用来源 IP
+常用目标 IP
+常用来源国家
+常用来源城市
+常用 VPN 网关
 ```
 
 ---
@@ -211,17 +214,28 @@ class UserAggregateFeature:
     username: str
     sample_count: int = 0
     failed_count: int = 0
+    off_hours_count: int = 0
+    unusual_ip_count: int = 0
     active_days: int = 0
     first_seen: datetime | None = None
     last_seen: datetime | None = None
 
     hour_counts: dict[int, int] = field(default_factory=dict)
-    ip_counts: dict[str, int] = field(default_factory=dict)
-    location_counts: dict[str, int] = field(default_factory=dict)
-    endpoint_counts: dict[str, int] = field(default_factory=dict)
+    source_ip_counts: dict[str, int] = field(default_factory=dict)
+    destination_ip_counts: dict[str, int] = field(default_factory=dict)
+    source_country_counts: dict[str, int] = field(default_factory=dict)
+    source_city_counts: dict[str, int] = field(default_factory=dict)
+    vpn_gateway_counts: dict[str, int] = field(default_factory=dict)
     action_counts: dict[str, int] = field(default_factory=dict)
-    status_counts: dict[str, int] = field(default_factory=dict)
+    event_type_counts: dict[str, int] = field(default_factory=dict)
+    result_counts: dict[str, int] = field(default_factory=dict)
+    fail_reason_counts: dict[str, int] = field(default_factory=dict)
+    auth_method_counts: dict[str, int] = field(default_factory=dict)
+    client_software_counts: dict[str, int] = field(default_factory=dict)
+    protocol_counts: dict[str, int] = field(default_factory=dict)
     daily_counts: dict[str, int] = field(default_factory=dict)
+    session_metric_summary: dict[str, float] = field(default_factory=dict)
+    traffic_metric_summary: dict[str, float] = field(default_factory=dict)
 ```
 
 注意：
@@ -246,15 +260,29 @@ class UserBaseline:
     is_reliable: bool
 
     common_active_hours: list[CountRatioItem]
-    common_ips: list[CountRatioItem]
-    common_locations: list[CountRatioItem]
-    common_endpoints: list[CountRatioItem]
+    common_source_ips: list[CountRatioItem]
+    common_destination_ips: list[CountRatioItem]
+    common_source_countries: list[CountRatioItem]
+    common_source_cities: list[CountRatioItem]
+    common_vpn_gateways: list[CountRatioItem]
 
     action_distribution: dict[str, float]
-    status_distribution: dict[str, float]
+    event_type_distribution: dict[str, float]
+    result_distribution: dict[str, float]
+    fail_reason_distribution: dict[str, float]
+    auth_method_distribution: dict[str, float]
+    client_software_distribution: dict[str, float]
+    protocol_distribution: dict[str, float]
 
     failed_rate: float
+    off_hours_rate: float
+    unusual_ip_rate: float
     avg_daily_events: float
+    session_duration_avg: float
+    session_duration_p50: float
+    session_duration_p95: float
+    bytes_sent_avg: float
+    bytes_recv_avg: float
     active_day_avg_events: float
     max_daily_events: int
 

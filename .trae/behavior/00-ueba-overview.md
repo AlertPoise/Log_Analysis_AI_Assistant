@@ -101,36 +101,57 @@ UEBA 不负责采集日志，也不负责解析原始日志。
 
 ## 5. 输入数据
 
-第一版假设输入来自结构化日志表：
+第一版输入来自当前 `logs_structured` 登录 / VPN 行为数据主表。
+
+当前主表字段包括：
 
 ```text
-logs_structured
+timestamp
+log_type
+username
+dept
+role
+action
+event_type
+result
+fail_reason
+source_ip
+destination_ip
+vpn_gateway
+src_country
+src_city
+protocol
+auth_method
+client_software
+session_id
+is_off_hours
+is_unusual_ip
+session_duration_sec
+bytes_sent
+bytes_recv
+risk_score
+risk_tags
+raw_message
+parser
+parse_status
+collected_at
 ```
 
-建议至少包含以下字段：
+当前必须明确：
 
 ```text
-timestamp     日志时间
-username      用户名
-source_ip     来源 IP
-location      来源地区
-action        行为类型
-endpoint      访问接口
-status        执行状态
+1. logs_structured 是登录 / VPN 行为数据主表。
+2. 当前表没有 endpoint 字段，不按 API endpoint 维度设计登录基线。
+3. 当前表没有 status 字段，登录结果使用 result，事件类型使用 event_type。
+4. 当前表没有 location 字段，来源位置使用 src_country、src_city。
+5. is_off_hours、is_unusual_ip 是输入侧已有标签或解析侧特征，只能统计其比例，不能替代 UEBA 自己的基线统计。
+6. risk_score、risk_tags 是历史风险参考字段，不作为 UEBA 第一版最终异常结论。
+7. raw_message 不作为常规基线聚合维度。
+8. parser、parse_status 可用于数据质量过滤或统计，但不是用户行为核心维度。
+9. 查询应优先使用 log_type 和 timestamp 时间范围过滤；默认 log_type 可按 vpn 设计，但必须通过配置或参数传入。
 ```
 
-如果实际字段名不同，需要在 `repository.py` 中做字段适配。
-
-例如：
-
-```text
-user_name  -> username
-src_ip     -> source_ip
-api_path   -> endpoint
-result     -> status
-```
-
-不要让其他模块感知数据库字段差异。
+Repository 层负责把真实字段映射成 UEBA 逻辑字段，不要让其他模块感知数据库字段差异。
 
 ---
 
@@ -145,11 +166,18 @@ result     -> status
 样本数量
 基线是否可靠
 常用活跃小时
-常用 IP
-常用地区
-常用接口
+常用来源 IP
+常用目标 IP
+常用来源国家
+常用来源城市
+常用 VPN 网关
 行为类型分布
-状态分布
+事件类型分布
+结果分布
+失败原因分布
+认证方式分布
+客户端软件分布
+协议分布
 失败率
 平均每日事件数
 活跃日平均事件数
@@ -170,15 +198,29 @@ result     -> status
     {"value": 9, "count": 2300, "ratio": 0.191667},
     {"value": 10, "count": 2100, "ratio": 0.175}
   ],
-  "common_ips": [
+  "common_source_ips": [
     {"value": "10.0.0.1", "count": 8000, "ratio": 0.666667}
   ],
-  "common_locations": [
+  "common_destination_ips": [
+    {"value": "172.16.0.10", "count": 7800, "ratio": 0.65}
+  ],
+  "common_source_countries": [
+    {"value": "中国", "count": 9500, "ratio": 0.791667}
+  ],
+  "common_source_cities": [
     {"value": "北京", "count": 9500, "ratio": 0.791667}
   ],
-  "common_endpoints": [
-    {"value": "/api/login", "count": 3000, "ratio": 0.25}
+  "common_vpn_gateways": [
+    {"value": "vpn-gw-01", "count": 9000, "ratio": 0.75}
   ],
+  "result_distribution": {
+    "SUCCESS": 0.973333,
+    "FAIL": 0.026667
+  },
+  "event_type_distribution": {
+    "LOGIN_SUCCESS": 0.973333,
+    "LOGIN_FAIL": 0.026667
+  },
   "failed_rate": 0.026667,
   "avg_daily_events": 400.0,
   "model_version": "ueba_baseline_v1"
@@ -197,7 +239,7 @@ result     -> status
 3. 不保存每个用户的完整日志列表。
 4. 每个维度使用独立 SQL 聚合，避免巨型 SQL。
 5. 所有 Top-N 特征必须限制数量。
-6. endpoint 必须先去掉查询参数再聚合。
+6. 当前登录主表不包含 endpoint，API endpoint 聚合不属于当前第一版核心能力。
 7. 配置模块当前可临时存在，但后续要支持外部接口传入配置。
 8. 基线复杂字段先用 JSON 字符串存储。
 9. 基线写入必须批量插入。

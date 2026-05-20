@@ -6,11 +6,12 @@
 
 1. 用户当前明确要求
 2. .trae/behavior/99-outdated-sources.md
-3. .trae/behavior/UEBA-module-guide.md
-4. .trae/behavior/00-ueba-overview.md 至 .trae/behavior/05-ueba-script-and-codex-rules.md
-5. .trae/project-rules.md
-6. .trae/ai-assistant-guide.md
-7. 当前真实代码文件树
+3. .trae/behavior/behavior-guide.md
+4. .trae/behavior/UEBA-module-guide.md
+5. .trae/behavior/00-ueba-overview.md 至 .trae/behavior/05-ueba-script-and-codex-rules.md
+6. .trae/project-rules.md
+7. .trae/ai-assistant-guide.md
+8. 当前真实代码文件树
 
 如果旧 README、旧 API 文档、旧任务清单、旧 SQL 文件、旧可视化适配逻辑与当前 UEBA 第一版目标冲突，必须以用户当前要求和 .trae/behavior/99-outdated-sources.md 为准。
 
@@ -40,9 +41,17 @@
 
 config/clickhouse.sql 已被确认是过时文件。
 
-在新的 ClickHouse 表结构由会议确定前，不得根据 config/clickhouse.sql 固化 UEBA 表名、字段名或建表 SQL。
+当前不得根据 config/clickhouse.sql 固化 UEBA 表名、字段名或建表 SQL。
 
 如需写数据库访问层，只能通过 Repository 层保留字段适配空间，不得把旧 SQL 文件中的字段当作最终权威字段。
+
+当前阶段新的 logs_structured 登录数据主表结构由用户提供，应作为 behavior/UEBA 第一版数据库文档修订依据。
+
+如果 config/clickhouse.sql 与用户新提供的 logs_structured 表冲突，以用户新提供的表结构为准。
+
+如果 README、旧文档或旧 prompt 中的数据库字段说明与用户新提供的表结构冲突，应先报告冲突，不要擅自按旧字段实现。
+
+当前新表字段中没有 endpoint、status、location，不要再按这些旧字段设计登录基线。
 
 ### 3.2 docs/behavior_api.md
 

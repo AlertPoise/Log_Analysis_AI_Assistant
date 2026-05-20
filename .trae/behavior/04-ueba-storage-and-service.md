@@ -42,17 +42,29 @@ CREATE TABLE IF NOT EXISTS user_behavior_baselines
     is_reliable UInt8,
 
     common_active_hours String,
-    common_ips String,
-    common_locations String,
-    common_endpoints String,
+    common_source_ips String,
+    common_destination_ips String,
+    common_source_countries String,
+    common_source_cities String,
+    common_vpn_gateways String,
 
     action_distribution String,
-    status_distribution String,
+    event_type_distribution String,
+    result_distribution String,
+    fail_reason_distribution String,
+    auth_method_distribution String,
+    client_software_distribution String,
+    protocol_distribution String,
 
     failed_rate Float64,
+    off_hours_rate Float64,
+    unusual_ip_rate Float64,
     avg_daily_events Float64,
     active_day_avg_events Float64,
     max_daily_events UInt64,
+
+    session_metric_summary String,
+    traffic_metric_summary String,
 
     baseline_start_time DateTime,
     baseline_end_time DateTime,
@@ -75,20 +87,35 @@ ORDER BY (username, model_version, baseline_start_time, baseline_end_time);
 | `sample_count` | 用户在基线窗口内的日志数量 |
 | `is_reliable` | 基线是否可靠 |
 | `common_active_hours` | 常用活跃小时 JSON |
-| `common_ips` | 常用 IP JSON |
-| `common_locations` | 常用地区 JSON |
-| `common_endpoints` | 常用接口 JSON |
+| `common_source_ips` | 常用来源 IP JSON |
+| `common_destination_ips` | 常用目标 IP JSON |
+| `common_source_countries` | 常用来源国家 JSON |
+| `common_source_cities` | 常用来源城市 JSON |
+| `common_vpn_gateways` | 常用 VPN 网关 JSON |
 | `action_distribution` | 行为类型分布 JSON |
-| `status_distribution` | 状态分布 JSON |
-| `failed_rate` | 失败率 |
+| `event_type_distribution` | 事件类型分布 JSON |
+| `result_distribution` | 登录结果分布 JSON |
+| `fail_reason_distribution` | 失败原因分布 JSON |
+| `auth_method_distribution` | 认证方式分布 JSON |
+| `client_software_distribution` | 客户端软件分布 JSON |
+| `protocol_distribution` | 协议分布 JSON |
+| `failed_rate` | 失败率，基于 result / event_type 聚合 |
+| `off_hours_rate` | 非工作时间比例，来自 is_off_hours 聚合结果 |
+| `unusual_ip_rate` | 异常 IP 标签比例，来自 is_unusual_ip 聚合结果 |
 | `avg_daily_events` | 按基线窗口平均的每日事件数 |
 | `active_day_avg_events` | 按活跃天数平均的每日事件数 |
 | `max_daily_events` | 最大单日事件数 |
+| `session_metric_summary` | 会话时长统计 JSON |
+| `traffic_metric_summary` | 发送 / 接收字节数统计 JSON |
 | `baseline_start_time` | 基线开始时间 |
 | `baseline_end_time` | 基线结束时间 |
 | `model_version` | 基线模型版本 |
 | `baseline_json` | 完整基线 JSON |
 | `created_at` | 写入时间 |
+
+当前登录主表没有 `endpoint`、`status`、`location` 字段，因此基线表不建议再保留 `common_endpoints`、`status_distribution`、`common_locations` 作为第一版核心字段。
+
+`risk_score`、`risk_tags` 是输入日志中的历史风险参考字段，不作为第一版基线核心输出。
 
 ---
 
@@ -112,6 +139,8 @@ username
 sample_count
 is_reliable
 failed_rate
+off_hours_rate
+unusual_ip_rate
 avg_daily_events
 model_version
 ```
@@ -119,9 +148,21 @@ model_version
 复杂字段用于展示和后续分析：
 
 ```text
-common_ips
-common_locations
-common_endpoints
+common_active_hours
+common_source_ips
+common_destination_ips
+common_source_countries
+common_source_cities
+common_vpn_gateways
+action_distribution
+event_type_distribution
+result_distribution
+fail_reason_distribution
+auth_method_distribution
+client_software_distribution
+protocol_distribution
+session_metric_summary
+traffic_metric_summary
 baseline_json
 ```
 
@@ -191,47 +232,31 @@ def baseline_to_row(baseline: UserBaseline) -> dict:
         "username": baseline.username,
         "sample_count": baseline.sample_count,
         "is_reliable": 1 if baseline.is_reliable else 0,
-
-        "common_active_hours": json.dumps(
-            baseline_dict["common_active_hours"],
-            ensure_ascii=False,
-        ),
-        "common_ips": json.dumps(
-            baseline_dict["common_ips"],
-            ensure_ascii=False,
-        ),
-        "common_locations": json.dumps(
-            baseline_dict["common_locations"],
-            ensure_ascii=False,
-        ),
-        "common_endpoints": json.dumps(
-            baseline_dict["common_endpoints"],
-            ensure_ascii=False,
-        ),
-
-        "action_distribution": json.dumps(
-            baseline.action_distribution,
-            ensure_ascii=False,
-        ),
-        "status_distribution": json.dumps(
-            baseline.status_distribution,
-            ensure_ascii=False,
-        ),
-
+        "common_active_hours": json.dumps(baseline_dict["common_active_hours"], ensure_ascii=False),
+        "common_source_ips": json.dumps(baseline_dict["common_source_ips"], ensure_ascii=False),
+        "common_destination_ips": json.dumps(baseline_dict["common_destination_ips"], ensure_ascii=False),
+        "common_source_countries": json.dumps(baseline_dict["common_source_countries"], ensure_ascii=False),
+        "common_source_cities": json.dumps(baseline_dict["common_source_cities"], ensure_ascii=False),
+        "common_vpn_gateways": json.dumps(baseline_dict["common_vpn_gateways"], ensure_ascii=False),
+        "action_distribution": json.dumps(baseline.action_distribution, ensure_ascii=False),
+        "event_type_distribution": json.dumps(baseline.event_type_distribution, ensure_ascii=False),
+        "result_distribution": json.dumps(baseline.result_distribution, ensure_ascii=False),
+        "fail_reason_distribution": json.dumps(baseline.fail_reason_distribution, ensure_ascii=False),
+        "auth_method_distribution": json.dumps(baseline.auth_method_distribution, ensure_ascii=False),
+        "client_software_distribution": json.dumps(baseline.client_software_distribution, ensure_ascii=False),
+        "protocol_distribution": json.dumps(baseline.protocol_distribution, ensure_ascii=False),
         "failed_rate": baseline.failed_rate,
+        "off_hours_rate": baseline.off_hours_rate,
+        "unusual_ip_rate": baseline.unusual_ip_rate,
         "avg_daily_events": baseline.avg_daily_events,
         "active_day_avg_events": baseline.active_day_avg_events,
         "max_daily_events": baseline.max_daily_events,
-
+        "session_metric_summary": json.dumps(baseline.session_metric_summary, ensure_ascii=False),
+        "traffic_metric_summary": json.dumps(baseline.traffic_metric_summary, ensure_ascii=False),
         "baseline_start_time": baseline.baseline_start_time,
         "baseline_end_time": baseline.baseline_end_time,
         "model_version": baseline.model_version,
-
-        "baseline_json": json.dumps(
-            baseline_dict,
-            ensure_ascii=False,
-            default=str,
-        ),
+        "baseline_json": json.dumps(baseline_dict, ensure_ascii=False, default=str),
     }
 ```
 
@@ -253,18 +278,7 @@ rows = [baseline_to_row(item) for item in baselines]
 client.insert("user_behavior_baselines", rows)
 ```
 
-如果数据量较大，按批次写：
-
-```python
-def chunks(items, batch_size):
-    for i in range(0, len(items), batch_size):
-        yield items[i:i + batch_size]
-```
-
-```python
-for batch in chunks(rows, config.write_batch_size):
-    client.insert("user_behavior_baselines", batch)
-```
+如果数据量较大，按批次写。
 
 ---
 
@@ -282,28 +296,7 @@ UebaService
 
 ---
 
-## 10. Service 初始化
-
-```python
-class UebaService:
-    def __init__(
-        self,
-        repository: UebaRepository,
-        aggregate_merger: AggregateMerger,
-        baseline_builder: BaselineBuilder,
-        baseline_store: BaselineStore,
-        config: UebaBaselineConfig,
-    ):
-        self.repository = repository
-        self.aggregate_merger = aggregate_merger
-        self.baseline_builder = baseline_builder
-        self.baseline_store = baseline_store
-        self.config = config
-```
-
----
-
-## 11. 一次性构建入口
+## 10. 一次性构建入口
 
 核心方法：
 
@@ -319,111 +312,18 @@ def build_baseline_once(self, start_time, end_time) -> BaselineBuildResult:
 2. 确保基线表存在
 3. 查询用户总览
 4. 查询小时分布
-5. 查询 Top IP
-6. 查询 Top 地区
-7. 查询 Top 接口
-8. 查询行为类型分布
-9. 查询状态分布
-10. 查询每日事件数
-11. 合并聚合结果
-12. 生成用户基线
-13. 批量写入数据库
-14. 返回构建统计信息
+5. 查询 Top 来源 IP、目标 IP、来源国家、来源城市、VPN 网关
+6. 查询 action、event_type、result、fail_reason、auth_method、client_software、protocol 分布
+7. 查询每日事件数、会话时长和流量统计
+8. 合并聚合结果
+9. 生成用户基线
+10. 批量写入数据库
+11. 返回构建统计信息
 ```
 
 ---
 
-## 12. Service 伪代码
-
-```python
-import time
-
-
-class UebaService:
-    def build_baseline_once(self, start_time, end_time) -> BaselineBuildResult:
-        begin = time.time()
-
-        self.baseline_store.ensure_table()
-
-        user_summary_rows = self.repository.fetch_user_summary(start_time, end_time)
-        hour_rows = self.repository.fetch_hour_distribution(start_time, end_time)
-        ip_rows = self.repository.fetch_top_ips(
-            start_time,
-            end_time,
-            self.config.top_ip_limit,
-        )
-        location_rows = self.repository.fetch_top_locations(
-            start_time,
-            end_time,
-            self.config.top_location_limit,
-        )
-        endpoint_rows = self.repository.fetch_top_endpoints(
-            start_time,
-            end_time,
-            self.config.top_endpoint_limit,
-        )
-        action_rows = self.repository.fetch_action_distribution(start_time, end_time)
-        status_rows = self.repository.fetch_status_distribution(start_time, end_time)
-        daily_rows = self.repository.fetch_daily_event_counts(start_time, end_time)
-
-        features = self.aggregate_merger.merge(
-            user_summary_rows=user_summary_rows,
-            hour_rows=hour_rows,
-            ip_rows=ip_rows,
-            location_rows=location_rows,
-            endpoint_rows=endpoint_rows,
-            action_rows=action_rows,
-            status_rows=status_rows,
-            daily_rows=daily_rows,
-        )
-
-        baselines = self.baseline_builder.build_baselines(
-            features=features,
-            start_time=start_time,
-            end_time=end_time,
-        )
-
-        saved_count = self.baseline_store.save_baselines(baselines)
-
-        reliable_count = sum(1 for item in baselines if item.is_reliable)
-        total_log_count = sum(item.sample_count for item in baselines)
-
-        return BaselineBuildResult(
-            success=True,
-            baseline_start_time=start_time,
-            baseline_end_time=end_time,
-            total_user_count=len(baselines),
-            reliable_user_count=reliable_count,
-            unreliable_user_count=len(baselines) - reliable_count,
-            total_log_count=total_log_count,
-            model_version=self.config.model_version,
-            duration_seconds=round(time.time() - begin, 3),
-            message=f"saved {saved_count} user baselines",
-        )
-```
-
----
-
-## 13. 返回结果示例
-
-```json
-{
-  "success": true,
-  "baseline_start_time": "2026-04-19 00:00:00",
-  "baseline_end_time": "2026-05-19 00:00:00",
-  "total_user_count": 500,
-  "reliable_user_count": 420,
-  "unreliable_user_count": 80,
-  "total_log_count": 120000,
-  "model_version": "ueba_baseline_v1",
-  "duration_seconds": 6.84,
-  "message": "saved 500 user baselines"
-}
-```
-
----
-
-## 14. Service 层设计原则
+## 11. Service 层设计原则
 
 ```text
 1. Service 是对外唯一推荐入口。

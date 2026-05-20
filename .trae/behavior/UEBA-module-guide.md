@@ -88,9 +88,9 @@ UEBA 模块的输出是：
 
 ```text
 该用户是否在非常用时间出现
-该用户是否使用了非常用 IP
-该用户是否来自非常用地区
-该用户是否访问了非常用接口
+该用户是否使用了非常用来源 IP
+该用户是否来自非常用国家或城市
+该用户是否使用了非常用目标 IP 或 VPN 网关
 该用户失败率是否异常
 该用户访问频率是否明显偏离历史行为
 ```
@@ -139,7 +139,8 @@ user_logs[username].append(log)
 user_features[username].sample_count += 1
 user_features[username].hour_counter[hour] += 1
 user_features[username].ip_counter[ip] += 1
-user_features[username].endpoint_counter[endpoint] += 1
+user_features[username].source_ip_counts[source_ip] += cnt
+user_features[username].vpn_gateway_counts[vpn_gateway] += cnt
 ```
 
 第一版采用数据库侧聚合后，Python 侧甚至不需要逐条处理日志，只需要处理聚合结果。
@@ -155,12 +156,13 @@ user_features[username].endpoint_counter[endpoint] += 1
 ```text
 1. 用户总览统计
 2. 用户小时分布统计
-3. 用户常用 IP Top-N
-4. 用户常用地区 Top-N
-5. 用户常用接口 Top-N
-6. 用户行为类型分布
-7. 用户状态分布
-8. 用户每日事件数统计
+3. 用户常用来源 IP Top-N
+4. 用户常用目标 IP Top-N
+5. 用户常用来源国家、来源城市 Top-N
+6. 用户常用 VPN 网关 Top-N
+7. 用户行为类型、事件类型、结果分布
+8. 用户失败原因、认证方式、客户端软件、协议分布
+9. 用户每日事件数、会话时长和流量统计
 ```
 
 每个 SQL 只负责一个维度，最终在 Python 侧按 `username` 合并。
@@ -189,9 +191,9 @@ from src.behavior.config import TOP_IP_LIMIT
 
 ```python
 config = UebaBaselineConfig(
-    top_ip_limit=10,
-    top_location_limit=10,
-    top_endpoint_limit=20,
+    top_source_ip_limit=10,
+    top_city_limit=10,
+    top_vpn_gateway_limit=20,
 )
 service = UebaService(repository, baseline_store, config)
 ```
@@ -208,11 +210,20 @@ service = UebaService(repository, baseline_store, config)
 
 ```text
 common_active_hours
-common_ips
-common_locations
-common_endpoints
+common_source_ips
+common_destination_ips
+common_source_countries
+common_source_cities
+common_vpn_gateways
 action_distribution
-status_distribution
+event_type_distribution
+result_distribution
+fail_reason_distribution
+auth_method_distribution
+client_software_distribution
+protocol_distribution
+session_metric_summary
+traffic_metric_summary
 baseline_json
 ```
 
@@ -281,18 +292,17 @@ class UebaBaselineConfig:
     baseline_window_days: int = 30
     min_sample_count: int = 20
 
-    top_ip_limit: int = 10
-    top_location_limit: int = 10
-    top_endpoint_limit: int = 20
-    top_action_limit: int = 20
-    top_status_limit: int = 20
+    top_source_ip_limit: int = 10
+    top_destination_ip_limit: int = 10
+    top_country_limit: int = 10
+    top_city_limit: int = 10
+    top_vpn_gateway_limit: int = 10
+    top_fail_reason_limit: int = 10
+    top_client_software_limit: int = 10
 
     common_hour_min_ratio: float = 0.05
-    common_ip_min_ratio: float = 0.03
-    common_location_min_ratio: float = 0.03
-    common_endpoint_min_ratio: float = 0.02
-
-    endpoint_normalize: bool = True
+    common_source_ip_min_ratio: float = 0.03
+    common_city_min_ratio: float = 0.03
     model_version: str = "ueba_baseline_v1"
 
     write_batch_size: int = 1000
@@ -306,16 +316,15 @@ class UebaBaselineConfig:
 | --------------------------- | ------------------- |
 | `baseline_window_days`      | 默认使用最近多少天日志生成基线     |
 | `min_sample_count`          | 用户日志数低于该值时认为基线不可靠   |
-| `top_ip_limit`              | 每个用户最多保存多少个常用 IP    |
-| `top_location_limit`        | 每个用户最多保存多少个常用地区     |
-| `top_endpoint_limit`        | 每个用户最多保存多少个常用接口     |
+| `top_source_ip_limit`              | 每个用户最多保存多少个常用来源 IP    |
+| `top_city_limit`        | 每个用户最多保存多少个常用地区     |
+| `top_vpn_gateway_limit`        | 每个用户最多保存多少个常用 VPN 网关 |
 | `top_action_limit`          | 每个用户最多保存多少个行为类型     |
-| `top_status_limit`          | 每个用户最多保存多少个状态类型     |
+| `top_result_limit`          | 每个用户最多保存多少个结果类型     |
 | `common_hour_min_ratio`     | 某小时占比达到多少才算常用活跃小时   |
-| `common_ip_min_ratio`       | 某 IP 占比达到多少才算常用 IP  |
-| `common_location_min_ratio` | 某地区占比达到多少才算常用地区     |
-| `common_endpoint_min_ratio` | 某接口占比达到多少才算常用接口     |
-| `endpoint_normalize`        | 是否对 endpoint 去参数归一化 |
+| `common_source_ip_min_ratio`       | 某来源 IP 占比达到多少才算常用来源 IP  |
+| `common_city_min_ratio` | 某地区占比达到多少才算常用地区     |
+| `common_vpn_gateway_min_ratio` | 某 VPN 网关占比达到多少才算常用 VPN 网关     |
 | `model_version`             | 当前基线模型版本            |
 | `write_batch_size`          | 基线写入数据库时的批量大小       |
 
@@ -337,8 +346,8 @@ POST /api/behavior/baseline/build
   "end_time": "2026-05-19 00:00:00",
   "config": {
     "min_sample_count": 50,
-    "top_ip_limit": 10,
-    "top_endpoint_limit": 20,
+    "top_source_ip_limit": 10,
+    "top_vpn_gateway_limit": 20,
     "common_hour_min_ratio": 0.05,
     "model_version": "ueba_baseline_v1"
   }
@@ -392,9 +401,11 @@ class CountRatioItem:
 
 ```text
 常用小时
-常用 IP
-常用地区
-常用接口
+常用来源 IP
+常用目标 IP
+常用来源国家
+常用来源城市
+常用 VPN 网关
 ```
 
 ---
@@ -407,17 +418,28 @@ class UserAggregateFeature:
     username: str
     sample_count: int = 0
     failed_count: int = 0
+    off_hours_count: int = 0
+    unusual_ip_count: int = 0
     active_days: int = 0
     first_seen: datetime | None = None
     last_seen: datetime | None = None
 
     hour_counts: dict[int, int] = field(default_factory=dict)
-    ip_counts: dict[str, int] = field(default_factory=dict)
-    location_counts: dict[str, int] = field(default_factory=dict)
-    endpoint_counts: dict[str, int] = field(default_factory=dict)
+    source_ip_counts: dict[str, int] = field(default_factory=dict)
+    destination_ip_counts: dict[str, int] = field(default_factory=dict)
+    source_country_counts: dict[str, int] = field(default_factory=dict)
+    source_city_counts: dict[str, int] = field(default_factory=dict)
+    vpn_gateway_counts: dict[str, int] = field(default_factory=dict)
     action_counts: dict[str, int] = field(default_factory=dict)
-    status_counts: dict[str, int] = field(default_factory=dict)
+    event_type_counts: dict[str, int] = field(default_factory=dict)
+    result_counts: dict[str, int] = field(default_factory=dict)
+    fail_reason_counts: dict[str, int] = field(default_factory=dict)
+    auth_method_counts: dict[str, int] = field(default_factory=dict)
+    client_software_counts: dict[str, int] = field(default_factory=dict)
+    protocol_counts: dict[str, int] = field(default_factory=dict)
     daily_counts: dict[str, int] = field(default_factory=dict)
+    session_metric_summary: dict[str, float] = field(default_factory=dict)
+    traffic_metric_summary: dict[str, float] = field(default_factory=dict)
 ```
 
 注意：
@@ -438,15 +460,29 @@ class UserBaseline:
     is_reliable: bool
 
     common_active_hours: list[CountRatioItem]
-    common_ips: list[CountRatioItem]
-    common_locations: list[CountRatioItem]
-    common_endpoints: list[CountRatioItem]
+    common_source_ips: list[CountRatioItem]
+    common_destination_ips: list[CountRatioItem]
+    common_source_countries: list[CountRatioItem]
+    common_source_cities: list[CountRatioItem]
+    common_vpn_gateways: list[CountRatioItem]
 
     action_distribution: dict[str, float]
-    status_distribution: dict[str, float]
+    event_type_distribution: dict[str, float]
+    result_distribution: dict[str, float]
+    fail_reason_distribution: dict[str, float]
+    auth_method_distribution: dict[str, float]
+    client_software_distribution: dict[str, float]
+    protocol_distribution: dict[str, float]
 
     failed_rate: float
+    off_hours_rate: float
+    unusual_ip_rate: float
     avg_daily_events: float
+    session_duration_avg: float
+    session_duration_p50: float
+    session_duration_p95: float
+    bytes_sent_avg: float
+    bytes_recv_avg: float
     active_day_avg_events: float
     max_daily_events: int
 
@@ -490,430 +526,127 @@ class BaselineBuildResult:
 
 ---
 
-### 7.2 假设结构化日志表
+### 7.2 当前 logs_structured 登录数据主表
 
-第一版假设结构化日志表名为：
-
-```text
-logs_structured
-```
-
-核心字段为：
+第一版数据库说明以用户新提供的 `logs_structured` 登录 / VPN 行为数据主表为准。当前表字段包括：
 
 ```text
-timestamp   DateTime
-username    String
-source_ip   String
-location    String
-action      String
-endpoint    String
-status      String
-```
-
-如果实际项目中的字段名不同，应在 `repository.py` 中做适配。
-
-例如实际字段叫：
-
-```text
-user_name
-src_ip
-api_path
+timestamp
+log_type
+username
+dept
+role
+action
+event_type
 result
+fail_reason
+source_ip
+destination_ip
+vpn_gateway
+src_country
+src_city
+protocol
+auth_method
+client_software
+session_id
+is_off_hours
+is_unusual_ip
+session_duration_sec
+bytes_sent
+bytes_recv
+risk_score
+risk_tags
+raw_message
+parser
+parse_status
+collected_at
 ```
 
-则 SQL 中统一别名为：
-
-```sql
-SELECT
-    user_name AS username,
-    src_ip AS source_ip,
-    api_path AS endpoint,
-    result AS status
-FROM logs_structured
-```
-
-不要让 `baseline_builder.py`、`aggregate_merger.py` 直接感知数据库字段差异。
-
----
-
-### 7.3 统一时间过滤条件
-
-所有聚合 SQL 都必须使用相同时间窗口。
-
-ClickHouse 推荐使用：
-
-```sql
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
-WHERE username != ''
-```
-
-这里的 `{start_time:DateTime}`、`{end_time:DateTime}`、`{limit:UInt32}` 只表示逻辑参数。
-
-实际代码实现必须以项目现有 ClickHouse 封装为准。当前项目使用 clickhouse_connect / ClickHouseClient 的 `client.query(query, parameters=params)` 参数化查询方式时，应采用该客户端支持的参数写法。
-
-重点是：
+必须明确：
 
 ```text
-必须参数化，不要通过字符串拼接把 start_time、end_time、limit 等用户输入直接拼进 SQL。
-Repository 层负责封装 SQL 参数，不允许上层模块拼 SQL。
+1. 当前表是登录 / VPN 行为数据主表。
+2. 当前表没有 endpoint 字段，不按 API endpoint 维度设计登录基线。
+3. 当前表没有 status 字段，登录结果字段是 result，事件字段是 event_type。
+4. 当前表没有 location 字段，来源位置使用 src_country、src_city。
+5. is_off_hours、is_unusual_ip 是输入侧已有标签或解析侧特征，只能统计其比例，不能替代 UEBA 自己的基线统计。
+6. risk_score、risk_tags 是已有风险字段，只能作为历史风险参考，不作为 UEBA 第一版最终异常结论。
+7. raw_message 不作为常规基线聚合维度。
+8. parser、parse_status 可用于数据质量过滤或统计，但不是用户行为核心维度。
+9. 当前排序键是 (log_type, timestamp)，聚合查询应优先使用 log_type 和时间范围过滤。
+10. 当前默认 log_type 可以按 vpn 设计，但应通过配置或参数传入，不能永久写死。
 ```
 
----
-
-### 7.4 用户总览统计
-
-用途：生成每个用户的基础统计骨架。
-
-SQL：
-
-```sql
-SELECT
-    username,
-    count() AS sample_count,
-    min(timestamp) AS first_seen,
-    max(timestamp) AS last_seen,
-    countIf(lower(status) IN ('failed', 'fail', 'error', 'failure')) AS failed_count,
-    uniqExact(toDate(timestamp)) AS active_days
-FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
-WHERE username != ''
-GROUP BY username;
-```
-
-返回示例：
+### 7.3 Repository 逻辑字段映射
 
 ```text
-username    sample_count    failed_count    active_days
-zhangsan    12000           320             27
-lisi        8500            110             25
+event_time ← timestamp
+log_type ← log_type
+username ← username
+dept ← dept
+role ← role
+source_ip ← source_ip
+destination_ip ← destination_ip
+source_country ← src_country
+source_city ← src_city
+action ← action
+event_type ← event_type
+result ← result
+fail_reason ← fail_reason
+vpn_gateway ← vpn_gateway
+protocol ← protocol
+auth_method ← auth_method
+client_software ← client_software
+session_id ← session_id
+session_duration_sec ← session_duration_sec
+bytes_sent ← bytes_sent
+bytes_recv ← bytes_recv
+is_off_hours ← is_off_hours
+is_unusual_ip ← is_unusual_ip
+parser ← parser
+parse_status ← parse_status
+collected_at ← collected_at
 ```
 
-Repository 接口：
+字段名差异只允许在 `repository.py` 中适配，不要让 `baseline_builder.py`、`aggregate_merger.py` 直接感知数据库字段差异。
 
-```python
-def fetch_user_summary(self, start_time, end_time) -> list[dict]:
-    ...
-```
+### 7.4 统一时间过滤条件
 
----
-
-### 7.5 用户小时分布统计
-
-用途：统计用户在哪些小时段活跃。
-
-SQL：
+所有聚合 SQL 都必须使用相同时间窗口和日志类型过滤。
 
 ```sql
-SELECT
-    username,
-    toHour(timestamp) AS active_hour,
-    count() AS cnt
-FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
+PREWHERE log_type = {log_type:String}
+    AND timestamp >= {start_time:DateTime64(3)}
+    AND timestamp < {end_time:DateTime64(3)}
 WHERE username != ''
-GROUP BY
-    username,
-    active_hour
-ORDER BY
-    username,
-    active_hour;
 ```
 
-说明：
+这些 `{}` 参数只是逻辑表达，实际代码必须以项目 ClickHouseClient / clickhouse_connect 支持的 `client.query(query, parameters=params)` 参数化方式为准。禁止字符串拼接用户输入。
+
+### 7.5 Repository 方法
+
+当前登录表第一版建议提供：
 
 ```text
-第一版建议称为 active_hours，而不是 login_hours。
+fetch_user_summary(start_time, end_time, log_type="vpn")
+fetch_hour_distribution(start_time, end_time, log_type="vpn")
+fetch_top_source_ips(start_time, end_time, limit, log_type="vpn")
+fetch_top_destination_ips(start_time, end_time, limit, log_type="vpn")
+fetch_top_source_countries(start_time, end_time, limit, log_type="vpn")
+fetch_top_source_cities(start_time, end_time, limit, log_type="vpn")
+fetch_top_vpn_gateways(start_time, end_time, limit, log_type="vpn")
+fetch_action_distribution(start_time, end_time, log_type="vpn")
+fetch_event_type_distribution(start_time, end_time, log_type="vpn")
+fetch_result_distribution(start_time, end_time, log_type="vpn")
+fetch_fail_reason_distribution(start_time, end_time, limit, log_type="vpn")
+fetch_auth_method_distribution(start_time, end_time, log_type="vpn")
+fetch_client_software_distribution(start_time, end_time, limit, log_type="vpn")
+fetch_protocol_distribution(start_time, end_time, log_type="vpn")
+fetch_daily_event_counts(start_time, end_time, log_type="vpn")
+fetch_session_metric_summary(start_time, end_time, log_type="vpn")
 ```
 
-原因是当前结构化日志中不一定只有登录行为。除非 action 能稳定区分登录事件，否则不要把所有日志小时分布都称为登录小时分布。
-
-Repository 接口：
-
-```python
-def fetch_hour_distribution(self, start_time, end_time) -> list[dict]:
-    ...
-```
-
----
-
-### 7.6 用户常用 IP Top-N
-
-用途：统计每个用户最常见的来源 IP。
-
-SQL：
-
-```sql
-SELECT
-    username,
-    source_ip,
-    cnt
-FROM
-(
-    SELECT
-        username,
-        source_ip,
-        count() AS cnt
-    FROM logs_structured
-    PREWHERE timestamp >= {start_time:DateTime}
-        AND timestamp < {end_time:DateTime}
-    WHERE username != ''
-      AND source_ip != ''
-    GROUP BY
-        username,
-        source_ip
-    ORDER BY
-        username ASC,
-        cnt DESC
-)
-LIMIT {limit:UInt32} BY username;
-```
-
-Repository 接口：
-
-```python
-def fetch_top_ips(self, start_time, end_time, limit: int) -> list[dict]:
-    ...
-```
-
----
-
-### 7.7 用户常用地区 Top-N
-
-用途：统计每个用户最常见的登录或访问地区。
-
-SQL：
-
-```sql
-SELECT
-    username,
-    location,
-    cnt
-FROM
-(
-    SELECT
-        username,
-        location,
-        count() AS cnt
-    FROM logs_structured
-    PREWHERE timestamp >= {start_time:DateTime}
-        AND timestamp < {end_time:DateTime}
-    WHERE username != ''
-      AND location != ''
-    GROUP BY
-        username,
-        location
-    ORDER BY
-        username ASC,
-        cnt DESC
-)
-LIMIT {limit:UInt32} BY username;
-```
-
-Repository 接口：
-
-```python
-def fetch_top_locations(self, start_time, end_time, limit: int) -> list[dict]:
-    ...
-```
-
----
-
-### 7.8 用户常用接口 Top-N
-
-用途：统计每个用户最常访问的 API 接口。
-
-接口字段需要特别注意：
-
-```text
-/api/order?id=1
-/api/order?id=2
-/api/order?id=3
-```
-
-如果直接按完整 URL 聚合，会导致接口基线极度碎片化。
-
-因此第一版建议去掉查询参数：
-
-```sql
-replaceRegexpOne(endpoint, '\\?.*$', '') AS endpoint_path
-```
-
-SQL：
-
-```sql
-SELECT
-    username,
-    endpoint_path,
-    cnt
-FROM
-(
-    SELECT
-        username,
-        replaceRegexpOne(endpoint, '\\?.*$', '') AS endpoint_path,
-        count() AS cnt
-    FROM logs_structured
-    PREWHERE timestamp >= {start_time:DateTime}
-        AND timestamp < {end_time:DateTime}
-    WHERE username != ''
-      AND endpoint != ''
-    GROUP BY
-        username,
-        endpoint_path
-    ORDER BY
-        username ASC,
-        cnt DESC
-)
-LIMIT {limit:UInt32} BY username;
-```
-
-Repository 接口：
-
-```python
-def fetch_top_endpoints(self, start_time, end_time, limit: int) -> list[dict]:
-    ...
-```
-
----
-
-### 7.9 用户行为类型分布
-
-用途：统计用户行为类型占比。
-
-SQL：
-
-```sql
-SELECT
-    username,
-    action,
-    count() AS cnt
-FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
-WHERE username != ''
-  AND action != ''
-GROUP BY
-    username,
-    action
-ORDER BY
-    username ASC,
-    cnt DESC;
-```
-
-Repository 接口：
-
-```python
-def fetch_action_distribution(self, start_time, end_time) -> list[dict]:
-    ...
-```
-
-如果 action 种类可能非常多，可以增加：
-
-```sql
-LIMIT {limit:UInt32} BY username
-```
-
----
-
-### 7.10 用户状态分布
-
-用途：统计用户成功、失败、错误等状态占比。
-
-SQL：
-
-```sql
-SELECT
-    username,
-    status,
-    count() AS cnt
-FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
-WHERE username != ''
-  AND status != ''
-GROUP BY
-    username,
-    status
-ORDER BY
-    username ASC,
-    cnt DESC;
-```
-
-Repository 接口：
-
-```python
-def fetch_status_distribution(self, start_time, end_time) -> list[dict]:
-    ...
-```
-
----
-
-### 7.11 用户每日事件数
-
-用途：计算用户平均每日事件数、活跃日平均事件数、最大单日事件数。
-
-SQL：
-
-```sql
-SELECT
-    username,
-    toDate(timestamp) AS event_date,
-    count() AS cnt
-FROM logs_structured
-PREWHERE timestamp >= {start_time:DateTime}
-    AND timestamp < {end_time:DateTime}
-WHERE username != ''
-GROUP BY
-    username,
-    event_date
-ORDER BY
-    username ASC,
-    event_date ASC;
-```
-
-Repository 接口：
-
-```python
-def fetch_daily_event_counts(self, start_time, end_time) -> list[dict]:
-    ...
-```
-
----
-
-### 7.12 Repository 类建议结构
-
-```python
-class UebaRepository:
-    def __init__(self, client, database: str = "log_analysis"):
-        self.client = client
-        self.database = database
-
-    def fetch_user_summary(self, start_time, end_time) -> list[dict]:
-        ...
-
-    def fetch_hour_distribution(self, start_time, end_time) -> list[dict]:
-        ...
-
-    def fetch_top_ips(self, start_time, end_time, limit: int) -> list[dict]:
-        ...
-
-    def fetch_top_locations(self, start_time, end_time, limit: int) -> list[dict]:
-        ...
-
-    def fetch_top_endpoints(self, start_time, end_time, limit: int) -> list[dict]:
-        ...
-
-    def fetch_action_distribution(self, start_time, end_time) -> list[dict]:
-        ...
-
-    def fetch_status_distribution(self, start_time, end_time) -> list[dict]:
-        ...
-
-    def fetch_daily_event_counts(self, start_time, end_time) -> list[dict]:
-        ...
-```
+失败统计基于 `result` / `event_type`，来源位置统计基于 `src_country` / `src_city`。API endpoint 相关聚合是后续 API 日志扩展，不属于当前登录主表第一版核心字段。
 
 ---
 
@@ -964,10 +697,10 @@ class AggregateMerger:
         user_summary_rows: list[dict],
         hour_rows: list[dict],
         ip_rows: list[dict],
-        location_rows: list[dict],
-        endpoint_rows: list[dict],
+        source_country_rows: list[dict],
+        vpn_gateway_rows: list[dict],
         action_rows: list[dict],
-        status_rows: list[dict],
+        result_rows: list[dict],
         daily_rows: list[dict],
     ) -> dict[str, UserAggregateFeature]:
         ...
@@ -1011,27 +744,27 @@ for row in ip_rows:
     username = row["username"]
     if username not in features:
         continue
-    features[username].ip_counts[str(row["source_ip"])] = int(row["cnt"])
+    features[username].source_ip_counts[str(row["source_ip"])] = int(row["cnt"])
 ```
 
 合并地区：
 
 ```python
-for row in location_rows:
+for row in source_country_rows:
     username = row["username"]
     if username not in features:
         continue
-    features[username].location_counts[str(row["location"])] = int(row["cnt"])
+    features[username].source_country_counts[str(row["source_country"])] = int(row["cnt"])
 ```
 
 合并接口：
 
 ```python
-for row in endpoint_rows:
+for row in vpn_gateway_rows:
     username = row["username"]
     if username not in features:
         continue
-    features[username].endpoint_counts[str(row["endpoint_path"])] = int(row["cnt"])
+    features[username].vpn_gateway_counts[str(row["vpn_gateway"])] = int(row["cnt"])
 ```
 
 合并行为类型：
@@ -1044,14 +777,14 @@ for row in action_rows:
     features[username].action_counts[str(row["action"])] = int(row["cnt"])
 ```
 
-合并状态分布：
+合并结果分布：
 
 ```python
-for row in status_rows:
+for row in result_rows:
     username = row["username"]
     if username not in features:
         continue
-    features[username].status_counts[str(row["status"])] = int(row["cnt"])
+    features[username].result_counts[str(row["result"])] = int(row["cnt"])
 ```
 
 合并每日事件数：
@@ -1214,14 +947,14 @@ common_active_hours = build_count_ratio_items(
 
 ---
 
-### 9.6 常用 IP
+### 9.6 常用来源 IP
 
 ```python
-common_ips = build_count_ratio_items(
-    counts=feature.ip_counts,
+common_source_ips = build_count_ratio_items(
+    counts=feature.source_ip_counts,
     total=feature.sample_count,
-    limit=config.top_ip_limit,
-    min_ratio=config.common_ip_min_ratio,
+    limit=config.top_source_ip_limit,
+    min_ratio=config.common_source_ip_min_ratio,
 )
 ```
 
@@ -1238,19 +971,19 @@ IP 值
 ```text
 从来没出现过的 IP
 出现过但占比极低的 IP
-稳定常用 IP
+稳定常用来源 IP
 ```
 
 ---
 
-### 9.7 常用地区
+### 9.7 常用来源国家和城市
 
 ```python
-common_locations = build_count_ratio_items(
-    counts=feature.location_counts,
+common_source_countries = build_count_ratio_items(
+    counts=feature.source_country_counts,
     total=feature.sample_count,
-    limit=config.top_location_limit,
-    min_ratio=config.common_location_min_ratio,
+    limit=config.top_country_limit,
+)
 )
 ```
 
@@ -1258,40 +991,28 @@ common_locations = build_count_ratio_items(
 
 ```json
 [
-  {"value": "北京", "count": 9500, "ratio": 0.791667},
-  {"value": "上海", "count": 1300, "ratio": 0.108333}
+  {"value": "中国", "count": 9500, "ratio": 0.791667}
 ]
 ```
 
 ---
 
-### 9.8 常用接口
+### 9.8 常用 VPN 网关
 
 ```python
-common_endpoints = build_count_ratio_items(
-    counts=feature.endpoint_counts,
+common_vpn_gateways = build_count_ratio_items(
+    counts=feature.vpn_gateway_counts,
     total=feature.sample_count,
-    limit=config.top_endpoint_limit,
-    min_ratio=config.common_endpoint_min_ratio,
+    limit=config.top_vpn_gateway_limit,
+    min_ratio=config.common_vpn_gateway_min_ratio,
 )
 ```
 
-接口必须经过归一化后再聚合。
-
-推荐基线保存的是：
+当前登录主表没有 endpoint 字段，不做接口归一化。VPN 网关基线应保存实际的 vpn_gateway 聚合值，例如：
 
 ```text
-/api/order/query
-/api/user/profile
-/api/login
-```
-
-而不是：
-
-```text
-/api/order/query?id=1
-/api/order/query?id=2
-/api/order/query?id=3
+vpn-gw-01
+vpn-gw-02
 ```
 
 ---
@@ -1324,17 +1045,16 @@ def build_distribution(counts: dict[str, int], total: int) -> dict[str, float]:
 
 ---
 
-### 9.10 状态分布
+### 9.10 结果与事件类型分布
 
-同样转成比例字典。
+同样转成比例字典。当前登录主表没有 status 字段，成功失败使用 result 和 event_type。
 
 示例：
 
 ```json
 {
   "SUCCESS": 0.96,
-  "FAILED": 0.03,
-  "ERROR": 0.01
+  "FAIL": 0.04
 }
 ```
 
@@ -1404,14 +1124,14 @@ max_daily_events = max(feature.daily_counts.values(), default=0)
     {"value": 10, "count": 2100, "ratio": 0.175},
     {"value": 14, "count": 1800, "ratio": 0.15}
   ],
-  "common_ips": [
+  "common_source_ips": [
     {"value": "10.0.0.1", "count": 8000, "ratio": 0.666667},
     {"value": "10.0.0.2", "count": 3000, "ratio": 0.25}
   ],
-  "common_locations": [
+  "common_source_countries": [
     {"value": "北京", "count": 9500, "ratio": 0.791667}
   ],
-  "common_endpoints": [
+  "common_vpn_gateways": [
     {"value": "/api/login", "count": 3000, "ratio": 0.25},
     {"value": "/api/order/query", "count": 2400, "ratio": 0.2}
   ],
@@ -1421,7 +1141,7 @@ max_daily_events = max(feature.daily_counts.values(), default=0)
     "LOGOUT": 0.05,
     "LOGIN_FAILED": 0.02
   },
-  "status_distribution": {
+  "result_distribution": {
     "SUCCESS": 0.96,
     "FAILED": 0.03,
     "ERROR": 0.01
@@ -1466,12 +1186,12 @@ CREATE TABLE IF NOT EXISTS user_behavior_baselines
     is_reliable UInt8,
 
     common_active_hours String,
-    common_ips String,
-    common_locations String,
-    common_endpoints String,
+    common_source_ips String,
+    common_source_countries String,
+    common_vpn_gateways String,
 
     action_distribution String,
-    status_distribution String,
+    result_distribution String,
 
     failed_rate Float64,
     avg_daily_events Float64,
@@ -1536,11 +1256,11 @@ model_version
 
 ```text
 common_active_hours
-common_ips
-common_locations
-common_endpoints
+common_source_ips
+common_source_countries
+common_vpn_gateways
 action_distribution
-status_distribution
+result_distribution
 ```
 
 这样后期新增字段时，可以先写进 JSON，不必立刻改表结构。
@@ -1603,11 +1323,11 @@ def baseline_to_row(baseline: UserBaseline) -> dict:
         "sample_count": baseline.sample_count,
         "is_reliable": 1 if baseline.is_reliable else 0,
         "common_active_hours": json.dumps(baseline_dict["common_active_hours"], ensure_ascii=False),
-        "common_ips": json.dumps(baseline_dict["common_ips"], ensure_ascii=False),
-        "common_locations": json.dumps(baseline_dict["common_locations"], ensure_ascii=False),
-        "common_endpoints": json.dumps(baseline_dict["common_endpoints"], ensure_ascii=False),
+        "common_source_ips": json.dumps(baseline_dict["common_source_ips"], ensure_ascii=False),
+        "common_source_countries": json.dumps(baseline_dict["common_source_countries"], ensure_ascii=False),
+        "common_vpn_gateways": json.dumps(baseline_dict["common_vpn_gateways"], ensure_ascii=False),
         "action_distribution": json.dumps(baseline.action_distribution, ensure_ascii=False),
-        "status_distribution": json.dumps(baseline.status_distribution, ensure_ascii=False),
+        "result_distribution": json.dumps(baseline.result_distribution, ensure_ascii=False),
         "failed_rate": baseline.failed_rate,
         "avg_daily_events": baseline.avg_daily_events,
         "active_day_avg_events": baseline.active_day_avg_events,
@@ -1688,21 +1408,21 @@ class UebaService:
 
         user_summary_rows = self.repository.fetch_user_summary(start_time, end_time)
         hour_rows = self.repository.fetch_hour_distribution(start_time, end_time)
-        ip_rows = self.repository.fetch_top_ips(start_time, end_time, self.config.top_ip_limit)
-        location_rows = self.repository.fetch_top_locations(start_time, end_time, self.config.top_location_limit)
-        endpoint_rows = self.repository.fetch_top_endpoints(start_time, end_time, self.config.top_endpoint_limit)
+        ip_rows = self.repository.fetch_top_source_ips(start_time, end_time, self.config.top_source_ip_limit)
+        source_country_rows = self.repository.fetch_top_source_countries(start_time, end_time, self.config.top_city_limit)
+        vpn_gateway_rows = self.repository.fetch_top_vpn_gateways(start_time, end_time, self.config.top_vpn_gateway_limit)
         action_rows = self.repository.fetch_action_distribution(start_time, end_time)
-        status_rows = self.repository.fetch_status_distribution(start_time, end_time)
+        result_rows = self.repository.fetch_result_distribution(start_time, end_time)
         daily_rows = self.repository.fetch_daily_event_counts(start_time, end_time)
 
         features = self.aggregate_merger.merge(
             user_summary_rows=user_summary_rows,
             hour_rows=hour_rows,
             ip_rows=ip_rows,
-            location_rows=location_rows,
-            endpoint_rows=endpoint_rows,
+            source_country_rows=source_country_rows,
+            vpn_gateway_rows=vpn_gateway_rows,
             action_rows=action_rows,
-            status_rows=status_rows,
+            result_rows=result_rows,
             daily_rows=daily_rows,
         )
 
@@ -1769,8 +1489,8 @@ python scripts/build_ueba_baseline.py \
   --start-time "2026-04-19 00:00:00" \
   --end-time "2026-05-19 00:00:00" \
   --min-sample-count 20 \
-  --top-ip-limit 10 \
-  --top-endpoint-limit 20
+  --top-source-ip-limit 10 \
+  --top-vpn-gateway-limit 20
 ```
 
 如果不传 `start-time` 和 `end-time`，可以默认使用最近 30 天。
@@ -1820,15 +1540,15 @@ repository.fetch_user_summary()
     ↓
 repository.fetch_hour_distribution()
     ↓
-repository.fetch_top_ips()
+repository.fetch_top_source_ips()
     ↓
-repository.fetch_top_locations()
+repository.fetch_top_source_countries()
     ↓
-repository.fetch_top_endpoints()
+repository.fetch_top_vpn_gateways()
     ↓
 repository.fetch_action_distribution()
     ↓
-repository.fetch_status_distribution()
+repository.fetch_result_distribution()
     ↓
 repository.fetch_daily_event_counts()
     ↓
@@ -1869,7 +1589,7 @@ baseline_store.save_baselines()
 - 10 个地区
 - 20 个接口
 - 若干 action
-- 若干 status
+- 若干 result / event_type
 - 30 个每日统计
 ```
 
@@ -2046,7 +1766,7 @@ user_behavior_baselines
 3. 每个维度使用独立、清晰、可调试的聚合 SQL。
 4. Python 侧只合并聚合结果，不保存原始日志列表。
 5. 所有 Top-N 维度必须限制数量。
-6. endpoint 必须去掉查询参数后再聚合。
+6. 当前登录主表不包含 endpoint，API endpoint 聚合不属于当前第一版核心能力。
 7. config.py 只是默认配置，业务逻辑应通过 UebaBaselineConfig 接收配置。
 8. 复杂基线字段先用 JSON 字符串存储。
 9. 基线写入必须批量插入。
