@@ -1,6 +1,6 @@
 """
-Command-line entry point for one-time UEBA baseline building.
+一次性 UEBA Baseline 构建的命令行入口。
 
-TODO: Implement this script in a later stage.
-TODO: Do not parse arguments or call service logic in this skeleton.
+TODO: 在后续阶段实现此脚本。
+TODO: 此骨架中不要解析参数或调用 Service 逻辑。
 """

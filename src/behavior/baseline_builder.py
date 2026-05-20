@@ -1,6 +1,6 @@
 """
-UEBA baseline builder module.
+UEBA Baseline Builder 模块。
 
-TODO: Implement offline UserAggregateFeature to UserBaseline conversion in a later stage.
-TODO: Do not implement real-time anomaly detection in this module.
+TODO: 在后续阶段实现离线 UserAggregateFeature 到 UserBaseline 的转换。
+TODO: 本模块不要实现实时异常检测。
 """

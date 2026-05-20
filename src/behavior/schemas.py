@@ -1,5 +1,5 @@
 """
-UEBA internal schema definitions.
+UEBA 内部 Schema 定义。
 
-TODO: Implement UserAggregateFeature, UserBaseline, and BaselineBuildResult in a later stage.
+TODO: 在后续阶段实现 UserAggregateFeature、UserBaseline 和 BaselineBuildResult。
 """

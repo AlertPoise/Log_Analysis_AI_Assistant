@@ -1,5 +1,5 @@
 """
-Tests for UEBA repository aggregation constraints.
+UEBA Repository 聚合约束测试。
 
-TODO: Add real tests in a later stage.
+TODO: 在后续阶段添加真实测试。
 """

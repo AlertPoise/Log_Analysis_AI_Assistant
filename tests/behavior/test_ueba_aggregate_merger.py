@@ -1,5 +1,5 @@
 """
-Tests for UEBA aggregate merger module.
+UEBA Aggregate Merger 模块测试。
 
-TODO: Add real tests in a later stage.
+TODO: 在后续阶段添加真实测试。
 """

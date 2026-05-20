@@ -1,6 +1,6 @@
 """
-UEBA baseline storage module.
+UEBA Baseline 存储模块。
 
-TODO: Implement batch persistence to user_behavior_baselines in a later stage.
-TODO: Do not add database write logic in this skeleton.
+TODO: 在后续阶段实现到 user_behavior_baselines 的批量持久化。
+TODO: 此骨架中不要添加数据库写入逻辑。
 """

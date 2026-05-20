@@ -1,5 +1,5 @@
 """
-Behavior / UEBA package marker.
+Behavior / UEBA 包标记。
 
-TODO: Keep this package marker minimal until UEBA objects are implemented.
+TODO: 在 UEBA 对象实现前，保持此包标记最小化。
 """

@@ -1,5 +1,5 @@
 """
-Tests for UEBA baseline builder module.
+UEBA Baseline Builder 模块测试。
 
-TODO: Add real tests in a later stage.
+TODO: 在后续阶段添加真实测试。
 """
