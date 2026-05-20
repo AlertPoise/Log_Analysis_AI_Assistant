@@ -119,15 +119,15 @@ class UebaBaselineConfig:
 
     top_source_ip_limit: int = 10
     top_destination_ip_limit: int = 10
-    top_country_limit: int = 10
-    top_city_limit: int = 10
+    top_source_country_limit: int = 10
+    top_source_city_limit: int = 10
     top_vpn_gateway_limit: int = 10
     top_fail_reason_limit: int = 10
     top_client_software_limit: int = 10
 
     common_hour_min_ratio: float = 0.05
     common_source_ip_min_ratio: float = 0.03
-    common_city_min_ratio: float = 0.03
+    common_source_city_min_ratio: float = 0.03
     model_version: str = "ueba_baseline_v1"
 
     write_batch_size: int = 1000
@@ -143,14 +143,14 @@ class UebaBaselineConfig:
 | `min_sample_count` | 用户日志量低于该值时认为基线不可靠 |
 | `top_source_ip_limit` | 每个用户最多保存多少个常用来源 IP |
 | `top_destination_ip_limit` | 每个用户最多保存多少个常用目标 IP |
-| `top_country_limit` | 每个用户最多保存多少个常用来源国家 |
-| `top_city_limit` | 每个用户最多保存多少个常用来源城市 |
+| `top_source_country_limit` | 每个用户最多保存多少个常用来源国家 |
+| `top_source_city_limit` | 每个用户最多保存多少个常用来源城市 |
 | `top_vpn_gateway_limit` | 每个用户最多保存多少个常用 VPN 网关 |
 | `top_fail_reason_limit` | 每个用户最多保存多少个失败原因 |
 | `top_client_software_limit` | 每个用户最多保存多少个客户端软件 |
 | `common_hour_min_ratio` | 某小时占比达到多少才算常用活跃小时 |
 | `common_source_ip_min_ratio` | 某来源 IP 占比达到多少才算常用来源 IP |
-| `common_city_min_ratio` | 某来源城市占比达到多少才算常用来源城市 |
+| `common_source_city_min_ratio` | 某来源城市占比达到多少才算常用来源城市 |
 | `model_version` | 当前基线模型版本 |
 | `write_batch_size` | 批量写入数据库时的批大小 |
 

@@ -39,7 +39,7 @@ python scripts/build_ueba_baseline.py \
   --min-sample-count 20 \
   --top-source-ip-limit 10 \
   --top-destination-ip-limit 10 \
-  --top-city-limit 10 \
+  --top-source-city-limit 10 \
   --top-vpn-gateway-limit 10
 ```
 
@@ -89,7 +89,7 @@ POST /api/behavior/baseline/build
     "min_sample_count": 20,
     "top_source_ip_limit": 10,
     "top_destination_ip_limit": 10,
-    "top_city_limit": 10,
+    "top_source_city_limit": 10,
     "top_vpn_gateway_limit": 10,
     "common_hour_min_ratio": 0.05,
     "model_version": "ueba_baseline_v1"
@@ -215,10 +215,9 @@ client_software
 因此第一版不得要求：
 
 ```text
-endpoint_path
-fetch_top_endpoints()
-common_endpoints
+API endpoint Top-N
 endpoint 查询参数归一化
+旧接口类基线字段
 ```
 
 如果后续接入 API 日志，API endpoint 相关聚合应作为另一类 `log_type` 或另一张表的扩展，不属于当前登录主表第一版核心字段。

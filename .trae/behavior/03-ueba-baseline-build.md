@@ -297,14 +297,14 @@ common_destination_ips = build_count_ratio_items(
 common_source_countries = build_count_ratio_items(
     counts=feature.source_country_counts,
     total=feature.sample_count,
-    limit=config.top_country_limit,
+    limit=config.top_source_country_limit,
 )
 
 common_source_cities = build_count_ratio_items(
     counts=feature.source_city_counts,
     total=feature.sample_count,
-    limit=config.top_city_limit,
-    min_ratio=config.common_city_min_ratio,
+    limit=config.top_source_city_limit,
+    min_ratio=config.common_source_city_min_ratio,
 )
 
 common_vpn_gateways = build_count_ratio_items(
@@ -314,7 +314,7 @@ common_vpn_gateways = build_count_ratio_items(
 )
 ```
 
-当前登录主表没有 `endpoint` 字段，因此第一版不生成 `common_endpoints`。
+当前登录主表没有 `endpoint` 字段，因此第一版不生成 API endpoint 相关基线字段。
 
 ---
 
@@ -344,7 +344,7 @@ client_software_distribution
 protocol_distribution
 ```
 
-当前登录主表没有 `status` 字段，因此第一版不生成 `status_distribution`；成功失败应基于 `result` / `event_type`。
+当前登录主表没有 `status` 字段，因此第一版不生成旧状态分布字段；成功失败应基于 `result` / `event_type`。
 
 ---
 

@@ -113,7 +113,7 @@ ORDER BY (username, model_version, baseline_start_time, baseline_end_time);
 | `baseline_json` | 完整基线 JSON |
 | `created_at` | 写入时间 |
 
-当前登录主表没有 `endpoint`、`status`、`location` 字段，因此基线表不建议再保留 `common_endpoints`、`status_distribution`、`common_locations` 作为第一版核心字段。
+当前登录主表没有 `endpoint`、`status`、`location` 字段，因此基线表不建议再保留旧接口、旧状态、旧地区相关字段作为第一版核心字段。
 
 `risk_score`、`risk_tags` 是输入日志中的历史风险参考字段，不作为第一版基线核心输出。
 

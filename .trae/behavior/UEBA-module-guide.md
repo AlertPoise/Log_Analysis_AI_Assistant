@@ -192,7 +192,7 @@ from src.behavior.config import TOP_IP_LIMIT
 ```python
 config = UebaBaselineConfig(
     top_source_ip_limit=10,
-    top_city_limit=10,
+    top_source_city_limit=10,
     top_vpn_gateway_limit=20,
 )
 service = UebaService(repository, baseline_store, config)
@@ -294,15 +294,15 @@ class UebaBaselineConfig:
 
     top_source_ip_limit: int = 10
     top_destination_ip_limit: int = 10
-    top_country_limit: int = 10
-    top_city_limit: int = 10
+    top_source_country_limit: int = 10
+    top_source_city_limit: int = 10
     top_vpn_gateway_limit: int = 10
     top_fail_reason_limit: int = 10
     top_client_software_limit: int = 10
 
     common_hour_min_ratio: float = 0.05
     common_source_ip_min_ratio: float = 0.03
-    common_city_min_ratio: float = 0.03
+    common_source_city_min_ratio: float = 0.03
     model_version: str = "ueba_baseline_v1"
 
     write_batch_size: int = 1000
@@ -317,13 +317,13 @@ class UebaBaselineConfig:
 | `baseline_window_days`      | 默认使用最近多少天日志生成基线     |
 | `min_sample_count`          | 用户日志数低于该值时认为基线不可靠   |
 | `top_source_ip_limit`              | 每个用户最多保存多少个常用来源 IP    |
-| `top_city_limit`        | 每个用户最多保存多少个常用地区     |
+| `top_source_city_limit`        | 每个用户最多保存多少个常用来源城市     |
 | `top_vpn_gateway_limit`        | 每个用户最多保存多少个常用 VPN 网关 |
 | `top_action_limit`          | 每个用户最多保存多少个行为类型     |
 | `top_result_limit`          | 每个用户最多保存多少个结果类型     |
 | `common_hour_min_ratio`     | 某小时占比达到多少才算常用活跃小时   |
 | `common_source_ip_min_ratio`       | 某来源 IP 占比达到多少才算常用来源 IP  |
-| `common_city_min_ratio` | 某地区占比达到多少才算常用地区     |
+| `common_source_city_min_ratio` | 某来源城市占比达到多少才算常用来源城市     |
 | `common_vpn_gateway_min_ratio` | 某 VPN 网关占比达到多少才算常用 VPN 网关     |
 | `model_version`             | 当前基线模型版本            |
 | `write_batch_size`          | 基线写入数据库时的批量大小       |
@@ -982,7 +982,7 @@ IP 值
 common_source_countries = build_count_ratio_items(
     counts=feature.source_country_counts,
     total=feature.sample_count,
-    limit=config.top_country_limit,
+    limit=config.top_source_country_limit,
 )
 )
 ```
@@ -1409,7 +1409,7 @@ class UebaService:
         user_summary_rows = self.repository.fetch_user_summary(start_time, end_time)
         hour_rows = self.repository.fetch_hour_distribution(start_time, end_time)
         ip_rows = self.repository.fetch_top_source_ips(start_time, end_time, self.config.top_source_ip_limit)
-        source_country_rows = self.repository.fetch_top_source_countries(start_time, end_time, self.config.top_city_limit)
+        source_country_rows = self.repository.fetch_top_source_countries(start_time, end_time, self.config.top_source_city_limit)
         vpn_gateway_rows = self.repository.fetch_top_vpn_gateways(start_time, end_time, self.config.top_vpn_gateway_limit)
         action_rows = self.repository.fetch_action_distribution(start_time, end_time)
         result_rows = self.repository.fetch_result_distribution(start_time, end_time)

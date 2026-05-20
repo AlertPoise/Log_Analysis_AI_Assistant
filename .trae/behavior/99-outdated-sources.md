@@ -45,13 +45,48 @@ config/clickhouse.sql 已被确认是过时文件。
 
 如需写数据库访问层，只能通过 Repository 层保留字段适配空间，不得把旧 SQL 文件中的字段当作最终权威字段。
 
-当前阶段新的 logs_structured 登录数据主表结构由用户提供，应作为 behavior/UEBA 第一版数据库文档修订依据。
+当前阶段新的 `logs_structured` 登录 / VPN 主表结构由用户提供，应作为 behavior/UEBA 第一版数据库文档修订依据。
 
-如果 config/clickhouse.sql 与用户新提供的 logs_structured 表冲突，以用户新提供的表结构为准。
+当前 `logs_structured` 关键字段摘要：
 
-如果 README、旧文档或旧 prompt 中的数据库字段说明与用户新提供的表结构冲突，应先报告冲突，不要擅自按旧字段实现。
+```text
+timestamp
+log_type
+username
+dept
+role
+action
+event_type
+result
+fail_reason
+source_ip
+destination_ip
+vpn_gateway
+src_country
+src_city
+protocol
+auth_method
+client_software
+session_id
+is_off_hours
+is_unusual_ip
+session_duration_sec
+bytes_sent
+bytes_recv
+risk_score
+risk_tags
+parser
+parse_status
+collected_at
+```
 
-当前新表字段中没有 endpoint、status、location，不要再按这些旧字段设计登录基线。
+如果 `config/clickhouse.sql` 与用户新提供的 `logs_structured` 表冲突，以用户新提供的表结构为准。
+
+如果 README、旧 API、旧 prompt、旧 dashboard 或旧 SQL 中的数据库字段说明与用户新提供的表结构冲突，应先报告冲突，不要擅自按旧字段实现。
+
+当前新表字段中没有 `endpoint`、`status`、`location`，不要再按这些旧字段设计登录基线。
+
+API endpoint 聚合属于后续 API 日志扩展，不属于当前登录 / VPN 主表第一版核心能力。
 
 ### 3.2 docs/behavior_api.md
 

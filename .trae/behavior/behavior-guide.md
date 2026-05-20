@@ -281,14 +281,14 @@ baseline_window_days
 min_sample_count
 top_source_ip_limit
 top_destination_ip_limit
-top_country_limit
-top_city_limit
+top_source_country_limit
+top_source_city_limit
 top_vpn_gateway_limit
 top_fail_reason_limit
 top_client_software_limit
 common_hour_min_ratio
 common_source_ip_min_ratio
-common_city_min_ratio
+common_source_city_min_ratio
 model_version
 write_batch_size
 ```
@@ -910,7 +910,7 @@ BaselineBuildResult
 --min-sample-count
 --top-source-ip-limit
 --top-destination-ip-limit
---top-city-limit
+--top-source-city-limit
 --top-vpn-gateway-limit
 --model-version
 ```
@@ -957,7 +957,7 @@ python scripts/build_ueba_baseline.py \
   --min-sample-count 20 \
   --top-source-ip-limit 10 \
   --top-destination-ip-limit 10 \
-  --top-city-limit 10 \
+  --top-source-city-limit 10 \
   --top-vpn-gateway-limit 10
 ```
 
@@ -1155,7 +1155,7 @@ python scripts/build_ueba_baseline.py \
   --min-sample-count 20 \
   --top-source-ip-limit 10 \
   --top-destination-ip-limit 10 \
-  --top-city-limit 10 \
+  --top-source-city-limit 10 \
   --top-vpn-gateway-limit 10
 ```
 
