@@ -18,8 +18,8 @@ CREATE TABLE IF NOT EXISTS logs_raw (
     source_ip Nullable(String),
     action Nullable(String),
     status Nullable(String),
-    collected_at DateTime DEFAULT now(),
-    created_at DateTime DEFAULT now()
+    collected_at DateTime,
+    created_at DateTime
 ) ENGINE = Kafka()
 SETTINGS
     kafka_broker_list = 'localhost:9092',
@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS anomaly_detection (
     processed_at Nullable(DateTime),
     ai_analysis Nullable(String),
     threat_type Nullable(String),
-   处置建议 Nullable(String)
+    suggestion Nullable(String)
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(detection_time)
 ORDER BY (detection_time, username)
@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS ai_analysis_reports (
     created_at DateTime DEFAULT now()
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(report_date)
-ORDER BY (report_date, risk_level DESC, risk_score DESC)
+ORDER BY (report_date, risk_level, risk_score)
 TTL report_date + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;
 
@@ -186,7 +186,7 @@ AS SELECT
     countIf(action = 'LOGIN') as login_count,
     countIf(action = 'LOGOUT') as logout_count,
     countIf(action LIKE '%API%') as api_call_count,
-    countIf(status = 'FAILED') as failed_login_count,
+    countIf(result IN ('FAILED', 'FAIL') OR event_type = 'LOGIN_FAIL') as failed_login_count,
     uniq(source_ip) as unique_ips,
     0 as unique_locations,
     0.0 as avg_response_time,
