@@ -67,7 +67,7 @@ bytes_sent UInt64             发送字节数
 bytes_recv UInt64             接收字节数
 risk_score UInt8              历史风险评分参考
 risk_tags String              历史风险标签参考
-raw_message String            原始日志消息
+raw_log Nullable(String)      结构化表中的原始日志文本
 parser String                 解析器名称
 parse_status String           解析状态
 collected_at DateTime64(3)    采集入库时间
@@ -78,13 +78,16 @@ collected_at DateTime64(3)    采集入库时间
 ```text
 1. 当前表是登录 / VPN 行为数据主表。
 2. 当前表没有 endpoint 字段，不能按 API endpoint 维度设计登录基线。
-3. 当前表没有 status 字段，登录结果字段是 result，事件字段是 event_type。
-4. 当前表没有 location 字段，来源位置应使用 src_country、src_city。
-5. is_off_hours、is_unusual_ip 是输入侧已有标签或解析侧特征，不能替代 UEBA 自己的基线统计。
-6. risk_score、risk_tags 是已有风险字段，只能作为历史风险参考，不作为 UEBA 第一版最终异常结论。
-7. raw_message 不作为常规基线聚合维度。
-8. parser、parse_status 可用于数据质量过滤或统计，但不是用户行为核心维度。
-9. 当前排序键是 (log_type, timestamp)，聚合查询应优先使用 log_type 和时间范围过滤。
+3. 当前结构化表没有旧登录结果字段 status，登录结果字段是 result，事件字段是 event_type。
+4. status_code 可以作为通用扩展字段存在，但不等同于 UEBA 登录结果 status。
+5. 当前结构化表保留 location Nullable(String) 作为通用扩展字段，但 location 不是 UEBA v1 来源位置字段，来源位置应使用 src_country、src_city。
+6. is_off_hours、is_unusual_ip 是输入侧已有标签或解析侧特征，不能替代 UEBA 自己的基线统计。
+7. risk_score、risk_tags 是已有风险字段，只能作为历史风险参考，不作为 UEBA 第一版最终异常结论。
+8. logs_raw Kafka 原始表中可以存在 raw_message String；logs_structured 结构化表当前实际字段是 raw_log Nullable(String)，不包含 raw_message。
+9. raw_message / raw_log 只作为原始日志文本或测试数据标记字段，不作为 UEBA v1 核心聚合维度。
+10. parser、parse_status 可用于数据质量过滤或统计，但不是用户行为核心维度。
+11. 当前排序键是 (log_type, timestamp)，聚合查询应优先使用 log_type 和时间范围过滤。
+12. Repository 不得按 endpoint / status / location 旧字段设计登录 / VPN 核心基线。
 ```
 
 如果后续接入 API 日志，API endpoint 相关聚合应作为另一类 `log_type` 或另一张表的扩展，不属于当前登录主表第一版核心字段。
@@ -208,7 +211,7 @@ SELECT
     count() AS sample_count,
     min(timestamp) AS first_seen,
     max(timestamp) AS last_seen,
-    countIf(result = 'FAIL' OR event_type = 'LOGIN_FAIL') AS failed_count,
+    countIf(result IN ('FAILED', 'FAIL') OR event_type = 'LOGIN_FAIL') AS failed_count,
     uniqExact(toDate(timestamp)) AS active_days,
     countIf(is_off_hours) AS off_hours_count,
     countIf(is_unusual_ip) AS unusual_ip_count

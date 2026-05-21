@@ -140,8 +140,12 @@ def test_fetch_user_summary_uses_current_summary_fields():
     sql, _parameters, _rows = capture_call(lambda repo: repo.fetch_user_summary(START_TIME, END_TIME, LOG_TYPE))
     normalized = normalize_sql(sql).lower()
 
-    assert "result = 'fail'" in normalized
+    assert "result in ('failed', 'fail')" in normalized
+    assert "'failed'" in normalized
+    assert "'fail'" in normalized
     assert "event_type = 'login_fail'" in normalized
+    assert not re.search(r"\bstatus\b", normalized)
+    assert "status_code" not in normalized
     assert "is_off_hours" in normalized
     assert "is_unusual_ip" in normalized
     assert "uniqexact(todate(timestamp))" in normalized

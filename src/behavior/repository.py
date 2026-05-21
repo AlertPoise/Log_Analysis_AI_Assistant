@@ -29,7 +29,7 @@ class UebaRepository:
             count() AS sample_count,
             min(timestamp) AS first_seen,
             max(timestamp) AS last_seen,
-            countIf(result = 'FAIL' OR event_type = 'LOGIN_FAIL') AS failed_count,
+            countIf(result IN ('FAILED', 'FAIL') OR event_type = 'LOGIN_FAIL') AS failed_count,
             uniqExact(toDate(timestamp)) AS active_days,
             countIf(is_off_hours) AS off_hours_count,
             countIf(is_unusual_ip) AS unusual_ip_count
