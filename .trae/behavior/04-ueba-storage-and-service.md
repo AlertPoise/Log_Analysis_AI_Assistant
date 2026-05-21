@@ -216,6 +216,30 @@ class BaselineStore:
 
 ---
 
+## 6.1 BaselineStore / Service 与配置系统的边界
+
+PR #23 后，项目已经通过 `src/utils/config.py`、`.env.example`、`src/storage/clickhouse.py` 和 `docs/dashboard_continuous统一环境配置文档.md` 强化统一环境配置。
+
+BaselineStore 初始化 client 时不应自行硬编码连接参数。
+
+推荐边界：
+
+```text
+1. BaselineStore 优先接收外部传入 client。
+2. 如果确实需要创建 client，应参考 src/storage/clickhouse.py 当前 ClickHouseClient.from_settings() 方式。
+3. UebaService 只接收 Repository / Merger / Builder / Store，不直接读取 settings、不直接创建 client。
+4. CLI 层可以负责读取 CLI 参数 / 环境变量 / settings 并创建 client。
+5. .env.example 只作为环境变量名称参考，不得复制示例密钥或密码。
+```
+
+更新后的 `config/clickhouse.sql` 可作为部署初始化和通用日志表结构参考，但 `user_behavior_baselines` 表设计仍以 UEBA 当前实现和本 prompt 为准。
+
+如果全局 SQL、当前真实代码和 UEBA prompt 对表结构存在差异，先报告冲突并请求确认。
+
+旧 `src/behavior/api.py` 仍不能覆盖当前 UEBA v1 的 Service 主线。
+
+---
+
 ## 7. 基线序列化
 
 写入数据库前，需要将 `UserBaseline` 转成数据库行。

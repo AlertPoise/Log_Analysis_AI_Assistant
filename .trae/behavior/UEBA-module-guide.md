@@ -202,6 +202,36 @@ service = UebaService(repository, baseline_store, config)
 
 ---
 
+### 3.4.1 feature PR #23 后的 settings / ClickHouseClient 约束
+
+PR #23 后，项目已经强化统一环境配置读取。Repository / Store / CLI 初始化 ClickHouse client 时，应优先兼容：
+
+```text
+src/utils/config.py 中的 settings
+src/storage/clickhouse.py 中的 ClickHouseClient.from_settings()
+.env.example 中的 ClickHouse 环境变量名
+docs/dashboard_continuous统一环境配置文档.md 中的部署和配置说明
+```
+
+UEBA 模块不应硬编码 ClickHouse 连接参数，例如 host、port、database、user、password。
+
+建议边界：
+
+```text
+1. Repository / Store 优先接收外部传入 client。
+2. CLI 层负责读取 CLI 参数、环境变量或 settings，并创建 client。
+3. 如果必须在 UEBA 相关入口创建 client，应复用或兼容 ClickHouseClient.from_settings。
+4. UebaService 只编排 Repository / Merger / Builder / Store，不直接读取 settings、不直接创建 client。
+```
+
+更新后的 `config/clickhouse.sql` 可作为通用表结构参考，但不能替代 `schemas.py`、`baseline_store.py` 的内部数据结构设计。
+
+如果 `config/clickhouse.sql` 中 `logs_structured` 字段与 `repository.py` 当前查询字段冲突，应先报告，不要静默改字段。
+
+旧 `src/behavior/api.py` 仍属于旧 behavior 接口风险来源，不得反向决定当前 UEBA v1 的 Service 主线。
+
+---
+
 ### 3.5 复杂字段先用 JSON 字符串存储
 
 第一版不要过度设计复杂嵌套表结构。

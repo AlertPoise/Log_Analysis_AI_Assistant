@@ -37,7 +37,7 @@ Python 获取聚合结果
 
 ## 2. 当前 logs_structured 登录数据主表
 
-当前阶段以用户新提供的 `logs_structured` 登录 / VPN 行为数据主表为准。
+当前阶段以用户新提供的 `logs_structured` 登录 / VPN 行为数据主表为准，并结合 PR #23 后更新的 `config/clickhouse.sql`、Parser / storage 当前真实 schema 共同校验。
 
 字段如下：
 
@@ -88,6 +88,25 @@ collected_at DateTime64(3)    采集入库时间
 ```
 
 如果后续接入 API 日志，API endpoint 相关聚合应作为另一类 `log_type` 或另一张表的扩展，不属于当前登录主表第一版核心字段。
+
+---
+
+## 2.1 schema 来源交叉校验规则
+
+feature PR #23 后，`config/clickhouse.sql` 已可作为 `logs_structured` 通用字段参考之一，不再写成“绝对禁止查看”。
+
+但禁止仅凭 `config/clickhouse.sql` 单独反向设计 UEBA；写 `repository.py` 查询前必须交叉检查：
+
+```text
+config/clickhouse.sql
+src/storage/clickhouse.py
+src/utils/config.py
+docs/dashboard_continuous统一环境配置文档.md
+Parser / storage 当前真实 schema
+当前 .trae/behavior 设计
+```
+
+如果这些来源之间字段名、表名、默认数据库或连接方式冲突，必须先报告冲突并请求确认，不要静默修改 UEBA 字段映射。
 
 ---
 

@@ -13,6 +13,17 @@
 | `04-ueba-storage-and-service.md` | 基线表设计、批量写入、Service 对外入口 |
 | `05-ueba-script-and-codex-rules.md` | 脚本入口、后期接口扩展、Codex 开发约束 |
 
+
+## 相关外部配置说明文件
+
+| 文件路径 | 用途 |
+|---|---|
+| `config/clickhouse.sql` | PR #23 后更新的全局 ClickHouse 初始化脚本和通用表结构参考 |
+| `.env.example` | 环境变量模板参考，不得复制示例密钥或密码 |
+| `src/utils/config.py` | `settings` 配置读取来源 |
+| `src/storage/clickhouse.py` | `ClickHouseClient` 封装、`from_settings()` 和连接重试参考 |
+| `docs/dashboard_continuous统一环境配置文档.md` | dashboard_continuous、统一环境配置、`.env` 与 ClickHouse 连接方式说明 |
+
 ## 当前 UEBA 第一版定位
 
 当前第一版不是完整实时 UEBA 系统，而是：

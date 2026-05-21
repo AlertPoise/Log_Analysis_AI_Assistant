@@ -35,7 +35,7 @@
 
 ## 0.1 当前登录数据主表阶段依据
 
-当前数据库说明以用户新提供的 `logs_structured` 登录 / VPN 行为数据主表为准。
+当前数据库说明以用户新提供的 `logs_structured` 登录 / VPN 行为数据主表、PR #23 后更新的 `config/clickhouse.sql`、Parser / storage 当前真实 schema 共同校验为准。
 
 当前主表字段包括：
 
@@ -52,6 +52,33 @@ timestamp, log_type, username, dept, role, action, event_type, result, fail_reas
 4. is_off_hours、is_unusual_ip 是输入侧已有标签，只能统计比例，不能替代 UEBA 自己的基线统计。
 5. risk_score、risk_tags 只能作为历史风险参考，不作为 UEBA 第一版最终异常结论。
 6. 查询应优先使用 log_type 和 timestamp 时间范围过滤；默认 log_type 可按 vpn 设计，但必须通过配置或参数传入。
+```
+
+---
+
+## 0.2 feature PR #23 后的配置读取约束
+
+upstream feature PR #23 已更新统一环境配置，`config/clickhouse.sql` 不再是绝对禁用文件。它可以用于确认当前全局 ClickHouse 初始化方式和 `logs_structured` 相关通用字段。
+
+但 UEBA v1 的 `repository.py`、`baseline_store.py`、`service.py` 仍必须遵守当前 `.trae/behavior` 设计和真实代码边界。`config/clickhouse.sql` 不能单独覆盖 UEBA 专用表、基线流程或 Service 主线。
+
+后续涉及 ClickHouse 连接参数时，必须优先查看：
+
+```text
+src/utils/config.py
+src/storage/clickhouse.py
+.env.example
+docs/dashboard_continuous统一环境配置文档.md
+```
+
+配置读取规则：
+
+```text
+1. 不应继续硬编码 ClickHouse host、port、database、user、password。
+2. 如果脚本或 Store 需要创建 client，应尽量兼容 ClickHouseClient.from_settings 或现有 settings 设计。
+3. .env.example 只作为环境变量名称参考，不得复制示例密钥或密码。
+4. 旧 src/behavior/api.py 仍属于旧 behavior 接口风险来源，不得覆盖当前 UEBA v1 service 主线。
+5. 如果 config/clickhouse.sql 与 UEBA prompt 或当前真实代码冲突，先报告冲突并请求确认。
 ```
 
 ---
@@ -189,7 +216,7 @@ scripts/
 1. 当前只做离线一次性用户行为基线构建
 2. 不做实时异常检测
 3. 不做旧前端接口兼容
-4. 不根据旧 config/clickhouse.sql 固化当前设计
+4. 不仅凭 config/clickhouse.sql 单独固化或反向设计当前 UEBA
 5. 不根据旧 dashboard 表名反向设计 UEBA
 6. 外部入口最终走 UebaService.build_baseline_once()
 ```
@@ -200,6 +227,7 @@ scripts/
 2. 已明确旧 Behavior 异常检测逻辑不是当前核心目标；
 3. 已明确旧 dashboard 表名不能反向约束当前输出表；
 4. 已明确正式流程禁止 `SELECT * FROM logs_structured`。
+5. 已明确 ClickHouse 连接配置优先来自 settings / .env / 当前 ClickHouseClient 封装，不硬编码连接参数。
 
 ---
 
@@ -1266,7 +1294,7 @@ Codex 后续开发约束
 
 ```text
 1. Codex 执行任务前必须阅读 .trae/behavior prompt 文件
-2. 旧 config/clickhouse.sql 不是当前核心依据
+2. config/clickhouse.sql 可作全局初始化参考，但不能单独覆盖 UEBA 专用设计
 3. 旧 docs/behavior_api.md 不是当前核心依据
 4. 旧 dashboard 表名不是当前核心依据
 5. 当前运行命令

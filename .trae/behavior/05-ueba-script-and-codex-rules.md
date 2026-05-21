@@ -115,22 +115,49 @@ UebaService
 
 ## 6. 当前数据库字段约束
 
-当前数据库说明以用户新提供的 `logs_structured` 登录数据主表为准。
+当前数据库说明以用户新提供的 `logs_structured` 登录数据主表为准，并结合 PR #23 后更新的 `config/clickhouse.sql`、`src/utils/config.py`、`src/storage/clickhouse.py`、Parser / storage 当前真实 schema 共同校验。
 
 必须明确：
 
 ```text
-1. config/clickhouse.sql 仍然是过时文件，不得作为当前表结构依据。
-2. 当前登录主表不包含 endpoint、status、location 字段。
-3. 当前不得按 API endpoint 维度设计登录基线。
+1. config/clickhouse.sql 已经更新，可作为全局 ClickHouse 初始化和通用表结构参考。
+2. 禁止仅凭 config/clickhouse.sql 单独反向设计 UEBA；必须与当前真实代码和 feature 后配置说明交叉校验。
+3. 当前不得按 API endpoint 维度设计登录基线，除非后续明确接入 API 日志扩展。
 4. 当前应基于 result / event_type 统计成功失败。
 5. 当前应基于 src_country / src_city 统计来源位置。
 6. 当前应基于 source_ip、destination_ip、vpn_gateway、auth_method、client_software、protocol 等字段构建登录行为基线。
 7. 当前可统计 is_off_hours、is_unusual_ip 的比例，但它们不能替代 UEBA 自己的基线统计。
 8. 不得把 risk_score、risk_tags 作为 UEBA 第一版最终异常结论。
+9. 如果 config/clickhouse.sql、UEBA prompt 与当前真实代码存在字段冲突，先报告冲突并请求确认。
 ```
 
 如果旧 README、旧 API 文档、旧 SQL 文件、旧 dashboard 逻辑与上述字段冲突，以用户当前要求和 `.trae/behavior/99-outdated-sources.md` 为准。
+
+---
+
+## 6.1 CLI 与 settings / .env / ClickHouseClient 的关系
+
+`scripts/build_ueba_baseline.py` 后续如果继续优化，应优先兼容：
+
+```text
+src/utils/config.py 中的 settings
+src/storage/clickhouse.py 中的 ClickHouseClient.from_settings()
+.env.example 中的 ClickHouse 环境变量名
+docs/dashboard_continuous统一环境配置文档.md 中的统一环境配置说明
+```
+
+脚本约束：
+
+```text
+1. 不应重新硬编码 ClickHouse host、port、database、user、password。
+2. .env.example 是环境变量名称参考，但不得复制其中示例密钥或密码到代码。
+3. clickhouse_connect 应延迟导入，保证 --help 和脚本导入不因缺少依赖失败。
+4. 如果项目已有 ClickHouseClient.from_settings，优先复用或兼容，而不是重新硬编码 get_client 参数。
+5. 涉及 dashboard / ClickHouse / settings 的脚本说明必须先阅读 docs/dashboard_continuous统一环境配置文档.md。
+6. Codex 不得伪造 pytest、ClickHouse 连接或端到端运行结果。
+```
+
+旧 `src/behavior/api.py` 仍属于旧 behavior 接口风险来源，不得覆盖当前 UEBA v1 的脚本到 Service 调用链路。
 
 ---
 
