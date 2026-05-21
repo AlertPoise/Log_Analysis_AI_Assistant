@@ -354,13 +354,13 @@ def to_csv(logs: list[VPNLogEntry], path: str):
         writer.writeheader()
         for log in logs:
             writer.writerow(asdict(log))
-    print(f"[CSV] 已写入 {len(logs)} 条 -> {path}")
+    #print(f"[CSV] 已写入 {len(logs)} 条 -> {path}")
 
 def to_jsonl(logs: list[VPNLogEntry], path: str):
     with open(path, "w", encoding="utf-8") as f:
         for log in logs:
             f.write(json.dumps(asdict(log), ensure_ascii=False) + "\n")
-    print(f"[JSONL] 已写入 {len(logs)} 条 -> {path}")
+    #print(f"[JSONL] 已写入 {len(logs)} 条 -> {path}")
 
 def to_syslog(logs: list[VPNLogEntry], path: str):
     """模拟 syslog 格式输出"""
@@ -383,7 +383,7 @@ def to_syslog(logs: list[VPNLogEntry], path: str):
                 line += f" bytes_recv={d['bytes_recv']} bytes_sent={d['bytes_sent']}"
             line += f" risk_score={d['risk_score']} risk_tags=\"{d['risk_tags']}\""
             f.write(line + "\n")
-    print(f"[Syslog] 已写入 {len(logs)} 条 -> {path}")
+    #print(f"[Syslog] 已写入 {len(logs)} 条 -> {path}")
 
 def print_stats(logs: list[VPNLogEntry]):
     total = len(logs)

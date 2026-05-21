@@ -16,6 +16,22 @@ from pydantic import Field
 class Settings(BaseSettings):
     """应用配置"""
 
+    # ========== 新增：行为分析详细配置 ==========
+    analysis_window_minutes: int = Field(default=5, env="ANALYSIS_WINDOW_MINUTES")
+    analysis_interval_sec: int = Field(default=60, env="ANALYSIS_INTERVAL_SEC")
+
+    # ========== 新增：日志生成速度控制（用于测试） ==========
+    log_gen_interval_sec: int = Field(default=1, env="LOG_GEN_INTERVAL_SEC")
+    logs_per_batch: int = Field(default=10, env="LOGS_PER_BATCH")
+
+    # ========== 新增：临时目录路径 ==========
+    test_tmp_dir: str = Field(default="./test_tmp", env="TEST_TMP_DIR")
+
+    # ========== 新增：Filebeat 相关 ==========
+    filebeat_data_dir: str = Field(default="./test_tmp/filebeat_data", env="FILEBEAT_DATA_DIR")
+    filebeat_logs_dir: str = Field(default="./test_tmp/filebeat_logs", env="FILEBEAT_LOGS_DIR")
+    filebeat_config_dir: str = Field(default="./test_tmp/filebeat_config", env="FILEBEAT_CONFIG_DIR")
+
     # AI API 配置 - Kimi (Moonshot AI)
     moonshot_api_key: Optional[str] = Field(default=None, env="MOONSHOT_API_KEY")
     moonshot_model: str = Field(default="kimi-k2.6", env="MOONSHOT_MODEL")
@@ -56,6 +72,7 @@ class Settings(BaseSettings):
     clickhouse_database: str = Field(default="log_analysis", env="CLICKHOUSE_DATABASE")
     clickhouse_user: str = Field(default="default", env="CLICKHOUSE_USER")
     clickhouse_password: str = Field(default="", env="CLICKHOUSE_PASSWORD")
+    clickhouse_table: str = Field(default="logs_structured", env="CLICKHOUSE_TABLE")
     
     # Elasticsearch 配置
     es_host: Optional[str] = Field(default=None, env="ES_HOST")
