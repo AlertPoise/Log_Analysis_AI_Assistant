@@ -189,7 +189,175 @@ python scripts/build_ueba_baseline.py \
 
 ---
 
-## 6. 已知边界和后续事项
+## 6. 真实 ClickHouse 读写链路补充验收
+
+### 6.1 验收范围
+
+本次补充验收验证 `behavior / UEBA` 离线 baseline CLI 可连接真实 ClickHouse，从 `log_analysis.logs_structured` 读取 `vpn` 聚合数据，并写入 `log_analysis.user_behavior_baselines`。
+
+本次验收不包含：
+
+1. dashboard 前端联调。
+2. 实时异常检测。
+3. Kafka / Flink 流处理。
+4. 旧 `behavior/api.py` 兼容。
+5. storage 模块重构。
+6. ClickHouse schema 修改。
+
+### 6.2 环境与服务状态
+
+- 当前分支：`behavior-new`
+- 工作区状态：`git status --short` 为空
+- 最新相关提交：`dd20afe 完善 UEBA CLI ClickHouse 连接入口`
+- ClickHouse 容器：`clickhouse-server`
+- ClickHouse 镜像：`clickhouse/clickhouse-server:latest`
+- 端口映射：`8123->8123`，`9000->9000`
+- `curl http://localhost:8123/ping` 返回：`Ok.`
+
+### 6.3 数据库与表结构
+
+已确认：
+
+1. `log_analysis` 数据库存在。
+2. `log_analysis.logs_structured` 表存在。
+3. `log_analysis.user_behavior_baselines` 表存在。
+4. `logs_structured` 字段满足 `UebaRepository` 查询需求。
+
+关键字段包括：
+
+```text
+timestamp
+log_type
+username
+source_ip
+destination_ip
+src_country
+src_city
+vpn_gateway
+action
+event_type
+result
+fail_reason
+auth_method
+client_software
+protocol
+session_duration_sec
+bytes_sent
+bytes_recv
+is_off_hours
+is_unusual_ip
+```
+
+### 6.4 输入数据
+
+`logs_structured` 中 `vpn` 数据分布：
+
+```text
+count = 100050
+min(timestamp) = 2026-05-01 00:00:00
+max(timestamp) = 2026-06-14 23:59:40
+```
+
+用户分布检查显示存在可用 `username`，前 20 个用户多为每用户 500 条，例如 `user_0010`、`user_0002`、`user_0088` 等；失败计数 `failed_cnt` 约 13-14 条/用户。
+
+构建前，本次 `model_version = ueba_baseline_v1_clickhouse_test` 的 baseline 记录为：
+
+```text
+rows = 0
+users = 0
+total_sample_count = 0
+```
+
+### 6.5 CLI 真实构建命令
+
+```bash
+python scripts/build_ueba_baseline.py \
+  --clickhouse-host localhost \
+  --clickhouse-port 8123 \
+  --clickhouse-user default \
+  --clickhouse-password "" \
+  --clickhouse-database log_analysis \
+  --start-time "2026-05-01 00:00:00" \
+  --end-time "2026-06-15 00:00:00" \
+  --log-type vpn \
+  --model-version ueba_baseline_v1_clickhouse_test
+```
+
+执行结果摘要：
+
+```text
+success = true
+total_user_count = 203
+reliable_user_count = 202
+unreliable_user_count = 1
+total_log_count = 100050
+model_version = ueba_baseline_v1_clickhouse_test
+duration_seconds = 1.334
+message = saved 203 user baselines
+```
+
+### 6.6 baseline 写入检查
+
+写入 `log_analysis.user_behavior_baselines` 后，本次 `model_version` 查询结果：
+
+```text
+rows = 203
+users = 203
+total_sample_count = 100050
+min_created_at = 2026-05-24 12:18:50
+max_created_at = 2026-05-24 12:18:50
+```
+
+明细查询可返回本次 `model_version` 记录，例如 `user_0126`、`user_0127` 等；`sample_count = 500`，`is_reliable = 1`。
+
+### 6.7 测试结果
+
+```bash
+python scripts/build_ueba_baseline.py --help
+```
+
+结果：通过，正常输出 `usage/options`。
+
+```bash
+python -m pytest tests/behavior -v
+```
+
+结果：`66 passed`。
+
+本阶段未修改业务代码，未修改 `src/storage/clickhouse.py`，因此未额外执行 `compileall` 和 repository 专项测试。
+
+### 6.8 验收结论
+
+真实 ClickHouse 读写链路验收通过。
+
+本次验证确认：
+
+```text
+log_analysis.logs_structured
+-> scripts/build_ueba_baseline.py
+-> UebaRepository
+-> AggregateMerger
+-> BaselineBuilder
+-> BaselineStore
+-> UebaService
+-> log_analysis.user_behavior_baselines
+```
+
+链路可用。
+
+最终对账结果：
+
+```text
+输入 logs_structured vpn 日志数：100050
+CLI total_log_count：100050
+user_behavior_baselines total_sample_count：100050
+```
+
+三者一致。
+
+---
+
+## 7. 已知边界和后续事项
 
 1. dashboard / `behavior/api` 前端兼容不属于 UEBA v1 当前验收范围。
 2. `docs/ClickhouseManual.md` 不作为当前 UEBA v1 验收修改对象。
