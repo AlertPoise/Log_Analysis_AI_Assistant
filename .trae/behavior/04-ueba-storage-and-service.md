@@ -192,6 +192,21 @@ ReplacingMergeTree 不是强事务实时去重。
 
 ---
 
+## 5.1 阶段 13/14 重复构建验收结论
+
+阶段 13 和阶段 14 已验证：同一时间窗口、同一 `model_version` 重复运行 CLI 构建时，`ReplacingMergeTree(created_at)` 在后台合并前可能保留多版本记录。例如阶段 14 性能验证中，每个用户 `versions = 2`。
+
+这是 ClickHouse `ReplacingMergeTree` 的可解释行为，不是写入异常。当前 `BaselineStore.get_user_baseline()` 通过：
+
+```sql
+ORDER BY created_at DESC
+LIMIT 1
+```
+
+读取最新记录。
+
+后续如果需要强一致展示，可另行评估 `FINAL`、`OPTIMIZE`、按 `created_at` 取最新或更严格的读查询策略；这些策略不属于 UEBA v1 当前验收范围。
+
 ## 6. BaselineStore 类结构
 
 ```python

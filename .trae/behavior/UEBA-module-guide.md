@@ -299,6 +299,34 @@ scripts/
 
 ---
 
+## 4.1 阶段 15 当前实现职责固化
+
+截至阶段 15，当前真实代码已经完成如下离线一次性用户行为基线构建链路：
+
+```text
+UebaRepository
+-> AggregateMerger
+-> BaselineBuilder
+-> BaselineStore
+-> UebaService
+-> scripts/build_ueba_baseline.py
+```
+
+当前核心文件职责固化如下：
+
+| 文件 | 阶段 15 固化职责 |
+|---|---|
+| `config.py` | 提供 `UebaBaselineConfig`，控制窗口、Top-N、ratio、`model_version`、`write_batch_size`。 |
+| `schemas.py` | 提供 `CountRatioItem`、`UserAggregateFeature`、`UserBaseline`、`BaselineBuildResult`。 |
+| `repository.py` | 只做数据库侧聚合查询；不 `SELECT *`；不拉取大量原始日志；统一使用 `log_type` 和 `timestamp` 时间窗口过滤。 |
+| `aggregate_merger.py` | 只合并 Repository 返回的聚合 rows；不访问数据库；不生成 `UserBaseline`。 |
+| `baseline_builder.py` | 将 `UserAggregateFeature` 转成 `UserBaseline`；计算可靠性、Top-N、ratio、失败率、非工作时间比例、异常 IP 比例、日均事件、会话和流量指标。 |
+| `baseline_store.py` | 建表、序列化、批量写入、查询 baseline；使用 `user_behavior_baselines`；复杂字段存 JSON 字符串；重复构建可能产生多版本记录。 |
+| `service.py` | 只做流程编排；不直接写 SQL；不直接访问 ClickHouse client。 |
+| `scripts/build_ueba_baseline.py` | CLI 入口；解析参数、创建 client、组装组件、调用 `UebaService`、输出 JSON；`--help` 不应依赖 ClickHouse 连接。 |
+
+当前验收范围仍不包括实时检测、动态基线、Kafka / Flink 流处理、前端 dashboard 联调、旧 `behavior_api` 兼容，也不把 `risk_score` / `risk_tags` 当作最终异常检测闭环。
+
 ## 5. `config.py` 详细设计
 
 ### 5.1 模块职责

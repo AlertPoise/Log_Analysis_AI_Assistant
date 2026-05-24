@@ -113,6 +113,30 @@ Parser / storage 当前真实 schema
 
 ---
 
+## 2.2 阶段 15 字段事实固化
+
+阶段 15 最终验收时，字段事实固化如下：
+
+```text
+1. logs_raw Kafka 表中存在 raw_message。
+2. logs_structured 表中实际使用 raw_log。
+3. raw_message / raw_log 不作为 UEBA v1 核心聚合维度。
+4. logs_structured 可以保留 location 作为通用扩展字段。
+5. UEBA v1 来源位置使用 src_country / src_city。
+6. 登录结果使用 result。
+7. 事件类型使用 event_type。
+8. 不使用独立旧字段 status 作为 UEBA 登录结果字段。
+9. status_code 可以作为通用字段存在，但不是 UEBA 登录结果字段。
+10. 不使用 endpoint 作为 UEBA v1 核心字段。
+11. result = 'FAILED' 与 result = 'FAIL' 都纳入失败统计。
+```
+
+当前 `failed_count` 统一口径为：
+
+```sql
+countIf(result IN ('FAILED', 'FAIL') OR event_type = 'LOGIN_FAIL') AS failed_count
+```
+
 ## 3. Repository 逻辑字段映射
 
 当前登录表建议在 Repository 层映射为以下 UEBA 逻辑字段：

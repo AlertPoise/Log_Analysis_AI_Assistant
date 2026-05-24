@@ -40,18 +40,23 @@
 当前主表字段包括：
 
 ```text
-timestamp, log_type, username, dept, role, action, event_type, result, fail_reason, source_ip, destination_ip, vpn_gateway, src_country, src_city, protocol, auth_method, client_software, session_id, is_off_hours, is_unusual_ip, session_duration_sec, bytes_sent, bytes_recv, risk_score, risk_tags, raw_message, parser, parse_status, collected_at
+timestamp, log_type, username, dept, role, action, event_type, result, fail_reason, source_ip, destination_ip, vpn_gateway, src_country, src_city, protocol, auth_method, client_software, session_id, is_off_hours, is_unusual_ip, session_duration_sec, bytes_sent, bytes_recv, risk_score, risk_tags, raw_log, parser, parse_status, collected_at
 ```
 
 阶段性约束：
 
 ```text
 1. 当前表是登录 / VPN 行为数据主表。
-2. 当前表没有 endpoint、status、location 字段，不得按这些旧字段设计登录基线。
+2. 当前 UEBA v1 不使用 endpoint 作为登录 / VPN 核心字段，不按 API endpoint 维度设计登录基线。
 3. 登录结果使用 result，事件类型使用 event_type，来源位置使用 src_country、src_city。
-4. is_off_hours、is_unusual_ip 是输入侧已有标签，只能统计比例，不能替代 UEBA 自己的基线统计。
-5. risk_score、risk_tags 只能作为历史风险参考，不作为 UEBA 第一版最终异常结论。
-6. 查询应优先使用 log_type 和 timestamp 时间范围过滤；默认 log_type 可按 vpn 设计，但必须通过配置或参数传入。
+4. logs_raw Kafka 原始表中可以存在 raw_message；logs_structured 结构化表中实际使用 raw_log。
+5. raw_message / raw_log 只作为原始日志文本或测试标记字段，不作为 UEBA v1 核心聚合维度。
+6. logs_structured 可以保留 location 作为通用扩展字段，但 UEBA v1 不依赖 location 作为来源位置字段。
+7. 不使用独立旧字段 status；status_code 可以作为通用字段存在，但不是 UEBA 登录结果字段。
+8. result = 'FAILED' 与 result = 'FAIL' 都应纳入失败统计。
+9. is_off_hours、is_unusual_ip 是输入侧已有标签，只能统计比例，不能替代 UEBA 自己的基线统计。
+10. risk_score、risk_tags 只能作为历史风险参考，不作为 UEBA 第一版最终异常结论。
+11. 查询应优先使用 log_type 和 timestamp 时间范围过滤；默认 log_type 可按 vpn 设计，但必须通过配置或参数传入。
 ```
 
 ---
@@ -1408,3 +1413,21 @@ user_behavior_baselines
 ↓
 BaselineBuildResult
 ```
+
+## 阶段 15：UEBA 文档与最终验收固化
+
+阶段 15 只固化 UEBA v1 阶段 2-14 的最终验收事实，不做业务开发、不做性能测试、不做前端联调。
+
+固化内容包括：
+
+```text
+1. UEBA v1 当前完成的离线一次性构建链路。
+2. 核心文件职责和职责边界。
+3. logs_raw / logs_structured 字段事实。
+4. 阶段 12 / 13 / 14 的验收结果。
+5. 推荐运行命令和测试命令。
+6. ReplacingMergeTree 多版本行为说明。
+7. dashboard / behavior_api 不属于当前验收范围。
+```
+
+最终验收摘要详见 `.trae/behavior/15-ueba-final-acceptance.md`。

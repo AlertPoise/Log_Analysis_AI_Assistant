@@ -68,6 +68,53 @@ python scripts/build_ueba_baseline.py \
 
 ---
 
+## 4.1 阶段 15 推荐验收命令
+
+Python 环境确认：
+
+```bash
+source .venv/bin/activate
+python --version
+python -m pytest --version
+```
+
+单元测试：
+
+```bash
+python -m compileall src/behavior tests/behavior scripts/build_ueba_baseline.py
+python -m pytest tests/behavior -v
+```
+
+CLI help：
+
+```bash
+python scripts/build_ueba_baseline.py --help
+```
+
+`--help` 应能在不连接 ClickHouse 的情况下输出帮助文本。
+
+空窗口构建示例：
+
+```bash
+python scripts/build_ueba_baseline.py \
+  --start-time "2026-05-01 00:00:00" \
+  --end-time "2026-05-02 00:00:00" \
+  --log-type vpn
+```
+
+非空窗口构建示例：
+
+```bash
+python scripts/build_ueba_baseline.py \
+  --start-time "2026-05-01 00:00:00" \
+  --end-time "2026-05-10 00:00:00" \
+  --log-type vpn \
+  --model-version ueba_baseline_v1_stage13 \
+  --min-sample-count 20
+```
+
+阶段 14 本地性能验证结果为 100000 条日志、200 用户、每用户 500 条，约 0.5 秒量级完成。该数字只代表本机本次验证结果，不是生产 SLA。
+
 ## 5. 后期接口扩展方向
 
 当前第一版使用脚本触发。
