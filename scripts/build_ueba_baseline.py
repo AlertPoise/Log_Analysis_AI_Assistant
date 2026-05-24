@@ -121,7 +121,7 @@ def create_clickhouse_client(args: argparse.Namespace):
             "缺少 clickhouse_connect 依赖，请确认 requirements.txt 已安装 clickhouse-connect。"
         ) from exc
 
-    return clickhouse_connect.get_client(
+    client = clickhouse_connect.get_client(
         host=args.clickhouse_host,
         port=args.clickhouse_port,
         username=args.clickhouse_user,
@@ -129,6 +129,8 @@ def create_clickhouse_client(args: argparse.Namespace):
         database=args.clickhouse_database,
         secure=args.clickhouse_secure,
     )
+    client.command("SELECT 1")
+    return client
 
 
 def build_service(client: Any, database: str, config: UebaBaselineConfig) -> UebaService:
@@ -172,6 +174,7 @@ def failure_payload(message: str, config: UebaBaselineConfig | None = None) -> d
 def main(argv: list[str] | None = None) -> int:
     """CLI 主入口。"""
     config: UebaBaselineConfig | None = None
+    client = None
     try:
         args = parse_args(argv)
         config = build_config(args)
@@ -188,6 +191,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(result_to_json(failure_payload(f"脚本执行失败: {type(exc).__name__}: {exc}", config)))
         return 1
+    finally:
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 def _env_int(name: str, default: int) -> int:
