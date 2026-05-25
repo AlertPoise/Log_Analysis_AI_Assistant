@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+from .baseline_builder_runner import run_baseline_build
 from .clickhouse_writer import load_fixture_to_clickhouse
 from .config import AcceptanceConfig
 from .fixture_generator import generate_fixture_outputs
@@ -16,6 +17,7 @@ EXPECTED_FILE = "expected_baselines.json"
 SUMMARY_FILE = "fixture_summary.json"
 RUN_STATE_FILE = "run_state.json"
 LOAD_RESULT_FILE = "load_result.json"
+BUILD_RESULT_FILE = "build_result.json"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,7 +45,25 @@ def main(argv: list[str] | None = None) -> int:
             print(f"inserted_rows = {result['inserted_rows']}")
             print(f"database_rows = {result['database_rows']}")
             print(f"error = {result['error']}\n")
-        elif choice in {"3", "4"}:
+        elif choice == "3":
+            print("\n开始执行 UEBA baseline 构建。")
+            print("该步骤会调用 scripts/build_ueba_baseline.py，可能需要稍等。\n")
+            result = run_baseline_build(config)
+            if result["success"]:
+                print("UEBA baseline 构建完成。")
+            else:
+                print("UEBA baseline 构建失败。")
+            print("success = {}".format(result["success"]))
+            print("total_log_count = {}".format(result.get("total_log_count", 0)))
+            print("total_user_count = {}".format(result.get("total_user_count", 0)))
+            print("reliable_user_count = {}".format(result.get("reliable_user_count", 0)))
+            print("unreliable_user_count = {}".format(result.get("unreliable_user_count", 0)))
+            print("build_result_path = {}".format(Path(config.output_dir) / BUILD_RESULT_FILE))
+            if not result["success"]:
+                print("error = {}".format(result.get("error")))
+                print("请先检查菜单第 2 项是否已成功完成。")
+            print()
+        elif choice == "4":
             print("\n该操作将在后续阶段实现。\n")
         elif choice == "5":
             _print_recent_summary(config)
@@ -77,14 +97,14 @@ def _print_menu(config: AcceptanceConfig) -> None:
     print("当前状态：")
     print(f"- expected_baselines.json：{status['expected']}")
     print(f"- 模拟数据入库：{status['loaded']}")
-    print("- baseline 构建：未执行 / 后续阶段实现")
+    print(f"- baseline 构建：{status['baseline_built']}")
     print("- 准线对比：未执行 / 后续阶段实现")
     print()
     print("请选择操作：")
     print()
     print("1. 生成 expected_baselines.json 和 fixture_summary.json")
     print("2. 生成模拟数据并写入 ClickHouse")
-    print("3. 执行 UEBA baseline 构建（后续阶段）")
+    print("3. 执行 UEBA baseline 构建")
     print("4. 对比 expected_baselines.json 与数据库实际 baseline（后续阶段）")
     print("5. 查看最近一次验收摘要")
     print("0. 退出")
@@ -97,6 +117,7 @@ def _current_status(output_dir: Path) -> dict[str, str]:
     return {
         "expected": "已生成" if (output_dir / EXPECTED_FILE).exists() else "未生成",
         "loaded": "已执行" if state.get("clickhouse_loaded") else "未执行",
+        "baseline_built": "已执行" if state.get("baseline_built") else "未执行",
     }
 
 
@@ -105,6 +126,7 @@ def _print_recent_summary(config: AcceptanceConfig) -> None:
     summary_path = output_dir / SUMMARY_FILE
     state_path = output_dir / RUN_STATE_FILE
     load_result_path = output_dir / LOAD_RESULT_FILE
+    build_result_path = output_dir / BUILD_RESULT_FILE
     if not summary_path.exists():
         print("\n暂无 fixture_summary.json，请先执行第 1 项。\n")
         return
@@ -112,6 +134,7 @@ def _print_recent_summary(config: AcceptanceConfig) -> None:
     summary = read_json(summary_path)
     state: dict[str, Any] = read_json(state_path) if state_path.exists() else {}
     load_result: dict[str, Any] = read_json(load_result_path) if load_result_path.exists() else {}
+    build_result: dict[str, Any] = read_json(build_result_path) if build_result_path.exists() else {}
     print("\n最近一次验收摘要：")
     print(f"fixture_id = {summary.get('fixture_id')}")
     print(f"total_logs = {summary.get('total_logs')}")
@@ -119,10 +142,18 @@ def _print_recent_summary(config: AcceptanceConfig) -> None:
     print(f"model_version = {summary.get('model_version')}")
     print(f"expected_generated = {state.get('expected_generated', False)}")
     print(f"clickhouse_loaded = {state.get('clickhouse_loaded', False)}")
+    print(f"baseline_built = {state.get('baseline_built', False)}")
     if load_result:
         print(f"load_success = {load_result.get('success')}")
         print(f"database_rows = {load_result.get('database_rows')}")
         print(f"load_error = {load_result.get('error')}")
+    if build_result:
+        print(f"build_success = {build_result.get('success')}")
+        print(f"total_log_count = {build_result.get('total_log_count')}")
+        print(f"total_user_count = {build_result.get('total_user_count')}")
+        print(f"reliable_user_count = {build_result.get('reliable_user_count')}")
+        print(f"unreliable_user_count = {build_result.get('unreliable_user_count')}")
+        print(f"build_error = {build_result.get('error')}")
     print()
 
 

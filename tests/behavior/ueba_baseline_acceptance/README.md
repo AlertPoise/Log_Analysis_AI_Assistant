@@ -18,6 +18,12 @@
 .tox/ueba_baseline_acceptance/load_result.json
 ```
 
+第 3 部分会调用正式入口 `scripts/build_ueba_baseline.py`，从 ClickHouse `logs_structured` 读取第 2 项写入的 fixture 数据，生成 `user_behavior_baselines`，并保存 CLI 输出摘要：
+
+```text
+.tox/ueba_baseline_acceptance/build_result.json
+```
+
 `expected_baselines.json` 只是理论准线描述，用于后续人工/程序对账；UEBA baseline 模块后续必须从数据库 `logs_structured` 分析数据，不读取 expected JSON 作为输入。
 
 默认不会保存 30000+ 条原始模拟日志 JSONL；只有显式传入 `--dump-logs-jsonl` 才会写出 `fixture_logs.jsonl`。
@@ -33,7 +39,7 @@
 ```text
 1. 生成 expected_baselines.json 和 fixture_summary.json
 2. 生成模拟数据并写入 ClickHouse
-3. 执行 UEBA baseline 构建（后续阶段）
+3. 执行 UEBA baseline 构建
 4. 对比 expected_baselines.json 与数据库实际 baseline（后续阶段）
 5. 查看最近一次验收摘要
 0. 退出
@@ -76,6 +82,43 @@ inserted_rows = 30065
 database_rows = 30065
 error = null
 ```
+
+## UEBA baseline 构建说明
+
+第 3 项执行前必须先完成第 2 项入库，并保证 `load_result.json` 中 `success = true`、`database_rows = expected_rows` 且 `expected_rows > 0`。
+
+第 3 项只通过 subprocess 调用：
+
+```bash
+.venv/bin/python scripts/build_ueba_baseline.py
+```
+
+不会直接 import `UebaService`、`UebaRepository` 或 `BaselineStore`，也不会在验收工具中重写 baseline 构建逻辑。
+
+执行结果会写入：
+
+```text
+.tox/ueba_baseline_acceptance/build_result.json
+```
+
+成功时关键字段包括：
+
+```text
+success = true
+total_log_count = 30065
+total_user_count = 24
+reliable_user_count = 22
+unreliable_user_count = 2
+model_version = ueba_baseline_fixture_v1
+```
+
+baseline 结果写入 ClickHouse 的 `log_analysis.user_behavior_baselines`。
+
+如果同一时间窗口中存在非 fixture 历史数据，`build_result.json` 中的 `total_log_count` / `total_user_count` 可能包含这些额外数据；这不代表第 3 项失败。
+
+如果构建失败，先查看 `build_result.json` 中的 `error`、`stdout`、`stderr`。
+
+本阶段不做 `expected_baselines.json` 与数据库实际 baseline 的对比；第 4 项将在后续阶段实现。第 4 阶段验证器应按 `fixture_user_%` 和最新记录口径做严格验证。
 
 ## SQL 检查入库数量
 
