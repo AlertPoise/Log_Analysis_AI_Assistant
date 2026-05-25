@@ -34,6 +34,8 @@ class AcceptanceConfig:
     clean_before_load: bool = True
     clickhouse_batch_size: int = 1000
     dump_logs_jsonl: bool = False
+    validation_float_tolerance: float = 0.0001
+    validation_common_min_ratio: float = 0.1
 
     @property
     def edge_user_sample_counts(self) -> tuple[int, int, int, int]:

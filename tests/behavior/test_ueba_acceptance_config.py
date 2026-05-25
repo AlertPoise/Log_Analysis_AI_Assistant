@@ -18,3 +18,5 @@ def test_acceptance_config_defaults_are_safe_and_sized():
     assert config.clickhouse_password == ""
     assert config.clean_before_load is True
     assert config.clickhouse_batch_size == 1000
+    assert config.validation_float_tolerance == 0.0001
+    assert config.validation_common_min_ratio == 0.1

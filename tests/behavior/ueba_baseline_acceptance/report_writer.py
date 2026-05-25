@@ -17,7 +17,7 @@ def ensure_output_dir(config: AcceptanceConfig) -> Path:
     return output_dir
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
+def write_json(path: Path, payload: Any) -> None:
     """Write a JSON file using the repository's acceptance-tool format."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

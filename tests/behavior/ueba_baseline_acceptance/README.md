@@ -24,6 +24,14 @@
 .tox/ueba_baseline_acceptance/build_result.json
 ```
 
+第 4 部分会读取 `expected_baselines.json`，并从 ClickHouse `user_behavior_baselines` 读取实际 baseline，只验证 `fixture_user_%` 用户，生成：
+
+```text
+.tox/ueba_baseline_acceptance/actual_baselines.json
+.tox/ueba_baseline_acceptance/validation_report.json
+.tox/ueba_baseline_acceptance/failed_diff.json
+```
+
 `expected_baselines.json` 只是理论准线描述，用于后续人工/程序对账；UEBA baseline 模块后续必须从数据库 `logs_structured` 分析数据，不读取 expected JSON 作为输入。
 
 默认不会保存 30000+ 条原始模拟日志 JSONL；只有显式传入 `--dump-logs-jsonl` 才会写出 `fixture_logs.jsonl`。
@@ -40,7 +48,7 @@
 1. 生成 expected_baselines.json 和 fixture_summary.json
 2. 生成模拟数据并写入 ClickHouse
 3. 执行 UEBA baseline 构建
-4. 对比 expected_baselines.json 与数据库实际 baseline（后续阶段）
+4. 对比 expected_baselines.json 与数据库实际 baseline
 5. 查看最近一次验收摘要
 0. 退出
 ```
@@ -118,7 +126,36 @@ baseline 结果写入 ClickHouse 的 `log_analysis.user_behavior_baselines`。
 
 如果构建失败，先查看 `build_result.json` 中的 `error`、`stdout`、`stderr`。
 
-本阶段不做 `expected_baselines.json` 与数据库实际 baseline 的对比；第 4 项将在后续阶段实现。第 4 阶段验证器应按 `fixture_user_%` 和最新记录口径做严格验证。
+第 3 项不做 `expected_baselines.json` 与数据库实际 baseline 的对比；第 4 项负责对比验证。
+
+## UEBA baseline 对比验证说明
+
+第 4 项用于对比 `expected_baselines.json` 与数据库实际 baseline。验证器只读取：
+
+```text
+model_version = ueba_baseline_fixture_v1
+username LIKE 'fixture_user_%'
+```
+
+为避免 `ReplacingMergeTree` 后台合并前存在多版本记录，验证器从 `user_behavior_baselines FINAL` 读取实际结果，查询口径为 `model_version + fixture_user_% + FINAL`。
+
+验证器不会使用 `baseline_start_time` / `baseline_end_time` 做精确过滤；ClickHouse `DateTime` 显示可能受服务端或客户端时区影响，精确匹配这些展示值可能误过滤真实 fixture baseline。`build_result.json` 中的 `total_log_count` / `total_user_count` 可能包含同窗口非 fixture 数据，不作为严格验证依据。
+
+输出文件含义：
+
+```text
+actual_baselines.json      数据库实际 baseline 摘要
+validation_report.json     对比汇总报告
+failed_diff.json           失败项明细；成功时为 []
+```
+
+验证失败时优先查看 `failed_diff.json`。常见排查方向：
+
+1. `sample_count` 不一致：检查入库数量、时间窗口、`log_type`。
+2. `failed_rate` 不一致：检查 `FAILED` / `FAIL` / `LOGIN_FAIL` 统计口径。
+3. `is_reliable` 不一致：检查 `min_sample_count`。
+4. `common_*` 不一致：检查 Top-N、min_ratio 或 expected 频率。
+5. 重复记录：检查查询是否使用 `FINAL` 或最新 `created_at` 口径。
 
 ## SQL 检查入库数量
 

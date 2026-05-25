@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .baseline_builder_runner import run_baseline_build
+from .baseline_validator import validate_fixture_baselines
 from .clickhouse_writer import load_fixture_to_clickhouse
 from .config import AcceptanceConfig
 from .fixture_generator import generate_fixture_outputs
@@ -18,6 +19,8 @@ SUMMARY_FILE = "fixture_summary.json"
 RUN_STATE_FILE = "run_state.json"
 LOAD_RESULT_FILE = "load_result.json"
 BUILD_RESULT_FILE = "build_result.json"
+VALIDATION_REPORT_FILE = "validation_report.json"
+FAILED_DIFF_FILE = "failed_diff.json"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,7 +67,23 @@ def main(argv: list[str] | None = None) -> int:
                 print("请先检查菜单第 2 项是否已成功完成。")
             print()
         elif choice == "4":
-            print("\n该操作将在后续阶段实现。\n")
+            print("\n开始对比 expected_baselines.json 与数据库实际 baseline。")
+            print("该步骤会读取 ClickHouse.user_behavior_baselines，并只验证 fixture_user_% 用户。\n")
+            result = validate_fixture_baselines(config)
+            if result["success"]:
+                print("UEBA baseline 对比验证通过。")
+            else:
+                print("UEBA baseline 对比验证失败。")
+            print("success = {}".format(result["success"]))
+            print("checked_users = {}".format(result.get("checked_users", 0)))
+            print("checked_items = {}".format(result.get("checked_items", 0)))
+            print("passed_items = {}".format(result.get("passed_items", 0)))
+            print("failed_items = {}".format(result.get("failed_items", 0)))
+            print("validation_report_path = {}".format(Path(config.output_dir) / VALIDATION_REPORT_FILE))
+            print("failed_diff_path = {}".format(Path(config.output_dir) / FAILED_DIFF_FILE))
+            if not result["success"]:
+                print("error = {}".format(result.get("error")))
+            print()
         elif choice == "5":
             _print_recent_summary(config)
         elif choice == "0":
@@ -98,14 +117,14 @@ def _print_menu(config: AcceptanceConfig) -> None:
     print(f"- expected_baselines.json：{status['expected']}")
     print(f"- 模拟数据入库：{status['loaded']}")
     print(f"- baseline 构建：{status['baseline_built']}")
-    print("- 准线对比：未执行 / 后续阶段实现")
+    print(f"- 准线对比：{status['comparison']}")
     print()
     print("请选择操作：")
     print()
     print("1. 生成 expected_baselines.json 和 fixture_summary.json")
     print("2. 生成模拟数据并写入 ClickHouse")
     print("3. 执行 UEBA baseline 构建")
-    print("4. 对比 expected_baselines.json 与数据库实际 baseline（后续阶段）")
+    print("4. 对比 expected_baselines.json 与数据库实际 baseline")
     print("5. 查看最近一次验收摘要")
     print("0. 退出")
     print()
@@ -118,6 +137,7 @@ def _current_status(output_dir: Path) -> dict[str, str]:
         "expected": "已生成" if (output_dir / EXPECTED_FILE).exists() else "未生成",
         "loaded": "已执行" if state.get("clickhouse_loaded") else "未执行",
         "baseline_built": "已执行" if state.get("baseline_built") else "未执行",
+        "comparison": "已执行" if state.get("comparison_done") else "未执行",
     }
 
 
@@ -127,6 +147,7 @@ def _print_recent_summary(config: AcceptanceConfig) -> None:
     state_path = output_dir / RUN_STATE_FILE
     load_result_path = output_dir / LOAD_RESULT_FILE
     build_result_path = output_dir / BUILD_RESULT_FILE
+    validation_report_path = output_dir / VALIDATION_REPORT_FILE
     if not summary_path.exists():
         print("\n暂无 fixture_summary.json，请先执行第 1 项。\n")
         return
@@ -135,6 +156,7 @@ def _print_recent_summary(config: AcceptanceConfig) -> None:
     state: dict[str, Any] = read_json(state_path) if state_path.exists() else {}
     load_result: dict[str, Any] = read_json(load_result_path) if load_result_path.exists() else {}
     build_result: dict[str, Any] = read_json(build_result_path) if build_result_path.exists() else {}
+    validation_report: dict[str, Any] = read_json(validation_report_path) if validation_report_path.exists() else {}
     print("\n最近一次验收摘要：")
     print(f"fixture_id = {summary.get('fixture_id')}")
     print(f"total_logs = {summary.get('total_logs')}")
@@ -143,6 +165,7 @@ def _print_recent_summary(config: AcceptanceConfig) -> None:
     print(f"expected_generated = {state.get('expected_generated', False)}")
     print(f"clickhouse_loaded = {state.get('clickhouse_loaded', False)}")
     print(f"baseline_built = {state.get('baseline_built', False)}")
+    print(f"comparison_done = {state.get('comparison_done', False)}")
     if load_result:
         print(f"load_success = {load_result.get('success')}")
         print(f"database_rows = {load_result.get('database_rows')}")
@@ -154,6 +177,11 @@ def _print_recent_summary(config: AcceptanceConfig) -> None:
         print(f"reliable_user_count = {build_result.get('reliable_user_count')}")
         print(f"unreliable_user_count = {build_result.get('unreliable_user_count')}")
         print(f"build_error = {build_result.get('error')}")
+    if validation_report:
+        print(f"validation_success = {validation_report.get('success')}")
+        print(f"checked_users = {validation_report.get('checked_users')}")
+        print(f"failed_items = {validation_report.get('failed_items')}")
+        print(f"validation_error = {validation_report.get('error')}")
     print()
 
 
