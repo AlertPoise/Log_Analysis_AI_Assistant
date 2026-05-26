@@ -33,6 +33,10 @@ JUNE_START = "2026-06-01 00:00:00"
 JUNE_END = "2026-07-01 00:00:00"
 MAY_MODEL_VERSION = "ueba_monthly_acceptance_may_init"
 JUNE_MODEL_VERSION = "ueba_monthly_acceptance_june_updated"
+TEST_WINDOWS_NOTE = (
+    "2026-05 and 2026-06 are acceptance test windows only; "
+    "production can use any approved training window."
+)
 
 STATE_FILE = "monthly_training_update_state.json"
 REPORT_FILE = "monthly_training_update_report.json"
@@ -44,6 +48,21 @@ BASELINE_BEFORE_FILE = "baseline_before_june_update.json"
 BASELINE_AFTER_UPDATE_FILE = "baseline_after_june_training_update.json"
 BASELINE_AFTER_REBUILD_FILE = "baseline_after_june_rebuild.json"
 BASELINE_DIFF_FILE = "baseline_change_diff.json"
+DEBUG_ARTIFACT_FILES = (
+    MAY_UPDATE_FILE,
+    MAY_BUILD_FILE,
+    JUNE_UPDATE_FILE,
+    JUNE_BUILD_FILE,
+    BASELINE_BEFORE_FILE,
+    BASELINE_AFTER_UPDATE_FILE,
+    BASELINE_AFTER_REBUILD_FILE,
+)
+MONTHLY_ARTIFACT_FILES = (
+    REPORT_FILE,
+    STATE_FILE,
+    BASELINE_DIFF_FILE,
+    *DEBUG_ARTIFACT_FILES,
+)
 
 COMPARE_FIELDS = (
     "full_baseline_json",
@@ -191,10 +210,12 @@ def run_monthly_training_update(
     *,
     client_factory: Callable[[AcceptanceConfig], Any] = create_clickhouse_client,
     command_runner: Callable[[list[str], str], dict[str, Any]] | None = None,
+    debug_artifacts: bool = False,
 ) -> dict[str, Any]:
     """Run the full monthly training-table update acceptance flow."""
     config = config or AcceptanceConfig()
     output_dir = ensure_output_dir(config)
+    cleanup_monthly_artifacts(output_dir)
     command_runner = command_runner or run_json_command
     failed_checks: list[str] = []
     context: dict[str, Any] = _empty_context(config)
@@ -205,7 +226,7 @@ def run_monthly_training_update(
         context["fixture_load_result"] = load_result
         _check(load_result.get("success") is True, "fixture_load_success", failed_checks)
         if failed_checks:
-            return _finish(config, context, failed_checks)
+            return _finish(config, context, failed_checks, debug_artifacts=debug_artifacts)
 
         client = client_factory(config)
         cleanup_acceptance_baselines(client, config)
@@ -221,7 +242,7 @@ def run_monthly_training_update(
             import_batch_id="may_initial_2026_05",
             stage="may_training_update",
         )
-        write_json(output_dir / MAY_UPDATE_FILE, may_update)
+        _write_debug_artifact(output_dir, MAY_UPDATE_FILE, may_update, debug_artifacts)
         context["may_training_update_result"] = may_update
         _check(may_update.get("success") is True, "may_training_update_success", failed_checks)
         context["may_training_stats"] = fetch_training_table_stats(client, config, MAY_START, MAY_END)
@@ -236,11 +257,11 @@ def run_monthly_training_update(
             ),
             "may_baseline_build",
         )
-        write_json(output_dir / MAY_BUILD_FILE, may_build)
+        _write_debug_artifact(output_dir, MAY_BUILD_FILE, may_build, debug_artifacts)
         context["may_baseline_build_result"] = may_build
         _check(may_build.get("success") is True, "may_baseline_build_success", failed_checks)
         before = fetch_baseline_snapshot(client, config, MAY_MODEL_VERSION)
-        write_json(output_dir / BASELINE_BEFORE_FILE, before)
+        _write_debug_artifact(output_dir, BASELINE_BEFORE_FILE, before, debug_artifacts)
         context["baseline_before_june_update"] = before
         _validate_baseline_snapshot(before, MAY_MODEL_VERSION, "may_baseline", failed_checks)
 
@@ -253,12 +274,12 @@ def run_monthly_training_update(
             import_batch_id="june_manual_update_2026_06",
             stage="june_training_update",
         )
-        write_json(output_dir / JUNE_UPDATE_FILE, june_update)
+        _write_debug_artifact(output_dir, JUNE_UPDATE_FILE, june_update, debug_artifacts)
         context["june_training_update_result"] = june_update
         _check(june_update.get("success") is True, "june_training_update_success", failed_checks)
 
         after_update = fetch_baseline_snapshot(client, config, MAY_MODEL_VERSION)
-        write_json(output_dir / BASELINE_AFTER_UPDATE_FILE, after_update)
+        _write_debug_artifact(output_dir, BASELINE_AFTER_UPDATE_FILE, after_update, debug_artifacts)
         context["baseline_after_june_training_update"] = after_update
         unchanged = baseline_fingerprint(before) == baseline_fingerprint(after_update)
         context["baseline_unchanged_after_training_update"] = unchanged
@@ -281,11 +302,11 @@ def run_monthly_training_update(
             ),
             "june_baseline_build",
         )
-        write_json(output_dir / JUNE_BUILD_FILE, june_build)
+        _write_debug_artifact(output_dir, JUNE_BUILD_FILE, june_build, debug_artifacts)
         context["june_baseline_build_result"] = june_build
         _check(june_build.get("success") is True, "june_baseline_build_success", failed_checks)
         after_rebuild = fetch_baseline_snapshot(client, config, JUNE_MODEL_VERSION)
-        write_json(output_dir / BASELINE_AFTER_REBUILD_FILE, after_rebuild)
+        _write_debug_artifact(output_dir, BASELINE_AFTER_REBUILD_FILE, after_rebuild, debug_artifacts)
         context["baseline_after_june_rebuild"] = after_rebuild
         _validate_baseline_snapshot(after_rebuild, JUNE_MODEL_VERSION, "june_baseline", failed_checks)
 
@@ -295,10 +316,10 @@ def run_monthly_training_update(
         changed = int(diff.get("changed_user_count") or 0) > 0
         context["baseline_changed_after_rebuild"] = changed
         _check(changed, "baseline_changed_after_rebuild", failed_checks)
-        return _finish(config, context, failed_checks)
+        return _finish(config, context, failed_checks, debug_artifacts=debug_artifacts)
     except Exception as exc:
         failed_checks.append(f"unexpected_error:{type(exc).__name__}:{exc}")
-        return _finish(config, context, failed_checks)
+        return _finish(config, context, failed_checks, debug_artifacts=debug_artifacts)
     finally:
         if client is not None and hasattr(client, "close"):
             try:
@@ -694,6 +715,7 @@ def build_report(config: AcceptanceConfig, context: dict[str, Any], failed_check
         "fixture_id": config.fixture_id,
         "model_versions": {"may": MAY_MODEL_VERSION, "june": JUNE_MODEL_VERSION},
         "dataset_id": DATASET_ID,
+        "test_windows_note": TEST_WINDOWS_NOTE,
         "may_rows": int(may_stats.get("rows") or 0),
         "may_users": int(may_stats.get("users") or 0),
         "june_rows": int(june_stats.get("rows") or 0),
@@ -719,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
     config = AcceptanceConfig()
     if args.output_dir:
         config.output_dir = Path(args.output_dir)
-    report = run_monthly_training_update(config)
+    report = run_monthly_training_update(config, debug_artifacts=args.debug_artifacts)
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, default=str))
     return 0 if report.get("success") is True else 1
 
@@ -727,20 +749,24 @@ def main(argv: list[str] | None = None) -> int:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run UEBA monthly training-table update acceptance flow")
     parser.add_argument("--output-dir", help="override default .tox/ueba_baseline_acceptance output directory")
+    parser.add_argument(
+        "--debug-artifacts",
+        action="store_true",
+        help="write intermediate monthly acceptance JSON files for debugging",
+    )
     return parser.parse_args(argv)
 
 
-def _finish(config: AcceptanceConfig, context: dict[str, Any], failed_checks: list[str]) -> dict[str, Any]:
+def _finish(
+    config: AcceptanceConfig,
+    context: dict[str, Any],
+    failed_checks: list[str],
+    *,
+    debug_artifacts: bool = False,
+) -> dict[str, Any]:
     output_dir = ensure_output_dir(config)
     report = build_report(config, context, failed_checks)
-    state = {
-        "fixture_id": config.fixture_id,
-        "dataset_id": DATASET_ID,
-        "model_versions": {"may": MAY_MODEL_VERSION, "june": JUNE_MODEL_VERSION},
-        "success": report["success"],
-        "failed_checks": failed_checks,
-        "report_path": str(output_dir / REPORT_FILE),
-    }
+    state = build_state(config, context, report, failed_checks, debug_artifacts=debug_artifacts)
     write_json(output_dir / STATE_FILE, state)
     write_json(output_dir / REPORT_FILE, report)
     update_run_state(
@@ -752,6 +778,73 @@ def _finish(config: AcceptanceConfig, context: dict[str, Any], failed_checks: li
         last_error=None if report["success"] else "; ".join(failed_checks),
     )
     return report
+
+
+def build_state(
+    config: AcceptanceConfig,
+    context: dict[str, Any],
+    report: dict[str, Any],
+    failed_checks: list[str],
+    *,
+    debug_artifacts: bool = False,
+) -> dict[str, Any]:
+    """Build the consolidated state file that replaces default debug artifacts."""
+    before = context.get("baseline_before_june_update", {})
+    after_update = context.get("baseline_after_june_training_update", {})
+    after_rebuild = context.get("baseline_after_june_rebuild", {})
+    return {
+        "fixture_id": config.fixture_id,
+        "dataset_id": DATASET_ID,
+        "test_windows_note": TEST_WINDOWS_NOTE,
+        "model_versions": {"may": MAY_MODEL_VERSION, "june": JUNE_MODEL_VERSION},
+        "success": report["success"],
+        "failed_checks": failed_checks,
+        "debug_artifacts": bool(debug_artifacts),
+        "report_path": str(Path(config.output_dir) / REPORT_FILE),
+        "baseline_change_diff_path": str(Path(config.output_dir) / BASELINE_DIFF_FILE),
+        "fixture_load_result": context.get("fixture_load_result"),
+        "fixture_stats": context.get("fixture_stats"),
+        "may_training_update_result": context.get("may_training_update_result"),
+        "may_training_stats": context.get("may_training_stats"),
+        "may_baseline_build_result": context.get("may_baseline_build_result"),
+        "june_training_update_result": context.get("june_training_update_result"),
+        "june_training_stats": context.get("june_training_stats"),
+        "june_baseline_build_result": context.get("june_baseline_build_result"),
+        "baseline_before_june_update": _state_snapshot_summary(before),
+        "baseline_after_june_training_update": {
+            **_state_snapshot_summary(after_update),
+            "unchanged": bool(context.get("baseline_unchanged_after_training_update")),
+        },
+        "baseline_after_june_rebuild": {
+            **_state_snapshot_summary(after_rebuild),
+            "changed": bool(context.get("baseline_changed_after_rebuild")),
+        },
+        "training_table_replaced_by_june": bool(context.get("training_table_replaced_by_june")),
+        "baseline_change_diff": context.get("baseline_change_diff"),
+    }
+
+
+def cleanup_monthly_artifacts(output_dir: Path) -> None:
+    """Remove only files owned by the monthly training update runner."""
+    for filename in MONTHLY_ARTIFACT_FILES:
+        path = output_dir / filename
+        if path.is_file():
+            path.unlink()
+
+
+def _write_debug_artifact(output_dir: Path, filename: str, payload: Any, debug_artifacts: bool) -> None:
+    if debug_artifacts:
+        write_json(output_dir / filename, payload)
+
+
+def _state_snapshot_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model_version": snapshot.get("model_version"),
+        "fingerprint": snapshot.get("fingerprint"),
+        "rows": int(snapshot.get("row_count") or 0),
+        "user_count": int(snapshot.get("user_count") or 0),
+        "total_sample_count": int(snapshot.get("total_sample_count") or 0),
+    }
 
 
 def _validate_fixture_stats(context: dict[str, Any], failed_checks: list[str]) -> None:
@@ -880,13 +973,18 @@ def _empty_context(config: AcceptanceConfig) -> dict[str, Any]:
 
 __all__ = [
     "BASELINE_DIFF_FILE",
+    "DEBUG_ARTIFACT_FILES",
+    "MONTHLY_ARTIFACT_FILES",
     "DATASET_ID",
     "JUNE_MODEL_VERSION",
     "MAY_MODEL_VERSION",
+    "TEST_WINDOWS_NOTE",
     "build_report",
+    "build_state",
     "build_training_baseline_command",
     "build_update_training_command",
     "cleanup_acceptance_baselines",
+    "cleanup_monthly_artifacts",
     "baseline_fingerprint",
     "diff_baseline_snapshots",
     "fetch_baseline_snapshot",

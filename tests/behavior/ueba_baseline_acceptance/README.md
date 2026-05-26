@@ -89,6 +89,111 @@ YYYY-MM-DD HH:MM:SS
 0. 退出
 ```
 
+## 月度训练表更新闭环
+
+非交互执行 5月初始化训练表、5月 baseline 构建、6月训练表替换、baseline 不变校验、6月 baseline 重建和差异验证：
+
+```bash
+.venv/bin/python -m tests.behavior.ueba_baseline_acceptance.monthly_training_update_runner
+```
+
+默认只保留 monthly runner 自己的三个核心产物：
+
+```text
+.tox/ueba_baseline_acceptance/monthly_training_update_report.json
+.tox/ueba_baseline_acceptance/monthly_training_update_state.json
+.tox/ueba_baseline_acceptance/baseline_change_diff.json
+```
+
+每次启动都会清理 monthly runner 自己负责的旧产物，包括历史 debug 中间文件；不会删除 `expected_baselines.json`、`fixture_summary.json`、`load_result.json`、`run_state.json`、`validation_report.json`、`failed_diff.json` 等其他验收模块产物。
+
+`monthly_training_update_state.json` 会合并保存训练表更新结果、baseline 构建结果、fixture 统计、训练表统计、baseline fingerprint 摘要和 diff 摘要，用于替代默认模式下拆散的中间 JSON。
+
+需要排查细节时显式开启 debug 产物：
+
+```bash
+.venv/bin/python -m tests.behavior.ueba_baseline_acceptance.monthly_training_update_runner --debug-artifacts
+```
+
+debug 模式额外输出：
+
+```text
+.tox/ueba_baseline_acceptance/may_training_update_result.json
+.tox/ueba_baseline_acceptance/may_baseline_build_result.json
+.tox/ueba_baseline_acceptance/june_training_update_result.json
+.tox/ueba_baseline_acceptance/june_baseline_build_result.json
+.tox/ueba_baseline_acceptance/baseline_before_june_update.json
+.tox/ueba_baseline_acceptance/baseline_after_june_training_update.json
+.tox/ueba_baseline_acceptance/baseline_after_june_rebuild.json
+```
+
+## 训练表手动更新交互式验收
+
+交互式执行训练表手动更新演示：
+
+```bash
+.venv/bin/python -m tests.behavior.ueba_baseline_acceptance.manual_training_update_runner
+```
+
+菜单项：
+
+```text
+1. 清空测试样本数据
+2. 生成 5 月测试数据
+3. 用 5 月数据初始化训练表
+4. 用训练表构建 5 月 baseline
+5. 生成 6 月测试数据
+6. 用 6 月数据更新训练表
+7. 检查更新训练表后 baseline 是否不变
+8. 用训练表构建 6 月 baseline
+9. 比较 5 月和 6 月 baseline 是否变化
+10. 查看当前状态
+11. 一键执行完整演示流程
+0. 退出
+```
+
+5 月 / 6 月只是验收测试用的两段固定窗口，用于演示“初始化训练表 -> 手动更新训练表 -> 确认后重建 baseline”的机制。正式使用时不要求每个月都生成数据，也不要求每个月都更新 baseline；生产中应由人工或策略选择一段可信训练数据，写入 `ueba_baseline_training_logs`，确认后再手动构建 baseline。
+
+本工具只操作测试范围：
+
+```text
+logs_structured:
+username LIKE 'fixture_user_%'
+log_type = 'vpn'
+timestamp >= '2026-05-01 00:00:00'
+timestamp < '2026-07-01 00:00:00'
+
+ueba_baseline_training_logs:
+dataset_id = 'ueba_training_monthly_acceptance'
+
+user_behavior_baselines:
+username LIKE 'fixture_user_%'
+model_version IN (
+  'ueba_monthly_acceptance_may_init',
+  'ueba_monthly_acceptance_june_updated'
+)
+```
+
+默认只保留三个核心产物：
+
+```text
+.tox/ueba_baseline_acceptance/manual_training_update_report.json
+.tox/ueba_baseline_acceptance/manual_training_update_state.json
+.tox/ueba_baseline_acceptance/baseline_change_diff.json
+```
+
+如需排查每一步中间结果，可显式开启 debug 产物：
+
+```bash
+.venv/bin/python -m tests.behavior.ueba_baseline_acceptance.manual_training_update_runner --debug-artifacts
+```
+
+也可以非交互执行完整演示流程：
+
+```bash
+.venv/bin/python -m tests.behavior.ueba_baseline_acceptance.manual_training_update_runner --run-all
+```
+
 ## ClickHouse 写入说明
 
 第 2 项执行时会：
