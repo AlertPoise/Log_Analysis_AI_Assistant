@@ -69,6 +69,7 @@ def _small_config(tmp_path):
         multi_location_user_count=0,
         high_failure_user_count=0,
         offhour_user_count=0,
+        ip_long_tail_user_count=0,
         logs_per_main_user=1,
         clickhouse_batch_size=10,
     )
@@ -232,6 +233,6 @@ def _row(username):
         "bytes_recv": 8192,
         "is_off_hours": False,
         "is_unusual_ip": False,
-        "parser": "ueba_fixture_v1",
-        "raw_log": "ueba fixture generated log fixture_id=ueba_fixture_v1_seed_42",
+        "parser": "ueba_fixture_v2",
+        "raw_log": "ueba fixture generated log fixture_id=ueba_fixture_v2_seed_42",
     }

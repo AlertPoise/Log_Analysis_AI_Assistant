@@ -105,10 +105,10 @@ def test_cli_success_parses_json_and_updates_run_state(tmp_path, monkeypatch):
 
     run_state = _read_json(tmp_path / "run_state.json")
     assert result["success"] is True
-    assert result["total_log_count"] == 30065
-    assert result["total_user_count"] == 24
+    assert result["total_log_count"] == 33065
+    assert result["total_user_count"] == 26
     assert run_state["baseline_built"] is True
-    assert run_state["user_count"] == 24
+    assert run_state["user_count"] == 26
 
 
 def test_cli_nonzero_returncode_is_failure(tmp_path, monkeypatch):
@@ -173,10 +173,10 @@ def test_cli_json_success_false_is_failure(tmp_path, monkeypatch):
 
 
 def _write_precheck_files(output_dir):
-    _write_json(output_dir / "expected_baselines.json", {"fixture_id": "ueba_fixture_v1_seed_42"})
+    _write_json(output_dir / "expected_baselines.json", {"fixture_id": "ueba_fixture_v2_seed_42"})
     _write_json(
         output_dir / "load_result.json",
-        {"success": True, "expected_rows": 30065, "database_rows": 30065},
+        {"success": True, "expected_rows": 33065, "database_rows": 33065},
     )
 
 
@@ -184,11 +184,11 @@ def _success_stdout():
     return json.dumps(
         {
             "success": True,
-            "total_user_count": 24,
+            "total_user_count": 26,
             "reliable_user_count": 22,
             "unreliable_user_count": 2,
-            "total_log_count": 30065,
-            "message": "saved 24 user baselines",
+            "total_log_count": 33065,
+            "message": "saved 26 user baselines",
         }
     )
 

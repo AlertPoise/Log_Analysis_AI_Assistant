@@ -26,7 +26,9 @@ DISTRIBUTION_FIELDS = (
     "result_distribution",
     "event_type_distribution",
     "action_distribution",
+    "fail_reason_distribution",
     "auth_method_distribution",
+    "client_software_distribution",
     "protocol_distribution",
 )
 FLOAT_FIELDS = (
@@ -38,6 +40,8 @@ FLOAT_FIELDS = (
 COMMON_FIELD_MAPPING = {
     "common_active_hours": "expected_common_active_hours",
     "common_source_ips": "source_ip_frequency",
+    "common_destination_ips": "destination_ip_frequency",
+    "common_source_countries": "src_country_frequency",
     "common_source_cities": "src_city_frequency",
     "common_vpn_gateways": "vpn_gateway_frequency",
 }
@@ -47,12 +51,16 @@ SELECT_COLUMNS = [
     "is_reliable",
     "common_active_hours",
     "common_source_ips",
+    "common_destination_ips",
+    "common_source_countries",
     "common_source_cities",
     "common_vpn_gateways",
     "action_distribution",
     "event_type_distribution",
     "result_distribution",
+    "fail_reason_distribution",
     "auth_method_distribution",
+    "client_software_distribution",
     "protocol_distribution",
     "failed_rate",
     "off_hours_rate",
@@ -360,7 +368,14 @@ def _actual_user_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "baseline_start_time": _json_ready(row.get("baseline_start_time")),
         "baseline_end_time": _json_ready(row.get("baseline_end_time")),
     }
-    for field in ("common_active_hours", "common_source_ips", "common_source_cities", "common_vpn_gateways"):
+    for field in (
+        "common_active_hours",
+        "common_source_ips",
+        "common_destination_ips",
+        "common_source_countries",
+        "common_source_cities",
+        "common_vpn_gateways",
+    ):
         user[field] = sorted(extract_common_values(row.get(field, [])), key=str)
     for field in DISTRIBUTION_FIELDS:
         user[field] = _distribution_counts(row.get(field, {}), sample_count)
@@ -481,9 +496,7 @@ def _required_common_values(user: dict[str, Any], field: str, config: Acceptance
         for key, count in frequency.items()
         if float(count) / sample_count >= config.validation_common_min_ratio
     }
-    if required:
-        return required
-    return {_value_key(key) for key, count in frequency.items() if count}
+    return required
 
 
 def _distribution_counts(value: Any, sample_count: int) -> dict[str, int]:

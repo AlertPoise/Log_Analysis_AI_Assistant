@@ -4,7 +4,7 @@
 
 ## 当前能力
 
-第 1 部分只生成理论准线文件：
+第 1 部分生成理论准线文件：
 
 ```text
 .tox/ueba_baseline_acceptance/expected_baselines.json
@@ -32,9 +32,45 @@
 .tox/ueba_baseline_acceptance/failed_diff.json
 ```
 
-`expected_baselines.json` 只是理论准线描述，用于后续人工/程序对账；UEBA baseline 模块后续必须从数据库 `logs_structured` 分析数据，不读取 expected JSON 作为输入。
+`expected_baselines.json` 只是理论准线描述，用于后续人工/程序对账；UEBA baseline 模块仍然必须从数据库 `logs_structured` 分析数据，不读取 expected JSON 作为输入。
 
 默认不会保存 30000+ 条原始模拟日志 JSONL；只有显式传入 `--dump-logs-jsonl` 才会写出 `fixture_logs.jsonl`。
+
+## Fixture v2 数据覆盖
+
+默认 fixture 已增强为：
+
+```text
+fixture_id = ueba_fixture_v2_seed_42
+model_version = ueba_baseline_fixture_v2
+default users = 26
+default logs = 33065
+```
+
+模拟数据不再几乎全是“中国 / 北京”：stable、高失败、非工作时间、多地登录和 IP 长尾用户覆盖北京、上海、广州、深圳、杭州、成都，并包含新加坡、日本、德国等跨国家场景。
+
+行为维度不再是单值：`action` 覆盖 `LOGIN`、`REAUTH`、`LOGOUT`、`VPN_CONNECT`；`auth_method` 覆盖 `password+mfa`、`sso+mfa`、`certificate`、`password_only`；`client_software` 覆盖 `OpenVPN Connect`、`Cisco AnyConnect`、`Windows VPN Client`、`Tunnelblick`；`protocol` 覆盖 `SSLVPN`、`IPSec`、`WireGuard`。
+
+失败日志保留 `FAILED` 和 `FAIL` 两种结果，失败原因覆盖 `PASSWORD_ERROR`、`MFA_DENIED`、`ACCOUNT_LOCKED`、`TIMEOUT`；成功日志的 `fail_reason` 仍为空字符串。
+
+风险和长尾场景包括：
+
+```text
+multi_location / high_failure / offhour / iptail 用户包含非 0 unusual_ip_rate
+fixture_user_iptail_0001: 5 个高频来源 IP + 100 个低频来源 IP
+fixture_user_iptail_0002: 300 个来源 IP 均匀分布，通常没有 IP 达到 common 阈值
+stable 用户: 2~3 个稳定 destination_ip 为主，少量其他目标资源
+iptail 用户: destination_ip 长尾分散
+VPN gateway: vpn-gw-cn-01 / vpn-gw-cn-02 / vpn-gw-hk-01 / vpn-gw-sg-01
+```
+
+时间字段继续输出普通字符串：
+
+```text
+YYYY-MM-DD HH:MM:SS
+```
+
+不引入 UTC、`Z`、`+08:00`、timezone-aware datetime 或 ISO 8601 字符串格式。
 
 ## 运行菜单
 
@@ -85,9 +121,9 @@ cat .tox/ueba_baseline_acceptance/load_result.json
 
 ```text
 success = true
-expected_rows = 30065
-inserted_rows = 30065
-database_rows = 30065
+expected_rows = 33065
+inserted_rows = 33065
+database_rows = 33065
 error = null
 ```
 
@@ -113,11 +149,9 @@ error = null
 
 ```text
 success = true
-total_log_count = 30065
-total_user_count = 24
-reliable_user_count = 22
-unreliable_user_count = 2
-model_version = ueba_baseline_fixture_v1
+total_log_count = 33065
+total_user_count = 26
+model_version = ueba_baseline_fixture_v2
 ```
 
 baseline 结果写入 ClickHouse 的 `log_analysis.user_behavior_baselines`。
@@ -133,13 +167,17 @@ baseline 结果写入 ClickHouse 的 `log_analysis.user_behavior_baselines`。
 第 4 项用于对比 `expected_baselines.json` 与数据库实际 baseline。验证器只读取：
 
 ```text
-model_version = ueba_baseline_fixture_v1
+model_version = ueba_baseline_fixture_v2
 username LIKE 'fixture_user_%'
 ```
 
 为避免 `ReplacingMergeTree` 后台合并前存在多版本记录，验证器从 `user_behavior_baselines FINAL` 读取实际结果，查询口径为 `model_version + fixture_user_% + FINAL`。
 
 验证器不会使用 `baseline_start_time` / `baseline_end_time` 做精确过滤；ClickHouse `DateTime` 显示可能受服务端或客户端时区影响，精确匹配这些展示值可能误过滤真实 fixture baseline。`build_result.json` 中的 `total_log_count` / `total_user_count` 可能包含同窗口非 fixture 数据，不作为严格验证依据。
+
+验证器会对比：`sample_count`、`is_reliable`、`failed_rate`、`off_hours_rate`、`unusual_ip_rate`、`common_active_hours`、`common_source_ips`、`common_destination_ips`、`common_source_countries`、`common_source_cities`、`common_vpn_gateways`、`result_distribution`、`event_type_distribution`、`action_distribution`、`fail_reason_distribution`、`auth_method_distribution`、`client_software_distribution`、`protocol_distribution`、`active_day_avg_events`、`max_daily_events`。
+
+`common_*` 字段只验证 expected 中达到 `validation_common_min_ratio` 的高频主要值必须出现在 actual common 结果中，不要求长尾低频值全部进入 common。对于 `fixture_user_iptail_0002` 这类没有任何来源 IP 达到阈值的用户，`common_source_ips` 允许为空。
 
 输出文件含义：
 
@@ -154,8 +192,9 @@ failed_diff.json           失败项明细；成功时为 []
 1. `sample_count` 不一致：检查入库数量、时间窗口、`log_type`。
 2. `failed_rate` 不一致：检查 `FAILED` / `FAIL` / `LOGIN_FAIL` 统计口径。
 3. `is_reliable` 不一致：检查 `min_sample_count`。
-4. `common_*` 不一致：检查 Top-N、min_ratio 或 expected 频率。
-5. 重复记录：检查查询是否使用 `FINAL` 或最新 `created_at` 口径。
+4. `common_*` 不一致：检查 Top-N、min_ratio 或 expected 高频值。
+5. distribution 不一致：检查 action、fail_reason、auth_method、client_software、protocol 等聚合口径。
+6. 重复记录：检查查询是否使用 `FINAL` 或最新 `created_at` 口径。
 
 ## SQL 检查入库数量
 
@@ -176,6 +215,6 @@ WHERE username LIKE 'fixture_user_%'
 期望：
 
 ```text
-cnt = 30065
-users = 24
+cnt = 33065
+users = 26
 ```

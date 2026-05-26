@@ -16,19 +16,20 @@ class AcceptanceConfig:
 
     output_dir: Path = Path(".tox/ueba_baseline_acceptance")
 
-    fixture_id: str = "ueba_fixture_v1_seed_42"
+    fixture_id: str = "ueba_fixture_v2_seed_42"
     seed: int = 42
 
     start_time: str = "2026-05-01 00:00:00"
     end_time: str = "2026-06-01 00:00:00"
     log_type: str = "vpn"
-    model_version: str = "ueba_baseline_fixture_v1"
+    model_version: str = "ueba_baseline_fixture_v2"
     min_sample_count: int = 20
 
     stable_user_count: int = 10
     multi_location_user_count: int = 4
     high_failure_user_count: int = 3
     offhour_user_count: int = 3
+    ip_long_tail_user_count: int = 2
     logs_per_main_user: int = 1500
 
     clean_before_load: bool = True
@@ -50,6 +51,7 @@ class AcceptanceConfig:
             + self.multi_location_user_count
             + self.high_failure_user_count
             + self.offhour_user_count
+            + self.ip_long_tail_user_count
             + len(self.edge_user_sample_counts)
         )
 
@@ -61,6 +63,7 @@ class AcceptanceConfig:
             + self.multi_location_user_count
             + self.high_failure_user_count
             + self.offhour_user_count
+            + self.ip_long_tail_user_count
         )
         return main_user_count * self.logs_per_main_user + sum(self.edge_user_sample_counts)
 
