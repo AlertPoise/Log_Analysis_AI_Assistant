@@ -251,7 +251,7 @@ def test_validate_fixture_baselines_failure_writes_failed_report(tmp_path):
 def _expected_payload(users=None):
     users = users or {"fixture_user_stable_0001": _expected_user()}
     return {
-        "fixture_id": "ueba_fixture_v2_seed_42",
+        "fixture_id": "ueba_fixture_v2_monthly_seed_42",
         "total_logs": sum(user["sample_count"] for user in users.values()),
         "user_count": len(users),
         "users": users,
@@ -292,7 +292,7 @@ def _actual_payload(sample_count=100, failed_rate=0.03, unusual_ip_rate=None, us
             expected["unusual_ip_rate"] = unusual_ip_rate
         users = {"fixture_user_stable_0001": _actual_user_from_expected(expected, failed_rate=failed_rate)}
     return {
-        "model_version": "ueba_baseline_fixture_v2",
+        "model_version": "ueba_baseline_fixture_v2_monthly",
         "user_count": len(users),
         "total_sample_count": sum(user["sample_count"] for user in users.values()),
         "users": users,
@@ -347,7 +347,7 @@ def _actual_row(sample_count=100):
         "unusual_ip_rate": 0.0,
         "active_day_avg_events": 50.0,
         "max_daily_events": 60,
-        "model_version": "ueba_baseline_fixture_v2",
+        "model_version": "ueba_baseline_fixture_v2_monthly",
         "created_at": "2026-05-25 00:00:00",
     }
 

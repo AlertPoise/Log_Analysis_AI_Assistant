@@ -1,6 +1,7 @@
 """Configuration for UEBA baseline acceptance fixtures."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 
@@ -16,13 +17,13 @@ class AcceptanceConfig:
 
     output_dir: Path = Path(".tox/ueba_baseline_acceptance")
 
-    fixture_id: str = "ueba_fixture_v2_seed_42"
+    fixture_id: str = "ueba_fixture_v2_monthly_seed_42"
     seed: int = 42
 
     start_time: str = "2026-05-01 00:00:00"
-    end_time: str = "2026-06-01 00:00:00"
+    end_time: str = "2026-07-01 00:00:00"
     log_type: str = "vpn"
-    model_version: str = "ueba_baseline_fixture_v2"
+    model_version: str = "ueba_baseline_fixture_v2_monthly"
     min_sample_count: int = 20
 
     stable_user_count: int = 10
@@ -65,7 +66,17 @@ class AcceptanceConfig:
             + self.offhour_user_count
             + self.ip_long_tail_user_count
         )
-        return main_user_count * self.logs_per_main_user + sum(self.edge_user_sample_counts)
+        months = max(1, _month_count(self.start_time, self.end_time))
+        return months * (main_user_count * self.logs_per_main_user + sum(self.edge_user_sample_counts))
+
+
+def _month_count(start_time: str, end_time: str) -> int:
+    """Return the number of calendar months touched by a half-open fixture window."""
+    start = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+    end = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+    if start >= end:
+        return 0
+    return (end.year - start.year) * 12 + end.month - start.month
 
 
 __all__ = ["AcceptanceConfig"]

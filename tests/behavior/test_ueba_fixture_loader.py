@@ -167,9 +167,9 @@ def test_load_fixture_to_clickhouse_success_writes_load_result_and_no_raw_jsonl(
     result = load_fixture_to_clickhouse(config, client_factory=lambda _config: client)
 
     assert result["success"] is True
-    assert result["expected_rows"] == 65
-    assert result["inserted_rows"] == 65
-    assert result["database_rows"] == 65
+    assert result["expected_rows"] == 130
+    assert result["inserted_rows"] == 130
+    assert result["database_rows"] == 130
     assert (tmp_path / "expected_baselines.json").exists()
     assert (tmp_path / "fixture_summary.json").exists()
     assert (tmp_path / "load_result.json").exists()
@@ -234,5 +234,5 @@ def _row(username):
         "is_off_hours": False,
         "is_unusual_ip": False,
         "parser": "ueba_fixture_v2",
-        "raw_log": "ueba fixture generated log fixture_id=ueba_fixture_v2_seed_42",
+        "raw_log": "ueba fixture generated log fixture_id=ueba_fixture_v2_monthly_seed_42",
     }

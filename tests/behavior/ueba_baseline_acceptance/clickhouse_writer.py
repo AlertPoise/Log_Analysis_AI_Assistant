@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from datetime import datetime
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import re
@@ -256,7 +256,9 @@ def _base_parameters(config: AcceptanceConfig) -> dict[str, Any]:
 def _column_value(row: dict[str, Any], column: str) -> Any:
     value = row[column]
     if column == "timestamp" and isinstance(value, str):
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        naive_time = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        local_offset = datetime.now().astimezone().utcoffset()
+        return naive_time + local_offset if local_offset else naive_time
     return value
 
 

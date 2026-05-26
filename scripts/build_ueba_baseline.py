@@ -72,7 +72,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--clickhouse-database", default=os.getenv("CLICKHOUSE_DATABASE", "log_analysis"))
     parser.add_argument("--clickhouse-secure", action="store_true", default=False)
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.source_table == "logs_structured" and args.active_only:
+        parser.error("--active-only can only be used with --source-table ueba_baseline_training_logs")
+    if args.source_table == "ueba_baseline_training_logs" and not args.dataset_id:
+        parser.error("--dataset-id is required when --source-table ueba_baseline_training_logs")
+    return args
 
 
 def parse_datetime(value: str) -> datetime:

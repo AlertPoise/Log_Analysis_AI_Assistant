@@ -31,10 +31,10 @@ def test_expected_baseline_totals_and_user_counts(tmp_path):
     expected, summary = generate_expected_baselines(config)
     users = expected["users"]
 
-    assert expected["fixture_id"] == "ueba_fixture_v2_seed_42"
-    assert summary["model_version"] == "ueba_baseline_fixture_v2"
-    assert expected["total_logs"] >= 30000
-    assert expected["total_logs"] == 33065
+    assert expected["fixture_id"] == "ueba_fixture_v2_monthly_seed_42"
+    assert summary["model_version"] == "ueba_baseline_fixture_v2_monthly"
+    assert expected["total_logs"] >= 60000
+    assert expected["total_logs"] == 66130
     assert 10 <= expected["user_count"] <= 30
     assert expected["user_count"] == 26
     assert len(users) == expected["user_count"]
@@ -99,8 +99,8 @@ def test_destination_ip_has_stable_and_long_tail_contrast(tmp_path):
     stable = expected["users"]["fixture_user_stable_0001"]
     tail = expected["users"]["fixture_user_iptail_0002"]
 
-    assert stable["destination_ip_frequency"]["172.20.10.10"] == 600
-    assert stable["destination_ip_frequency"]["172.20.10.20"] == 450
+    assert stable["destination_ip_frequency"]["172.20.10.10"] == 1200
+    assert stable["destination_ip_frequency"]["172.20.10.20"] == 900
     assert len(stable["destination_ip_frequency"]) == 5
     assert len(tail["destination_ip_frequency"]) == 150
 
@@ -110,12 +110,12 @@ def test_edge_users_have_expected_reliability(tmp_path):
     expected, _summary = generate_expected_baselines(AcceptanceConfig(output_dir=tmp_path))
     users = expected["users"]
 
-    assert users["fixture_user_edge_0005"]["sample_count"] == 5
-    assert users["fixture_user_edge_0019"]["sample_count"] == 19
-    assert users["fixture_user_edge_0020"]["sample_count"] == 20
-    assert users["fixture_user_edge_0021"]["sample_count"] == 21
+    assert users["fixture_user_edge_0005"]["sample_count"] == 10
+    assert users["fixture_user_edge_0019"]["sample_count"] == 38
+    assert users["fixture_user_edge_0020"]["sample_count"] == 40
+    assert users["fixture_user_edge_0021"]["sample_count"] == 42
     assert users["fixture_user_edge_0005"]["is_reliable"] is False
-    assert users["fixture_user_edge_0019"]["is_reliable"] is False
+    assert users["fixture_user_edge_0019"]["is_reliable"] is True
     assert users["fixture_user_edge_0020"]["is_reliable"] is True
     assert users["fixture_user_edge_0021"]["is_reliable"] is True
 
@@ -133,13 +133,13 @@ def test_high_failure_users_include_failed_and_fail_results(tmp_path):
     )
 
 
-def test_stable_user_failed_rate_is_three_percent(tmp_path):
-    """Stable users should have the documented low failure rate."""
+def test_stable_user_failed_rate_reflects_monthly_change(tmp_path):
+    """Stable users should reflect the documented June failure-rate change."""
     expected, _summary = generate_expected_baselines(AcceptanceConfig(output_dir=tmp_path))
     user = expected["users"]["fixture_user_stable_0001"]
 
-    assert abs(user["failed_rate"] - 0.03) < 1e-9
-    assert user["failed_count"] == 45
+    assert abs(user["failed_rate"] - 0.055) < 1e-9
+    assert user["failed_count"] == 165
     assert user["expected_common_active_hours"] == [9, 10, 14, 15]
 
 
@@ -174,3 +174,61 @@ def _all_keys(users, field):
     for user in users:
         keys.update(user[field])
     return keys
+
+
+
+def test_fixture_generates_full_may_and_june_windows(tmp_path):
+    """Default v2 fixture should cover May and June with the same 26 users per month."""
+    rows = list(iter_fixture_logs(AcceptanceConfig(output_dir=tmp_path)))
+    may_rows = [row for row in rows if "2026-05-01 00:00:00" <= row["timestamp"] < "2026-06-01 00:00:00"]
+    june_rows = [row for row in rows if "2026-06-01 00:00:00" <= row["timestamp"] < "2026-07-01 00:00:00"]
+    may_users = {row["username"] for row in may_rows}
+    june_users = {row["username"] for row in june_rows}
+
+    assert len(rows) >= 60000
+    assert len(rows) == 66130
+    assert len(may_rows) == 33065
+    assert len(june_rows) == 33065
+    assert len(may_users) == 26
+    assert len(june_users) == 26
+    assert may_users == june_users
+    assert max(row["timestamp"] for row in rows) < "2026-07-01 00:00:00"
+
+
+def test_may_and_june_have_required_distribution_coverage(tmp_path):
+    """Both months should independently cover the core UEBA fixture dimensions."""
+    rows = list(iter_fixture_logs(AcceptanceConfig(output_dir=tmp_path)))
+    for start, end in (("2026-05-01 00:00:00", "2026-06-01 00:00:00"), ("2026-06-01 00:00:00", "2026-07-01 00:00:00")):
+        month_rows = [row for row in rows if start <= row["timestamp"] < end]
+        assert len({row["src_city"] for row in month_rows}) >= 6
+        assert len({row["src_country"] for row in month_rows}) >= 4
+        assert {"LOGIN", "REAUTH", "VPN_CONNECT"}.issubset({row["action"] for row in month_rows})
+        assert {"password+mfa", "sso+mfa", "certificate"}.issubset({row["auth_method"] for row in month_rows})
+        assert {"OpenVPN Connect", "Cisco AnyConnect", "Windows VPN Client", "Tunnelblick"}.issubset(
+            {row["client_software"] for row in month_rows}
+        )
+        assert {"SSLVPN", "IPSec", "WireGuard"}.issubset({row["protocol"] for row in month_rows})
+        assert {"PASSWORD_ERROR", "MFA_DENIED", "ACCOUNT_LOCKED", "TIMEOUT"}.issubset(
+            {row["fail_reason"] for row in month_rows if row["fail_reason"]}
+        )
+        assert any(row["is_unusual_ip"] for row in month_rows)
+        assert {"vpn-gw-cn-01", "vpn-gw-cn-02", "vpn-gw-hk-01", "vpn-gw-sg-01"}.issubset(
+            {row["vpn_gateway"] for row in month_rows}
+        )
+
+
+def test_june_distribution_differs_from_may(tmp_path):
+    """June should include stable, detectable behavior changes from May."""
+    rows = list(iter_fixture_logs(AcceptanceConfig(output_dir=tmp_path)))
+    may_rows = [row for row in rows if "2026-05-01 00:00:00" <= row["timestamp"] < "2026-06-01 00:00:00"]
+    june_rows = [row for row in rows if "2026-06-01 00:00:00" <= row["timestamp"] < "2026-07-01 00:00:00"]
+
+    assert _ratio_for(may_rows, "result", "FAILED") != _ratio_for(june_rows, "result", "FAILED")
+    assert _ratio_for(may_rows, "protocol", "WireGuard") != _ratio_for(june_rows, "protocol", "WireGuard")
+    assert _ratio_for(may_rows, "vpn_gateway", "vpn-gw-sg-01") != _ratio_for(june_rows, "vpn_gateway", "vpn-gw-sg-01")
+    assert sum(1 for row in june_rows if row["is_off_hours"]) > sum(1 for row in may_rows if row["is_off_hours"])
+    assert sum(1 for row in june_rows if row["is_unusual_ip"]) > sum(1 for row in may_rows if row["is_unusual_ip"])
+
+
+def _ratio_for(rows, field, value):
+    return sum(1 for row in rows if row[field] == value) / len(rows)

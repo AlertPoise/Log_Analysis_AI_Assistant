@@ -11,6 +11,7 @@ from .baseline_validator import validate_fixture_baselines
 from .clickhouse_writer import load_fixture_to_clickhouse
 from .config import AcceptanceConfig
 from .fixture_generator import generate_fixture_outputs
+from .monthly_training_update_runner import run_monthly_training_update
 from .report_writer import ensure_output_dir, read_json
 
 
@@ -29,6 +30,13 @@ def main(argv: list[str] | None = None) -> int:
     config = AcceptanceConfig(dump_logs_jsonl=args.dump_logs_jsonl)
     if args.output_dir:
         config.output_dir = Path(args.output_dir)
+    if args.monthly_training_update:
+        result = run_monthly_training_update(config)
+        print("success = {}".format(result["success"]))
+        print("monthly_training_update_report_path = {}".format(Path(config.output_dir) / "monthly_training_update_report.json"))
+        if not result["success"]:
+            print("failed_checks = {}".format(result.get("failed_checks", [])))
+        return 0 if result["success"] else 1
 
     while True:
         _print_menu(config)
@@ -101,6 +109,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="调试用：同时写出 fixture_logs.jsonl，默认不写原始模拟日志。",
     )
+    parser.add_argument(
+        "--monthly-training-update",
+        action="store_true",
+        help="非交互执行月度训练表更新闭环验收。",
+    )
     return parser.parse_args(argv)
 
 
@@ -127,6 +140,9 @@ def _print_menu(config: AcceptanceConfig) -> None:
     print("4. 对比 expected_baselines.json 与数据库实际 baseline")
     print("5. 查看最近一次验收摘要")
     print("0. 退出")
+    print()
+    print("非交互月度训练表更新闭环：")
+    print(".venv/bin/python -m tests.behavior.ueba_baseline_acceptance.runner --monthly-training-update")
     print()
 
 

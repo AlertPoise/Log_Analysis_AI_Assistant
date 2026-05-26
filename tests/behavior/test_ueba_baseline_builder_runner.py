@@ -105,7 +105,7 @@ def test_cli_success_parses_json_and_updates_run_state(tmp_path, monkeypatch):
 
     run_state = _read_json(tmp_path / "run_state.json")
     assert result["success"] is True
-    assert result["total_log_count"] == 33065
+    assert result["total_log_count"] == 66130
     assert result["total_user_count"] == 26
     assert run_state["baseline_built"] is True
     assert run_state["user_count"] == 26
@@ -173,10 +173,10 @@ def test_cli_json_success_false_is_failure(tmp_path, monkeypatch):
 
 
 def _write_precheck_files(output_dir):
-    _write_json(output_dir / "expected_baselines.json", {"fixture_id": "ueba_fixture_v2_seed_42"})
+    _write_json(output_dir / "expected_baselines.json", {"fixture_id": "ueba_fixture_v2_monthly_seed_42"})
     _write_json(
         output_dir / "load_result.json",
-        {"success": True, "expected_rows": 33065, "database_rows": 33065},
+        {"success": True, "expected_rows": 66130, "database_rows": 66130},
     )
 
 
@@ -187,7 +187,7 @@ def _success_stdout():
             "total_user_count": 26,
             "reliable_user_count": 22,
             "unreliable_user_count": 2,
-            "total_log_count": 33065,
+            "total_log_count": 66130,
             "message": "saved 26 user baselines",
         }
     )

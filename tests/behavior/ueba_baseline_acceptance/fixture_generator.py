@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,7 +21,7 @@ from .report_writer import ensure_output_dir, update_run_state, write_json
 
 PARSER_NAME = "ueba_fixture_v2"
 EDGE_SAMPLE_COUNTS = (5, 19, 20, 21)
-DAYS_IN_WINDOW = 31
+DEFAULT_DAYS_IN_MONTH = 31
 
 DEFAULT_AUTH_METHODS = ("password+mfa", "sso+mfa", "certificate")
 DEFAULT_AUTH_METHOD_WEIGHTS = (70, 20, 10)
@@ -71,67 +71,71 @@ class UserSpec:
 def iter_fixture_logs(config: AcceptanceConfig) -> Iterator[dict[str, Any]]:
     """Yield logs_structured-compatible fixture rows according to config."""
     start_time = _parse_time(config.start_time)
-    for user_index, spec in enumerate(_build_user_specs(config), start=1):
-        result_values = _expand_weighted_values(spec.results, spec.result_weights, spec.sample_count)
-        failure_count = sum(1 for value in result_values if value in {"FAILED", "FAIL"})
-        fail_reason_values = _expand_weighted_values(spec.fail_reasons, spec.fail_reason_weights, failure_count)
-        source_ip_values = _expand_weighted_values(spec.source_ips, spec.source_ip_weights, spec.sample_count)
-        country_values = _expand_weighted_values(spec.countries, spec.country_weights, spec.sample_count)
-        city_values = _expand_weighted_values(spec.cities, spec.city_weights, spec.sample_count)
-        gateway_values = _expand_weighted_values(spec.vpn_gateways, spec.vpn_gateway_weights, spec.sample_count)
-        action_values = _expand_weighted_values(spec.actions, spec.action_weights, spec.sample_count)
-        auth_method_values = _expand_weighted_values(spec.auth_methods, spec.auth_method_weights, spec.sample_count)
-        client_values = _expand_weighted_values(spec.client_softwares, spec.client_software_weights, spec.sample_count)
-        protocol_values = _expand_weighted_values(spec.protocols, spec.protocol_weights, spec.sample_count)
-        destination_values = _destination_ip_values(spec, user_index)
-        unusual_ip_values = _boolean_ratio_values(spec.unusual_ip_ratio, spec.sample_count)
-        hour_values = _hour_values(spec)
-        day_values = _day_values(spec)
-        failure_index = 0
+    end_time = _parse_time(config.end_time)
+    for month_index, month_start, month_end in _month_windows(start_time, end_time):
+        days_in_window = max(1, (month_end - month_start).days)
+        for user_index, base_spec in enumerate(_build_user_specs(config), start=1):
+            spec = _monthly_variant_spec(base_spec, month_index)
+            result_values = _expand_weighted_values(spec.results, spec.result_weights, spec.sample_count)
+            failure_count = sum(1 for value in result_values if value in {"FAILED", "FAIL"})
+            fail_reason_values = _expand_weighted_values(spec.fail_reasons, spec.fail_reason_weights, failure_count)
+            source_ip_values = _expand_weighted_values(spec.source_ips, spec.source_ip_weights, spec.sample_count)
+            country_values = _expand_weighted_values(spec.countries, spec.country_weights, spec.sample_count)
+            city_values = _expand_weighted_values(spec.cities, spec.city_weights, spec.sample_count)
+            gateway_values = _expand_weighted_values(spec.vpn_gateways, spec.vpn_gateway_weights, spec.sample_count)
+            action_values = _expand_weighted_values(spec.actions, spec.action_weights, spec.sample_count)
+            auth_method_values = _expand_weighted_values(spec.auth_methods, spec.auth_method_weights, spec.sample_count)
+            client_values = _expand_weighted_values(spec.client_softwares, spec.client_software_weights, spec.sample_count)
+            protocol_values = _expand_weighted_values(spec.protocols, spec.protocol_weights, spec.sample_count)
+            destination_values = _destination_ip_values(spec, user_index)
+            unusual_ip_values = _boolean_ratio_values(spec.unusual_ip_ratio, spec.sample_count)
+            hour_values = _hour_values(spec)
+            day_values = _day_values(spec, days_in_window)
+            failure_index = 0
 
-        for row_index in range(spec.sample_count):
-            result = result_values[row_index]
-            is_failure = result in {"FAILED", "FAIL"}
-            action = action_values[row_index]
-            active_hour = hour_values[row_index]
-            timestamp = _timestamp_for(start_time, row_index, active_hour, day_values[row_index])
-            is_off_hours = active_hour in {0, 1, 2, 3}
-            if is_failure:
-                fail_reason = fail_reason_values[failure_index]
-                failure_index += 1
-            else:
-                fail_reason = ""
-            session_duration, bytes_sent, bytes_recv = _session_and_traffic_metrics(
-                row_index=row_index,
-                user_index=user_index,
-                is_failure=is_failure,
-                user_type=spec.user_type,
-            )
+            for row_index in range(spec.sample_count):
+                result = result_values[row_index]
+                is_failure = result in {"FAILED", "FAIL"}
+                action = action_values[row_index]
+                active_hour = hour_values[row_index]
+                timestamp = _timestamp_for(month_start, row_index, active_hour, day_values[row_index])
+                is_off_hours = active_hour in {0, 1, 2, 3}
+                if is_failure:
+                    fail_reason = fail_reason_values[failure_index]
+                    failure_index += 1
+                else:
+                    fail_reason = ""
+                session_duration, bytes_sent, bytes_recv = _session_and_traffic_metrics(
+                    row_index=row_index + month_index * spec.sample_count,
+                    user_index=user_index,
+                    is_failure=is_failure,
+                    user_type=spec.user_type,
+                )
 
-            yield {
-                "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                "log_type": config.log_type,
-                "username": spec.username,
-                "source_ip": source_ip_values[row_index],
-                "destination_ip": destination_values[row_index],
-                "src_country": country_values[row_index],
-                "src_city": city_values[row_index],
-                "vpn_gateway": gateway_values[row_index],
-                "action": action,
-                "event_type": "LOGIN_FAIL" if is_failure else "LOGIN_SUCCESS",
-                "result": result,
-                "fail_reason": fail_reason,
-                "auth_method": auth_method_values[row_index],
-                "client_software": client_values[row_index],
-                "protocol": protocol_values[row_index],
-                "session_duration_sec": session_duration,
-                "bytes_sent": bytes_sent,
-                "bytes_recv": bytes_recv,
-                "is_off_hours": is_off_hours,
-                "is_unusual_ip": unusual_ip_values[row_index],
-                "parser": PARSER_NAME,
-                "raw_log": f"ueba fixture generated log fixture_id={config.fixture_id}",
-            }
+                yield {
+                    "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    "log_type": config.log_type,
+                    "username": spec.username,
+                    "source_ip": source_ip_values[row_index],
+                    "destination_ip": destination_values[row_index],
+                    "src_country": country_values[row_index],
+                    "src_city": city_values[row_index],
+                    "vpn_gateway": gateway_values[row_index],
+                    "action": action,
+                    "event_type": "LOGIN_FAIL" if is_failure else "LOGIN_SUCCESS",
+                    "result": result,
+                    "fail_reason": fail_reason,
+                    "auth_method": auth_method_values[row_index],
+                    "client_software": client_values[row_index],
+                    "protocol": protocol_values[row_index],
+                    "session_duration_sec": session_duration,
+                    "bytes_sent": bytes_sent,
+                    "bytes_recv": bytes_recv,
+                    "is_off_hours": is_off_hours,
+                    "is_unusual_ip": unusual_ip_values[row_index],
+                    "parser": PARSER_NAME,
+                    "raw_log": f"ueba fixture generated log fixture_id={config.fixture_id} month_index={month_index}",
+                }
 
 
 def generate_expected_baselines(config: AcceptanceConfig) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -209,6 +213,122 @@ def generate_fixture_outputs(config: AcceptanceConfig) -> dict[str, Any]:
     }
     update_run_state(config, **state)
     return state
+
+
+def _month_windows(start_time: datetime, end_time: datetime) -> Iterator[tuple[int, datetime, datetime]]:
+    """Yield calendar-month windows within the configured half-open interval."""
+    if start_time >= end_time:
+        return
+    current = start_time
+    month_index = 0
+    while current < end_time:
+        next_month = _next_month_start(current)
+        window_end = min(next_month, end_time)
+        yield month_index, current, window_end
+        current = window_end
+        month_index += 1
+
+
+def _next_month_start(value: datetime) -> datetime:
+    if value.month == 12:
+        return value.replace(year=value.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return value.replace(month=value.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _monthly_variant_spec(spec: UserSpec, month_index: int) -> UserSpec:
+    """Apply stable June+ behavior shifts while keeping the same fixture users."""
+    if month_index == 0:
+        return spec
+    if spec.user_type == "stable":
+        return replace(
+            spec,
+            cities=(spec.cities[0], "深圳") if spec.cities else ("深圳",),
+            city_weights=(75, 25) if spec.cities else (100,),
+            vpn_gateways=("vpn-gw-cn-02", "vpn-gw-hk-01"),
+            vpn_gateway_weights=(70, 30),
+            results=("SUCCESS", "FAILED", "FAIL"),
+            result_weights=(92, 5, 3),
+            actions=("LOGIN", "REAUTH", "LOGOUT", "VPN_CONNECT"),
+            action_weights=(72, 12, 6, 10),
+            protocols=("SSLVPN", "IPSec", "WireGuard"),
+            protocol_weights=(62, 25, 13),
+            offhour_ratio=max(spec.offhour_ratio, 0.06),
+            unusual_ip_ratio=max(spec.unusual_ip_ratio, 0.02),
+        )
+    if spec.user_type == "multi_location":
+        return replace(
+            spec,
+            countries=("中国", "新加坡", "日本", "德国"),
+            country_weights=(55, 20, 15, 10),
+            cities=("上海", "新加坡", "东京", "法兰克福"),
+            city_weights=(50, 22, 18, 10),
+            vpn_gateways=("vpn-gw-cn-02", "vpn-gw-sg-01", "vpn-gw-hk-01"),
+            vpn_gateway_weights=(45, 35, 20),
+            results=("SUCCESS", "FAILED", "FAIL"),
+            result_weights=(94, 4, 2),
+            actions=("LOGIN", "VPN_CONNECT", "REAUTH", "LOGOUT"),
+            action_weights=(66, 22, 8, 4),
+            protocols=("SSLVPN", "IPSec", "WireGuard"),
+            protocol_weights=(55, 25, 20),
+            unusual_ip_ratio=max(spec.unusual_ip_ratio, 0.08),
+        )
+    if spec.user_type == "high_failure":
+        return replace(
+            spec,
+            vpn_gateways=("vpn-gw-cn-02", "vpn-gw-hk-01"),
+            vpn_gateway_weights=(50, 50),
+            results=("SUCCESS", "FAILED", "FAIL"),
+            result_weights=(75, 18, 7),
+            fail_reasons=("MFA_DENIED", "PASSWORD_ERROR", "ACCOUNT_LOCKED", "TIMEOUT"),
+            fail_reason_weights=(45, 30, 15, 10),
+            actions=("LOGIN", "REAUTH", "VPN_CONNECT"),
+            action_weights=(80, 10, 10),
+            protocols=("SSLVPN", "IPSec", "WireGuard"),
+            protocol_weights=(58, 30, 12),
+            offhour_ratio=max(spec.offhour_ratio, 0.08),
+            unusual_ip_ratio=max(spec.unusual_ip_ratio, 0.1),
+        )
+    if spec.user_type == "offhour":
+        return replace(
+            spec,
+            hours=(8, 9, 15, 16),
+            vpn_gateways=("vpn-gw-cn-01", "vpn-gw-cn-02"),
+            vpn_gateway_weights=(55, 45),
+            results=("SUCCESS", "FAILED", "FAIL"),
+            result_weights=(93, 4, 3),
+            actions=("LOGIN", "REAUTH", "VPN_CONNECT"),
+            action_weights=(70, 15, 15),
+            offhour_ratio=0.45,
+            unusual_ip_ratio=max(spec.unusual_ip_ratio, 0.09),
+        )
+    if spec.user_type == "ip_long_tail":
+        return replace(
+            spec,
+            cities=("杭州", "深圳", "上海"),
+            city_weights=(45, 35, 20),
+            vpn_gateways=("vpn-gw-hk-01", "vpn-gw-cn-02", "vpn-gw-sg-01"),
+            vpn_gateway_weights=(45, 35, 20),
+            results=("SUCCESS", "FAILED", "FAIL"),
+            result_weights=(92, 5, 3),
+            actions=("LOGIN", "VPN_CONNECT", "REAUTH", "LOGOUT"),
+            action_weights=(68, 20, 8, 4),
+            protocols=("SSLVPN", "IPSec", "WireGuard"),
+            protocol_weights=(50, 28, 22),
+            unusual_ip_ratio=max(spec.unusual_ip_ratio, 0.12),
+            burst_day_indexes=tuple(day + 2 for day in spec.burst_day_indexes),
+        )
+    if spec.user_type == "edge":
+        return replace(
+            spec,
+            vpn_gateways=("vpn-gw-cn-02",),
+            vpn_gateway_weights=(100,),
+            protocols=("IPSec",),
+            protocol_weights=(100,),
+            actions=("VPN_CONNECT",),
+            action_weights=(100,),
+            unusual_ip_ratio=0.1 if spec.sample_count >= 20 else 0.0,
+        )
+    return spec
 
 
 def _build_user_specs(config: AcceptanceConfig) -> list[UserSpec]:
@@ -526,12 +646,12 @@ def _hour_values(spec: UserSpec) -> list[int]:
     return _cycle_values(spec.hours, spec.sample_count)
 
 
-def _day_values(spec: UserSpec) -> list[int]:
+def _day_values(spec: UserSpec, days_in_window: int = DEFAULT_DAYS_IN_MONTH) -> list[int]:
     if not spec.burst_day_indexes:
-        return [index % DAYS_IN_WINDOW for index in range(spec.sample_count)]
+        return [index % days_in_window for index in range(spec.sample_count)]
     burst_count = round(spec.sample_count * 0.35)
     normal_count = spec.sample_count - burst_count
-    normal_days = tuple(day for day in range(DAYS_IN_WINDOW) if day not in set(spec.burst_day_indexes))
+    normal_days = tuple(day for day in range(days_in_window) if day not in set(spec.burst_day_indexes))
     return _cycle_values(spec.burst_day_indexes, burst_count) + _cycle_values(normal_days, normal_count)
 
 

@@ -41,10 +41,10 @@
 默认 fixture 已增强为：
 
 ```text
-fixture_id = ueba_fixture_v2_seed_42
-model_version = ueba_baseline_fixture_v2
+fixture_id = ueba_fixture_v2_monthly_seed_42
+model_version = ueba_baseline_fixture_v2_monthly
 default users = 26
-default logs = 33065
+default logs = 66130
 ```
 
 模拟数据不再几乎全是“中国 / 北京”：stable、高失败、非工作时间、多地登录和 IP 长尾用户覆盖北京、上海、广州、深圳、杭州、成都，并包含新加坡、日本、德国等跨国家场景。
@@ -106,7 +106,7 @@ YYYY-MM-DD HH:MM:SS
 username LIKE 'fixture_user_%'
 AND log_type = 'vpn'
 AND timestamp >= '2026-05-01 00:00:00'
-AND timestamp < '2026-06-01 00:00:00'
+AND timestamp < '2026-07-01 00:00:00'
 ```
 
 不会清空整表，也不会删除非 fixture 用户数据。ClickHouse `ALTER TABLE ... DELETE` 是 mutation，可能异步完成；如果重复运行后看到行数短暂异常，可以等待 mutation 完成后重新执行入库。
@@ -121,9 +121,9 @@ cat .tox/ueba_baseline_acceptance/load_result.json
 
 ```text
 success = true
-expected_rows = 33065
-inserted_rows = 33065
-database_rows = 33065
+expected_rows = 66130
+inserted_rows = 66130
+database_rows = 66130
 error = null
 ```
 
@@ -149,9 +149,9 @@ error = null
 
 ```text
 success = true
-total_log_count = 33065
+total_log_count = 66130
 total_user_count = 26
-model_version = ueba_baseline_fixture_v2
+model_version = ueba_baseline_fixture_v2_monthly
 ```
 
 baseline 结果写入 ClickHouse 的 `log_analysis.user_behavior_baselines`。
@@ -167,7 +167,7 @@ baseline 结果写入 ClickHouse 的 `log_analysis.user_behavior_baselines`。
 第 4 项用于对比 `expected_baselines.json` 与数据库实际 baseline。验证器只读取：
 
 ```text
-model_version = ueba_baseline_fixture_v2
+model_version = ueba_baseline_fixture_v2_monthly
 username LIKE 'fixture_user_%'
 ```
 
@@ -208,13 +208,13 @@ SELECT
 FROM log_analysis.logs_structured
 WHERE username LIKE 'fixture_user_%'
   AND timestamp >= '2026-05-01 00:00:00'
-  AND timestamp < '2026-06-01 00:00:00'
+  AND timestamp < '2026-07-01 00:00:00'
 "
 ```
 
 期望：
 
 ```text
-cnt = 33065
+cnt = 66130
 users = 26
 ```

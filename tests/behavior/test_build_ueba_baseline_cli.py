@@ -202,3 +202,20 @@ def test_help_lists_source_table_options_without_connecting(monkeypatch, capsys)
     assert "--dataset-id" in output
     assert "--active-only" in output
     create_client.assert_not_called()
+
+
+
+def test_parse_args_rejects_logs_structured_with_active_only():
+    """--active-only should be rejected for logs_structured at CLI boundary."""
+    with pytest.raises(SystemExit) as exc_info:
+        build_ueba_baseline.parse_args(["--source-table", "logs_structured", "--active-only"])
+
+    assert exc_info.value.code == 2
+
+
+def test_parse_args_requires_dataset_for_training_source_table():
+    """Training-table source must provide dataset-id before connecting ClickHouse."""
+    with pytest.raises(SystemExit) as exc_info:
+        build_ueba_baseline.parse_args(["--source-table", "ueba_baseline_training_logs"])
+
+    assert exc_info.value.code == 2

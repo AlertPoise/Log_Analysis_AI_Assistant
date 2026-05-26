@@ -333,6 +333,21 @@ def test_training_source_table_is_used_by_all_fetch_methods(method_name, fetch_c
     assert_common_repository_sql_constraints_for_table(sql, parameters, "ueba_baseline_training_logs")
 
 
+
+
+def test_logs_structured_active_only_does_not_add_is_active_filter():
+    """Repository should protect logs_structured from training-table-only is_active filters."""
+    client = FakeClient()
+    repository = UebaRepository(client, source_table="logs_structured", active_only=True)
+
+    repository.fetch_user_summary(START_TIME, END_TIME, LOG_TYPE)
+
+    normalized = normalize_sql(client.calls[0]["sql"]).lower()
+    assert "log_analysis.logs_structured" in normalized
+    assert "is_active = 1" not in normalized
+    assert "dataset_id" not in normalized
+
+
 def test_training_source_active_only_adds_is_active_filter():
     """active_only=True 时训练表查询应追加 is_active = 1。"""
     client = FakeClient()
@@ -348,6 +363,25 @@ def test_training_source_active_only_adds_is_active_filter():
     normalized = normalize_sql(client.calls[0]["sql"]).lower()
     assert "dataset_id = %(dataset_id)s" in normalized
     assert "is_active = 1" in normalized
+
+
+
+
+def test_training_source_without_active_only_does_not_add_is_active_filter():
+    """Training-table mode should only add is_active when active_only=True."""
+    client = FakeClient()
+    repository = UebaRepository(
+        client,
+        source_table="ueba_baseline_training_logs",
+        dataset_id="dataset_all_rows",
+        active_only=False,
+    )
+
+    repository.fetch_user_summary(START_TIME, END_TIME, LOG_TYPE)
+
+    normalized = normalize_sql(client.calls[0]["sql"]).lower()
+    assert "dataset_id = %(dataset_id)s" in normalized
+    assert "is_active = 1" not in normalized
 
 
 def test_training_source_requires_dataset_id():
