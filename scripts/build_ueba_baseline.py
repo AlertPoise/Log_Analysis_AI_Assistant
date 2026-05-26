@@ -38,6 +38,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--start-time", help="基线开始时间，支持 YYYY-MM-DD HH:MM:SS、YYYY-MM-DDTHH:MM:SS、YYYY-MM-DD")
     parser.add_argument("--end-time", help="基线结束时间，支持 YYYY-MM-DD HH:MM:SS、YYYY-MM-DDTHH:MM:SS、YYYY-MM-DD")
     parser.add_argument("--log-type", default="vpn", help="日志类型，默认 vpn")
+    parser.add_argument(
+        "--source-table",
+        default="logs_structured",
+        choices=("logs_structured", "ueba_baseline_training_logs"),
+        help="Baseline 构建数据源表，默认 logs_structured",
+    )
+    parser.add_argument("--dataset-id", help="source-table 为 ueba_baseline_training_logs 时必填的训练数据集 ID")
+    parser.add_argument("--active-only", action="store_true", default=False, help="训练表模式下仅读取 is_active = 1 的行")
 
     parser.add_argument("--baseline-window-days", type=int, default=DEFAULT_CONFIG.baseline_window_days)
     parser.add_argument("--min-sample-count", type=int, default=DEFAULT_CONFIG.min_sample_count)
@@ -133,9 +141,22 @@ def create_clickhouse_client(args: argparse.Namespace):
     return client
 
 
-def build_service(client: Any, database: str, config: UebaBaselineConfig) -> UebaService:
+def build_service(
+    client: Any,
+    database: str,
+    config: UebaBaselineConfig,
+    source_table: str = "logs_structured",
+    dataset_id: str | None = None,
+    active_only: bool = False,
+) -> UebaService:
     """初始化 Repository、Merger、Builder、Store 和 Service。"""
-    repository = UebaRepository(client=client, database=database)
+    repository = UebaRepository(
+        client=client,
+        database=database,
+        source_table=source_table,
+        dataset_id=dataset_id,
+        active_only=active_only,
+    )
     aggregate_merger = AggregateMerger()
     baseline_builder = BaselineBuilder(config=config)
     baseline_store = BaselineStore(client=client, database=database, config=config)
@@ -180,7 +201,14 @@ def main(argv: list[str] | None = None) -> int:
         config = build_config(args)
         start_time, end_time = resolve_time_window(args, config)
         client = create_clickhouse_client(args)
-        service = build_service(client, args.clickhouse_database, config)
+        service = build_service(
+            client,
+            args.clickhouse_database,
+            config,
+            source_table=getattr(args, "source_table", "logs_structured"),
+            dataset_id=getattr(args, "dataset_id", None),
+            active_only=getattr(args, "active_only", False),
+        )
         result = service.build_baseline_once(
             start_time=start_time,
             end_time=end_time,

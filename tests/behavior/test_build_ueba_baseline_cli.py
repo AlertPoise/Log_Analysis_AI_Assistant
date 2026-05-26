@@ -148,3 +148,57 @@ def test_help_does_not_create_clickhouse_client(monkeypatch, capsys):
     assert exc_info.value.code == 0
     create_client.assert_not_called()
     assert "构建 UEBA 离线用户行为 Baseline" in capsys.readouterr().out
+
+
+
+def test_parse_args_accepts_training_source_table_options():
+    """build CLI should parse source-table, dataset-id, and active-only options."""
+    args = build_ueba_baseline.parse_args(
+        [
+            "--source-table",
+            "ueba_baseline_training_logs",
+            "--dataset-id",
+            "baseline_init_2026_05",
+            "--active-only",
+        ]
+    )
+
+    assert args.source_table == "ueba_baseline_training_logs"
+    assert args.dataset_id == "baseline_init_2026_05"
+    assert args.active_only is True
+
+
+def test_build_service_passes_training_source_options_to_repository():
+    """build_service should wire training table options into UebaRepository."""
+    fake_client = Mock()
+    config = UebaBaselineConfig()
+
+    service = build_ueba_baseline.build_service(
+        fake_client,
+        "log_analysis",
+        config,
+        source_table="ueba_baseline_training_logs",
+        dataset_id="baseline_init_2026_05",
+        active_only=True,
+    )
+
+    assert service.repository.source_table == "ueba_baseline_training_logs"
+    assert service.repository.dataset_id == "baseline_init_2026_05"
+    assert service.repository.active_only is True
+    assert service.baseline_store.TABLE_NAME == "user_behavior_baselines"
+
+
+def test_help_lists_source_table_options_without_connecting(monkeypatch, capsys):
+    """--help should expose new source controls and still avoid ClickHouse."""
+    create_client = Mock(side_effect=AssertionError("should not connect"))
+    monkeypatch.setattr(build_ueba_baseline, "create_clickhouse_client", create_client)
+
+    with pytest.raises(SystemExit) as exc_info:
+        build_ueba_baseline.main(["--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "--source-table" in output
+    assert "--dataset-id" in output
+    assert "--active-only" in output
+    create_client.assert_not_called()

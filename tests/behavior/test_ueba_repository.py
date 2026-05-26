@@ -287,3 +287,108 @@ def test_top_n_limit_must_be_positive_integer():
 
     with pytest.raises(ValueError, match="limit must be a positive integer"):
         repository.fetch_top_source_ips(START_TIME, END_TIME, 0, LOG_TYPE)
+
+
+
+def test_repository_defaults_to_logs_structured_source_table():
+    """默认数据源应保持 logs_structured，保证旧构建行为不变。"""
+    repository, _client = build_repository()
+
+    assert repository.source_table == "logs_structured"
+    assert repository.dataset_id is None
+    assert repository.active_only is False
+
+
+def test_logs_structured_mode_does_not_add_dataset_filter():
+    """实时日志表模式下不应出现训练表 dataset_id 条件。"""
+    sql, parameters, _rows = capture_call(lambda repo: repo.fetch_user_summary(START_TIME, END_TIME, LOG_TYPE))
+    normalized = normalize_sql(sql).lower()
+
+    assert "log_analysis.logs_structured" in normalized
+    assert "dataset_id" not in normalized
+    assert "is_active = 1" not in normalized
+    assert "dataset_id" not in parameters
+
+
+@pytest.mark.parametrize("method_name,fetch_call", fetch_calls())
+def test_training_source_table_is_used_by_all_fetch_methods(method_name, fetch_call):
+    """训练表模式下所有 fetch_* 都必须从 ueba_baseline_training_logs 聚合。"""
+    client = FakeClient()
+    repository = UebaRepository(
+        client,
+        source_table="ueba_baseline_training_logs",
+        dataset_id="baseline_init_2026_05",
+    )
+
+    rows = fetch_call(repository)
+
+    assert rows == [{"username": "zhangsan", "cnt": 1}]
+    sql = client.calls[0]["sql"]
+    parameters = client.calls[0]["parameters"]
+    normalized = normalize_sql(sql).lower()
+    assert "log_analysis.ueba_baseline_training_logs" in normalized
+    assert "from logs_structured" not in normalized
+    assert "dataset_id = %(dataset_id)s" in normalized
+    assert parameters["dataset_id"] == "baseline_init_2026_05"
+    assert_common_repository_sql_constraints_for_table(sql, parameters, "ueba_baseline_training_logs")
+
+
+def test_training_source_active_only_adds_is_active_filter():
+    """active_only=True 时训练表查询应追加 is_active = 1。"""
+    client = FakeClient()
+    repository = UebaRepository(
+        client,
+        source_table="ueba_baseline_training_logs",
+        dataset_id="dataset_active",
+        active_only=True,
+    )
+
+    repository.fetch_user_summary(START_TIME, END_TIME, LOG_TYPE)
+
+    normalized = normalize_sql(client.calls[0]["sql"]).lower()
+    assert "dataset_id = %(dataset_id)s" in normalized
+    assert "is_active = 1" in normalized
+
+
+def test_training_source_requires_dataset_id():
+    """训练表模式必须显式提供 dataset_id。"""
+    client = FakeClient()
+
+    with pytest.raises(ValueError, match="dataset_id is required"):
+        UebaRepository(client, source_table="ueba_baseline_training_logs")
+
+
+def test_repository_rejects_illegal_source_table():
+    """source_table 必须走白名单，禁止任意表名拼入 SQL。"""
+    client = FakeClient()
+
+    with pytest.raises(ValueError, match="unsupported source_table"):
+        UebaRepository(client, source_table="logs_structured; DROP TABLE x")
+
+
+def test_repository_rejects_illegal_database_identifier():
+    """database 标识符也必须受控。"""
+    client = FakeClient()
+
+    with pytest.raises(ValueError, match="invalid ClickHouse identifier"):
+        UebaRepository(client, database="log_analysis; DROP TABLE x")
+
+
+def assert_common_repository_sql_constraints_for_table(sql: str, parameters: dict, table_name: str) -> None:
+    """检查指定 source_table 下的公共 Repository SQL 约束。"""
+    normalized = normalize_sql(sql).lower()
+
+    assert not re.search(r"select\s+\*", normalized)
+    assert table_name in normalized
+    assert "group by" in normalized
+    assert "timestamp >= %(start_time)s" in normalized
+    assert "timestamp < %(end_time)s" in normalized
+    assert "log_type = %(log_type)s" in normalized
+    assert "username != ''" in normalized
+    assert parameters["start_time"] == START_TIME
+    assert parameters["end_time"] == END_TIME
+    assert parameters["log_type"] == LOG_TYPE
+    assert START_TIME not in sql
+    assert END_TIME not in sql
+    assert LOG_TYPE not in sql
+    assert_no_legacy_fields(sql)

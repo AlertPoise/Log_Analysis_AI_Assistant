@@ -1,29 +1,45 @@
 """UEBA Repository 模块，用于读取数据库侧聚合结果。
 
-本模块只封装面向 logs_structured 的参数化 GROUP BY 查询。
+本模块只封装面向受控数据源表的参数化 GROUP BY 查询。
 它不创建数据库连接、不生成 Baseline、不写入数据库，也不把
 ClickHouse 原始返回对象暴露给上层模块。
 """
 
 from collections.abc import Iterable
+import re
 from typing import Any
 
 
 class UebaRepository:
     """UEBA 第一版离线 Baseline 构建的聚合读取层。"""
 
-    def __init__(self, client: Any, database: str = "log_analysis") -> None:
+    ALLOWED_SOURCE_TABLES = {"logs_structured", "ueba_baseline_training_logs"}
+
+    def __init__(
+        self,
+        client: Any,
+        database: str = "log_analysis",
+        source_table: str = "logs_structured",
+        dataset_id: str | None = None,
+        active_only: bool = False,
+    ) -> None:
         """初始化 Repository。
 
-        client 由外部传入，应提供 query(...) 或 execute(...) 方法。database
-        当前仅保留为受控配置，不参与用户输入拼接。
+        client 由外部传入，应提供 query(...) 或 execute(...) 方法。
+        source_table 只允许在实时结构化日志表和手动训练表之间切换。
         """
         self.client = client
-        self.database = database
+        self.database = self._validate_identifier(database)
+        self.source_table = self._validate_source_table(source_table)
+        self.dataset_id = dataset_id
+        self.active_only = active_only
+
+        if self.source_table == "ueba_baseline_training_logs" and not self.dataset_id:
+            raise ValueError("dataset_id is required when source_table is ueba_baseline_training_logs")
 
     def fetch_user_summary(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
         """读取每个用户的总览聚合统计。"""
-        sql = """
+        sql = f"""
         SELECT
             username,
             count() AS sample_count,
@@ -33,10 +49,8 @@ class UebaRepository:
             uniqExact(toDate(timestamp)) AS active_days,
             countIf(is_off_hours) AS off_hours_count,
             countIf(is_unusual_ip) AS unusual_ip_count
-        FROM logs_structured
-        PREWHERE log_type = %(log_type)s
-            AND timestamp >= %(start_time)s
-            AND timestamp < %(end_time)s
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
         WHERE username != ''
         GROUP BY username
         """
@@ -44,15 +58,13 @@ class UebaRepository:
 
     def fetch_hour_distribution(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
         """读取用户小时分布聚合。"""
-        sql = """
+        sql = f"""
         SELECT
             username,
             toHour(timestamp) AS active_hour,
             count() AS cnt
-        FROM logs_structured
-        PREWHERE log_type = %(log_type)s
-            AND timestamp >= %(start_time)s
-            AND timestamp < %(end_time)s
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
         WHERE username != ''
         GROUP BY username, active_hour
         ORDER BY username ASC, active_hour ASC
@@ -158,15 +170,13 @@ class UebaRepository:
 
     def fetch_daily_event_counts(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
         """读取用户每日事件数聚合。"""
-        sql = """
+        sql = f"""
         SELECT
             username,
             toDate(timestamp) AS event_date,
             count() AS cnt
-        FROM logs_structured
-        PREWHERE log_type = %(log_type)s
-            AND timestamp >= %(start_time)s
-            AND timestamp < %(end_time)s
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
         WHERE username != ''
         GROUP BY username, event_date
         ORDER BY username ASC, event_date ASC
@@ -175,7 +185,7 @@ class UebaRepository:
 
     def fetch_session_metric_summary(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
         """读取用户会话时长与流量聚合摘要。"""
-        sql = """
+        sql = f"""
         SELECT
             username,
             avg(session_duration_sec) AS session_duration_avg,
@@ -186,10 +196,8 @@ class UebaRepository:
             avg(bytes_recv) AS bytes_recv_avg,
             max(bytes_sent) AS bytes_sent_max,
             max(bytes_recv) AS bytes_recv_max
-        FROM logs_structured
-        PREWHERE log_type = %(log_type)s
-            AND timestamp >= %(start_time)s
-            AND timestamp < %(end_time)s
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
         WHERE username != ''
         GROUP BY username
         """
@@ -210,10 +218,8 @@ class UebaRepository:
             username,
             {column_name} AS {output_name},
             count() AS cnt
-        FROM logs_structured
-        PREWHERE log_type = %(log_type)s
-            AND timestamp >= %(start_time)s
-            AND timestamp < %(end_time)s
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
         WHERE username != ''
             AND {column_name} != ''
         GROUP BY username, {output_name}
@@ -245,10 +251,8 @@ class UebaRepository:
                 username,
                 {column_name} AS {output_name},
                 count() AS cnt
-            FROM logs_structured
-            PREWHERE log_type = %(log_type)s
-                AND timestamp >= %(start_time)s
-                AND timestamp < %(end_time)s
+            FROM {self._qualified_source_table()}
+            PREWHERE {self._prewhere_clause()}
             WHERE username != ''
                 AND {column_name} != ''
             GROUP BY username, {output_name}
@@ -294,11 +298,31 @@ class UebaRepository:
 
     def _base_parameters(self, start_time: Any, end_time: Any, log_type: str) -> dict[str, Any]:
         """构造所有查询共用的参数。"""
-        return {
+        parameters = {
             "start_time": start_time,
             "end_time": end_time,
             "log_type": log_type,
         }
+        if self.source_table == "ueba_baseline_training_logs":
+            parameters["dataset_id"] = self.dataset_id
+        return parameters
+
+    def _qualified_source_table(self) -> str:
+        """返回受控 database 与 source_table 组成的 ClickHouse 表名。"""
+        return f"{self.database}.{self.source_table}"
+
+    def _prewhere_clause(self) -> str:
+        """返回所有聚合 SQL 共用的受控 PREWHERE 条件。"""
+        conditions = [
+            "log_type = %(log_type)s",
+            "timestamp >= %(start_time)s",
+            "timestamp < %(end_time)s",
+        ]
+        if self.source_table == "ueba_baseline_training_logs":
+            conditions.append("dataset_id = %(dataset_id)s")
+            if self.active_only:
+                conditions.append("is_active = 1")
+        return "\n            AND ".join(conditions)
 
     def _validate_limit(self, limit: int) -> int:
         """限制 Top-N 参数，避免无效数量进入 SQL 参数。"""
@@ -324,6 +348,18 @@ class UebaRepository:
         }
         if column_name not in allowed_columns:
             raise ValueError(f"unsupported aggregation column: {column_name}")
+
+    def _validate_source_table(self, source_table: str) -> str:
+        """限制 source_table，避免任意表名进入 SQL。"""
+        if source_table not in self.ALLOWED_SOURCE_TABLES:
+            raise ValueError(f"unsupported source_table: {source_table}")
+        return source_table
+
+    def _validate_identifier(self, identifier: str) -> str:
+        """限制 database 标识符，避免任意 SQL 片段进入表名。"""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier):
+            raise ValueError(f"invalid ClickHouse identifier: {identifier}")
+        return identifier
 
 
 __all__ = ["UebaRepository"]
