@@ -6,6 +6,7 @@ update source logs, or implement scoring.
 """
 
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from dataclasses import asdict, is_dataclass
 import json
 import re
@@ -19,6 +20,7 @@ class UebaValidationRepository:
 
     TABLE_NAME = "ueba_validation_results"
     SOURCE_TABLE = "logs_structured"
+    NO_BASELINE_MODEL_VERSION = "__NO_BASELINE__"
     COLUMNS = [
         "validation_id",
         "source_log_id",
@@ -81,7 +83,7 @@ class UebaValidationRepository:
             username String,
             log_type String,
             request_id Nullable(String),
-            baseline_model_version Nullable(String),
+            baseline_model_version String,
             baseline_created_at Nullable(DateTime),
             baseline_is_reliable UInt8,
             ueba_score UInt8,
@@ -151,18 +153,30 @@ class UebaValidationRepository:
         return {
             "validation_id": result.validation_id,
             "source_log_id": result.source_log_id,
-            "timestamp": result.timestamp,
+            "timestamp": self._to_clickhouse_datetime(
+                result.timestamp,
+                field_name="timestamp",
+            ),
             "username": result.username,
             "log_type": result.log_type,
             "request_id": result.request_id,
-            "baseline_model_version": result.baseline_model_version,
-            "baseline_created_at": result.baseline_created_at,
+            "baseline_model_version": (
+                result.baseline_model_version or self.NO_BASELINE_MODEL_VERSION
+            ),
+            "baseline_created_at": self._to_clickhouse_datetime(
+                result.baseline_created_at,
+                field_name="baseline_created_at",
+                nullable=True,
+            ),
             "baseline_is_reliable": 1 if result.baseline_is_reliable else 0,
             "ueba_score": self._clamp_score(result.ueba_score),
             "ueba_risk_level": result.ueba_risk_level,
             "ueba_anomaly_reasons": self._reasons_to_json(result.ueba_anomaly_reasons),
             "validation_status": result.validation_status,
-            "validated_at": result.validated_at,
+            "validated_at": self._to_clickhouse_datetime(
+                result.validated_at,
+                field_name="validated_at",
+            ),
             "error": result.error,
         }
 
@@ -296,6 +310,64 @@ class UebaValidationRepository:
         """Clamp UEBA score into the UInt8-friendly 0-100 range."""
         value = int(score)
         return max(0, min(100, value))
+
+    def _to_clickhouse_datetime(
+        self,
+        value: Any,
+        *,
+        field_name: str,
+        nullable: bool = False,
+    ) -> datetime | None:
+        """Encode unlabeled business time for ClickHouse DateTime inserts."""
+        parsed = self._parse_unlabeled_datetime(
+            value,
+            field_name=field_name,
+            nullable=nullable,
+        )
+        if parsed is None:
+            return None
+
+        # Project business times are unlabeled wall-clock values. The UTC tzinfo
+        # is transport encoding only, so clickhouse-connect does not apply the
+        # Python process local timezone when it calls datetime.timestamp().
+        return parsed.replace(tzinfo=timezone.utc)
+
+    def _parse_unlabeled_datetime(
+        self,
+        value: Any,
+        *,
+        field_name: str,
+        nullable: bool = False,
+    ) -> datetime | None:
+        """Parse a project business time without applying timezone conversion."""
+        if value is None:
+            if nullable:
+                return None
+            raise ValueError(f"{field_name} is required")
+
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                if nullable:
+                    return None
+                raise ValueError(f"{field_name} is required")
+            text = self._remove_timezone_marker(text).replace("T", " ")
+            try:
+                parsed = datetime.fromisoformat(text)
+            except ValueError as exc:
+                raise ValueError(f"{field_name} must be a valid datetime string") from exc
+            return parsed.replace(tzinfo=None)
+
+        raise TypeError(f"{field_name} must be datetime or str, got {type(value).__name__}")
+
+    def _remove_timezone_marker(self, value: str) -> str:
+        """Drop optional timezone markers while keeping the original wall clock."""
+        if value.endswith(("Z", "z")):
+            return value[:-1]
+        return re.sub(r"[+-]\d{2}:?\d{2}$", "", value)
 
     def _reasons_to_json(self, reasons: list[ScoreReason]) -> str:
         """Serialize score reasons using the project JSON convention."""

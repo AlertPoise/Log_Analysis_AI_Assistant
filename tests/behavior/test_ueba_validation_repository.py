@@ -1,8 +1,11 @@
 """Tests for UEBA validation result repository."""
 
+from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import re
+import time
 
 import pytest
 
@@ -61,28 +64,62 @@ def normalize_sql(sql: str) -> str:
     return " ".join(sql.split())
 
 
+def extract_create_table_columns(sql: str) -> dict[str, str]:
+    """Return column names and first type token from a CREATE TABLE statement."""
+    match = re.search(r"\(\s*(.*?)\s*\)\s*ENGINE", sql, flags=re.IGNORECASE | re.DOTALL)
+    assert match is not None
+    columns = {}
+    for line in match.group(1).splitlines():
+        stripped = line.strip().rstrip(",")
+        if not stripped:
+            continue
+        name, type_name, *_rest = stripped.split()
+        columns[name] = type_name
+    return columns
+
+
+def extract_order_by_fields(sql: str) -> list[str]:
+    """Return the ordered key columns from a simple ORDER BY tuple."""
+    match = re.search(r"ORDER BY\s*\(([^)]*)\)", sql, flags=re.IGNORECASE)
+    assert match is not None
+    return [field.strip() for field in match.group(1).split(",")]
+
+
+def assert_unlabeled_transport_datetime(value: object, expected_wall_clock: datetime) -> None:
+    """Assert DateTime insert values preserve unlabeled wall-clock semantics."""
+    assert isinstance(value, datetime)
+    assert not isinstance(value, str)
+    assert value.tzinfo is timezone.utc
+    assert value.replace(tzinfo=None) == expected_wall_clock
+
+
 def _result(
     validation_id: str = "validation-1",
     *,
     score: int = 35,
     reliable: bool = True,
     reasons: list[ScoreReason] | None = None,
+    timestamp: object = "2024-03-01 10:00:00",
+    baseline_model_version: str | None = "ueba_baseline_v1",
+    baseline_created_at: object = "2024-02-29 00:00:00",
+    validation_status: str = "VALIDATED",
+    validated_at: object = "2024-03-01 10:00:10",
 ) -> UebaValidationResult:
     """Build a representative validation result."""
     return UebaValidationResult(
         validation_id=validation_id,
         source_log_id=1001,
-        timestamp="2024-03-01 10:00:00",
+        timestamp=timestamp,
         username="alice",
         log_type="vpn",
-        baseline_model_version="ueba_baseline_v1",
-        baseline_created_at="2024-02-29 00:00:00",
+        baseline_model_version=baseline_model_version,
+        baseline_created_at=baseline_created_at,
         baseline_is_reliable=reliable,
         ueba_score=score,
         ueba_risk_level="MEDIUM",
         ueba_anomaly_reasons=reasons or [],
-        validation_status="VALIDATED",
-        validated_at="2024-03-01 10:00:10",
+        validation_status=validation_status,
+        validated_at=validated_at,
         request_id="req-1",
     )
 
@@ -192,15 +229,55 @@ def test_ensure_table_partitions_by_timestamp_month():
     assert "partition by toyyyymm(timestamp)" in normalize_sql(client.commands[0]).lower()
 
 
+def test_ensure_table_uses_non_nullable_baseline_model_version():
+    """baseline_model_version is part of ORDER BY and must not be Nullable."""
+    client = FakeClient()
+    UebaValidationRepository(client).ensure_table()
+
+    columns = extract_create_table_columns(client.commands[0])
+    assert columns["baseline_model_version"] == "String"
+
+
+def test_ensure_table_order_by_excludes_nullable_columns():
+    """ClickHouse MergeTree ORDER BY should not include Nullable columns."""
+    client = FakeClient()
+    UebaValidationRepository(client).ensure_table()
+
+    columns = extract_create_table_columns(client.commands[0])
+    nullable_columns = {
+        name for name, type_name in columns.items() if "nullable" in type_name.lower()
+    }
+    order_by_fields = set(extract_order_by_fields(client.commands[0]))
+
+    assert order_by_fields.isdisjoint(nullable_columns)
+
+
+def test_ensure_table_does_not_enable_nullable_sorting_key():
+    """The result table should not rely on a nullable sorting-key setting."""
+    client = FakeClient()
+    UebaValidationRepository(client).ensure_table()
+
+    forbidden_setting = "allow" + "_nullable" + "_key"
+    assert forbidden_setting not in normalize_sql(client.commands[0]).lower()
+
+
 def test_ensure_table_contains_order_by():
-    """The result table should define an ORDER BY key."""
+    """The result table should define the stable validation lookup key."""
     client = FakeClient()
     UebaValidationRepository(client).ensure_table()
 
     normalized = normalize_sql(client.commands[0]).lower()
-    assert "order by" in normalized
-    for field in ("baseline_model_version", "log_type", "timestamp", "username", "source_log_id"):
-        assert field in normalized
+    assert (
+        "order by (baseline_model_version, log_type, timestamp, username, source_log_id)"
+        in normalized
+    )
+    assert extract_order_by_fields(client.commands[0]) == [
+        "baseline_model_version",
+        "log_type",
+        "timestamp",
+        "username",
+        "source_log_id",
+    ]
 
 
 def test_ensure_table_has_no_ttl():
@@ -281,6 +358,134 @@ def test_validation_result_to_row_clamps_score_to_zero_to_one_hundred():
     assert repository.validation_result_to_row(_result(score=150))["ueba_score"] == 100
 
 
+def test_validation_result_to_row_converts_unlabeled_datetime_strings():
+    """ClickHouse DateTime columns should use unlabeled wall-clock semantics."""
+    row = UebaValidationRepository(FakeClient()).validation_result_to_row(_result())
+
+    assert_unlabeled_transport_datetime(row["timestamp"], datetime(2024, 3, 1, 10, 0, 0))
+    assert_unlabeled_transport_datetime(row["validated_at"], datetime(2024, 3, 1, 10, 0, 10))
+    assert_unlabeled_transport_datetime(
+        row["baseline_created_at"],
+        datetime(2024, 2, 29, 0, 0, 0),
+    )
+
+
+def test_to_clickhouse_datetime_returns_transport_datetime_not_string():
+    """Direct DateTime conversion should not return str for unlabeled input."""
+    value = UebaValidationRepository(FakeClient())._to_clickhouse_datetime(
+        "2026-06-01 00:00:00",
+        field_name="timestamp",
+    )
+
+    assert_unlabeled_transport_datetime(value, datetime(2026, 6, 1, 0, 0, 0))
+
+
+def test_unlabeled_transport_datetime_ignores_process_timezone(monkeypatch):
+    """A process TZ change must not shift the business wall-clock time."""
+    original_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    if hasattr(time, "tzset"):
+        time.tzset()
+
+    try:
+        row = UebaValidationRepository(FakeClient()).validation_result_to_row(
+            _result(timestamp="2026-06-01 00:00:00")
+        )
+        expected_epoch = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc).timestamp()
+
+        assert_unlabeled_transport_datetime(row["timestamp"], datetime(2026, 6, 1, 0, 0, 0))
+        assert row["timestamp"].timestamp() == expected_epoch
+    finally:
+        if original_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", original_tz)
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
+def test_validation_result_to_row_normalizes_iso_and_timezone_marked_strings():
+    """Timezone markers are stripped as compatibility input, not converted."""
+    row = UebaValidationRepository(FakeClient()).validation_result_to_row(
+        _result(
+            timestamp="2024-03-01T10:00:00",
+            baseline_created_at="2024-02-29T00:00:00Z",
+            validated_at="2024-03-01T10:00:10+08:00",
+        )
+    )
+
+    assert_unlabeled_transport_datetime(row["timestamp"], datetime(2024, 3, 1, 10, 0, 0))
+    assert_unlabeled_transport_datetime(
+        row["baseline_created_at"],
+        datetime(2024, 2, 29, 0, 0, 0),
+    )
+    assert_unlabeled_transport_datetime(row["validated_at"], datetime(2024, 3, 1, 10, 0, 10))
+
+
+def test_validation_result_to_row_handles_naive_and_aware_datetimes_as_wall_clock():
+    """datetime inputs should keep their wall-clock fields without timezone conversion."""
+    timestamp = datetime(2024, 3, 1, 10, 0, 0)
+    baseline_created_at = datetime(2024, 2, 29, 0, 0, 0)
+    validated_at = datetime(2024, 3, 1, 10, 0, 10, tzinfo=timezone(timedelta(hours=8)))
+
+    row = UebaValidationRepository(FakeClient()).validation_result_to_row(
+        _result(
+            timestamp=timestamp,
+            baseline_created_at=baseline_created_at,
+            validated_at=validated_at,
+        )
+    )
+
+    assert_unlabeled_transport_datetime(row["timestamp"], timestamp)
+    assert_unlabeled_transport_datetime(row["baseline_created_at"], baseline_created_at)
+    assert_unlabeled_transport_datetime(row["validated_at"], datetime(2024, 3, 1, 10, 0, 10))
+
+
+def test_validation_result_to_row_rejects_missing_required_datetimes():
+    """Non-nullable DateTime columns should fail fast when missing."""
+    repository = UebaValidationRepository(FakeClient())
+
+    with pytest.raises(ValueError, match="timestamp is required"):
+        repository.validation_result_to_row(_result(timestamp=None))
+
+    with pytest.raises(ValueError, match="validated_at is required"):
+        repository.validation_result_to_row(_result(validated_at=None))
+
+
+def test_validation_result_to_row_rejects_invalid_datetime_string():
+    """Invalid DateTime text should be rejected before ClickHouse insert."""
+    repository = UebaValidationRepository(FakeClient())
+
+    with pytest.raises(ValueError, match="timestamp must be a valid datetime string"):
+        repository.validation_result_to_row(_result(timestamp="not-a-datetime"))
+
+
+def test_validation_result_to_row_replaces_missing_baseline_version():
+    """Rows without a baseline version should use a stable non-null placeholder."""
+    row = UebaValidationRepository(FakeClient()).validation_result_to_row(
+        _result(
+            baseline_model_version=None,
+            baseline_created_at=None,
+            reliable=False,
+            validation_status="NO_BASELINE",
+        )
+    )
+
+    assert row["baseline_model_version"] == "__NO_BASELINE__"
+    assert row["baseline_created_at"] is None
+    assert row["validation_status"] == "NO_BASELINE"
+    assert row["baseline_is_reliable"] == 0
+
+
+def test_validation_result_to_row_preserves_existing_baseline_version():
+    """Existing baseline versions should be stored unchanged."""
+    row = UebaValidationRepository(FakeClient()).validation_result_to_row(
+        _result(baseline_model_version="ueba_custom_v2")
+    )
+
+    assert row["baseline_model_version"] == "ueba_custom_v2"
+
+
 def test_save_validation_results_empty_list_returns_zero():
     """Empty writes should not create tables or insert rows."""
     client = FakeClient()
@@ -308,6 +513,29 @@ def test_save_validation_results_batches_writes():
     assert client.inserts[0]["table"] == "ueba_validation_results"
     assert client.inserts[0]["database"] == "log_analysis"
     assert client.inserts[0]["column_names"] == UebaValidationRepository.COLUMNS
+
+
+def test_save_validation_results_inserts_datetime_objects():
+    """client.insert should receive transport datetimes for DateTime columns."""
+    client = FakeClient()
+    repository = UebaValidationRepository(client)
+
+    written = repository.save_validation_results([_result()])
+
+    assert written == 1
+    insert_row = dict(zip(client.inserts[0]["column_names"], client.inserts[0]["rows"][0]))
+    assert_unlabeled_transport_datetime(
+        insert_row["timestamp"],
+        datetime(2024, 3, 1, 10, 0, 0),
+    )
+    assert_unlabeled_transport_datetime(
+        insert_row["validated_at"],
+        datetime(2024, 3, 1, 10, 0, 10),
+    )
+    assert_unlabeled_transport_datetime(
+        insert_row["baseline_created_at"],
+        datetime(2024, 2, 29, 0, 0, 0),
+    )
 
 
 def test_write_batch_size_must_be_positive():
