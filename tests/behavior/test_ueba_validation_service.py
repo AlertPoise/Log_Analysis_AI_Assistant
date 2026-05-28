@@ -1,6 +1,7 @@
 """UEBA validation service dry-run tests."""
 
 from datetime import datetime
+from pathlib import Path
 
 from src.behavior.schemas import CountRatioItem, UserBaseline
 from src.behavior.score_calculator import UebaScoreCalculator
@@ -16,12 +17,16 @@ VALIDATED_AT = "2024-03-02T00:00:05+00:00"
 
 
 class FakeValidationRepository:
-    """Fake target-log repository that records dry-run reads."""
+    """Fake target-log repository that records validation reads and result saves."""
 
-    def __init__(self, target_logs=None):
+    def __init__(self, target_logs=None, written_count=None, save_exc=None, fetch_exc=None):
         self.target_logs = list(target_logs or [])
         self.fetch_calls = []
         self.save_called = False
+        self.saved_results = []
+        self.written_count = written_count
+        self.save_exc = save_exc
+        self.fetch_exc = fetch_exc
         self.source_write_called = False
 
     def fetch_target_logs(self, start_time, end_time, log_type="vpn", limit=1000):
@@ -33,11 +38,18 @@ class FakeValidationRepository:
                 "limit": limit,
             }
         )
+        if self.fetch_exc is not None:
+            raise self.fetch_exc
         return list(self.target_logs)
 
     def save_validation_results(self, results):
         self.save_called = True
-        raise AssertionError("dry-run must not save validation results")
+        self.saved_results = list(results)
+        if self.save_exc is not None:
+            raise self.save_exc
+        if self.written_count is not None:
+            return self.written_count
+        return len(self.saved_results)
 
     def write_source_logs(self, results):
         self.source_write_called = True
@@ -55,7 +67,10 @@ class FakeBaselineStore:
 
     def get_user_baseline(self, username, model_version=None):
         self.calls.append({"username": username, "model_version": model_version})
-        return self.baselines.get(username)
+        baseline = self.baselines.get(username)
+        if isinstance(baseline, Exception):
+            raise baseline
+        return baseline
 
     def ensure_table(self):
         self.ensure_called = True
@@ -359,3 +374,300 @@ def test_dry_run_preserves_fetch_parameters_and_window_semantics():
     assert summary["end_time"] == "2024-04-02 00:00:00"
     assert summary["log_type"] == "vpn-login"
     assert summary["limit"] == 7
+
+
+def test_run_dry_run_true_does_not_save_results():
+    """run(dry_run=True) should keep the safe no-save behavior."""
+    repository = FakeValidationRepository([_target()])
+    baseline_store = FakeBaselineStore({"alice": _baseline()})
+
+    summary = _service(repository, baseline_store).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=True,
+        validated_at=VALIDATED_AT,
+    )
+
+    assert summary["success"] is True
+    assert summary["dry_run"] is True
+    assert summary["written_count"] == 0
+    assert repository.save_called is False
+
+
+def test_run_write_mode_saves_results_and_reports_written_count():
+    """run(dry_run=False) should persist scored validation results through repository."""
+    repository = FakeValidationRepository([_target()], written_count=1)
+    baseline_store = FakeBaselineStore({"alice": _baseline()})
+    calculator = SpyScoreCalculator()
+
+    summary = _service(repository, baseline_store, calculator).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=False,
+        validated_at=VALIDATED_AT,
+    )
+
+    assert summary["success"] is True
+    assert summary["dry_run"] is False
+    assert summary["processed_count"] == 1
+    assert summary["scored_count"] == 1
+    assert summary["written_count"] == 1
+    assert repository.fetch_calls == [
+        {
+            "start_time": START_TIME,
+            "end_time": END_TIME,
+            "log_type": LOG_TYPE,
+            "limit": 50,
+        }
+    ]
+    assert baseline_store.calls == [{"username": "alice", "model_version": MODEL_VERSION}]
+    assert len(calculator.calls) == 1
+    assert repository.save_called is True
+    assert len(repository.saved_results) == 1
+    assert repository.saved_results[0].username == "alice"
+
+
+def test_run_write_mode_empty_targets_does_not_save_results():
+    """Empty target windows should not call the result repository save method."""
+    repository = FakeValidationRepository([])
+    baseline_store = FakeBaselineStore({"alice": _baseline()})
+
+    summary = _service(repository, baseline_store).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=False,
+    )
+
+    assert summary["success"] is True
+    assert summary["processed_count"] == 0
+    assert summary["scored_count"] == 0
+    assert summary["written_count"] == 0
+    assert repository.save_called is False
+
+
+def test_run_fetch_exception_returns_failure_without_saving():
+    """Target-log fetch failures should be reported without writing results."""
+    repository = FakeValidationRepository(fetch_exc=RuntimeError("fetch failed"))
+    baseline_store = FakeBaselineStore({"alice": _baseline()})
+
+    summary = _service(repository, baseline_store).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=False,
+    )
+
+    assert summary["success"] is False
+    assert summary["processed_count"] == 0
+    assert summary["scored_count"] == 0
+    assert summary["written_count"] == 0
+    assert summary["error"] is not None
+    assert "RuntimeError" in summary["error"]
+    assert baseline_store.calls == []
+    assert repository.save_called is False
+
+
+def test_run_write_mode_save_exception_returns_failure():
+    """Result save failures should be reported without claiming rows were written."""
+    repository = FakeValidationRepository([_target()], save_exc=RuntimeError("save failed"))
+    baseline_store = FakeBaselineStore({"alice": _baseline()})
+
+    summary = _service(repository, baseline_store).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=False,
+        validated_at=VALIDATED_AT,
+    )
+
+    assert summary["success"] is False
+    assert summary["written_count"] == 0
+    assert summary["scored_count"] == 1
+    assert summary["error"] is not None
+    assert "RuntimeError" in summary["error"]
+
+
+def test_run_counts_no_baseline_and_unreliable_baseline():
+    """Missing and unreliable baselines should be visible in summary counters."""
+    repository = FakeValidationRepository(
+        [
+            _target(id=1001, username="alice"),
+            _target(id=1002, username="bob"),
+            _target(id=1003, username="carol"),
+        ]
+    )
+    baseline_store = FakeBaselineStore(
+        {
+            "alice": _baseline(),
+            "carol": _baseline(username="carol", reliable=False),
+        }
+    )
+
+    summary = _service(repository, baseline_store).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=False,
+        validated_at=VALIDATED_AT,
+    )
+
+    assert summary["processed_count"] == 3
+    assert summary["scored_count"] == 3
+    assert summary["no_baseline_count"] == 1
+    assert summary["unreliable_baseline_count"] == 1
+    assert summary["skipped_count"] == 1
+    assert summary["validation_status_counts"] == {
+        "VALIDATED": 1,
+        "NO_BASELINE": 1,
+        "UNRELIABLE_BASELINE": 1,
+    }
+
+
+def test_run_counts_risk_levels_and_statuses():
+    """Summary should include risk-level and validation-status distributions."""
+    repository = FakeValidationRepository(
+        [
+            _target(id=1001, username="alice"),
+            _target(
+                id=1002,
+                username="mallory",
+                source_ip="198.51.100.10",
+                destination_ip="10.9.9.9",
+                src_country="DE",
+                src_city="Berlin",
+                vpn_gateway="gw-9",
+                auth_method="mfa-push",
+                client_software="UnknownVPN",
+                protocol="udp",
+                result="FAIL",
+                event_type="LOGIN_FAIL",
+                is_off_hours=True,
+                is_unusual_ip=True,
+            ),
+        ]
+    )
+    baseline_store = FakeBaselineStore(
+        {
+            "alice": _baseline(),
+            "mallory": _baseline(username="mallory"),
+        }
+    )
+
+    summary = _service(repository, baseline_store).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=True,
+        validated_at=VALIDATED_AT,
+    )
+
+    assert summary["risk_level_counts"] == {"LOW": 1, "CRITICAL": 1}
+    assert summary["validation_status_counts"] == {"VALIDATED": 2}
+
+
+def test_run_sample_results_respect_sample_size_and_omit_raw_log():
+    """run sample output should be bounded and omit raw source text."""
+    repository = FakeValidationRepository(
+        [
+            _target(id=1001, username="alice", raw_log="raw-a"),
+            _target(id=1002, username="bob", raw_log="raw-b"),
+        ]
+    )
+    baseline_store = FakeBaselineStore({"alice": _baseline(), "bob": _baseline(username="bob")})
+
+    summary = _service(repository, baseline_store).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=False,
+        sample_size=1,
+        validated_at=VALIDATED_AT,
+    )
+
+    assert len(summary["sample_results"]) == 1
+    sample = summary["sample_results"][0]
+    assert "raw_log" not in sample
+    assert set(sample) == {
+        "log_id",
+        "username",
+        "score",
+        "risk_level",
+        "validation_status",
+        "reason_codes",
+    }
+    assert sample["log_id"] == 1001
+    assert sample["username"] == "alice"
+    assert "score" in sample
+    assert "risk_level" in sample
+
+
+def test_run_counts_single_baseline_lookup_failure():
+    """A baseline lookup failure should not fail the whole batch."""
+    repository = FakeValidationRepository(
+        [_target(id=1001, username="alice"), _target(id=1002, username="bob")]
+    )
+    baseline_store = FakeBaselineStore(
+        {"alice": RuntimeError("baseline read failed"), "bob": _baseline(username="bob")}
+    )
+
+    summary = _service(repository, baseline_store).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=False,
+        validated_at=VALIDATED_AT,
+    )
+
+    assert summary["success"] is True
+    assert summary["processed_count"] == 2
+    assert summary["scored_count"] == 1
+    assert summary["failed_count"] == 1
+    assert summary["skipped_count"] == 1
+    assert summary["error"] is not None
+    assert "baseline read failed" in summary["error"]
+
+
+def test_validation_service_source_has_no_forbidden_stage_markers():
+    """Runtime validation service source should not contain stage-only markers."""
+    source = Path("src/behavior/validation_service.py").read_text(encoding="utf-8")
+    forbidden = [
+        "." + "tox",
+        "fixture" + "_user",
+        "2026" + "-05",
+        "2026" + "-06",
+        "accept" + "ance",
+        "manual" + "_training" + "_update",
+        "monthly" + "_training" + "_update",
+    ]
+
+    for marker in forbidden:
+        assert marker not in source
+
+
+def test_validation_service_source_has_no_direct_statement_keywords():
+    """Service source should not contain direct database statement keywords."""
+    source = Path("src/behavior/validation_service.py").read_text(encoding="utf-8")
+
+    for marker in ("INSERT", "UPDATE", "ALTER", "DELETE", "TRUNCATE"):
+        assert marker not in source

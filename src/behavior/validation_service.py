@@ -1,7 +1,7 @@
-"""UEBA 准线验证 dry-run 编排服务。
+"""UEBA 准线验证编排服务。
 
-本模块只串联目标日志读取、baseline 读取和纯 Python 评分，返回受控摘要。
-它不写结果表，不更新源日志，也不创建数据库连接。
+本模块串联目标日志读取、baseline 读取、纯 Python 评分和可选结果保存，
+返回受控摘要。它不更新源日志，也不创建数据库连接。
 """
 
 from typing import Any
@@ -14,9 +14,10 @@ from .validation_schemas import UebaValidationResult
 
 
 class UebaValidationService:
-    """UEBA 准线验证 dry-run 统一编排入口。"""
+    """UEBA 准线验证统一编排入口。"""
 
     DEFAULT_SAMPLE_RESULT_LIMIT = 10
+    DEFAULT_SAMPLE_SIZE = 5
 
     def __init__(
         self,
@@ -24,10 +25,10 @@ class UebaValidationService:
         baseline_store: BaselineStore,
         score_calculator: UebaScoreCalculator | None = None,
     ) -> None:
-        """初始化 validation dry-run service。
+        """初始化 validation service。
 
         Args:
-            validation_repository: 待读取目标日志的 repository。
+            validation_repository: 目标日志读取和结果保存 repository。
             baseline_store: 只读 baseline 查询组件。
             score_calculator: 纯 Python 评分器。
         """
@@ -45,21 +46,72 @@ class UebaValidationService:
         sample_result_limit: int = DEFAULT_SAMPLE_RESULT_LIMIT,
         validated_at: str | None = None,
     ) -> dict[str, Any]:
-        """执行一次不落库的 UEBA 准线验证 dry-run。"""
-        sample_limit = self._validate_sample_result_limit(sample_result_limit)
-        target_logs = self.validation_repository.fetch_target_logs(
+        """执行一次不保存结果的 UEBA 准线验证。"""
+        return self.run(
             start_time=start_time,
             end_time=end_time,
             log_type=log_type,
+            model_version=baseline_version,
             limit=limit,
+            dry_run=True,
+            sample_size=sample_result_limit,
+            validated_at=validated_at,
         )
+
+    def run(
+        self,
+        start_time: str,
+        end_time: str,
+        log_type: str = "vpn",
+        model_version: str | None = None,
+        limit: int = 1000,
+        dry_run: bool = True,
+        sample_size: int = DEFAULT_SAMPLE_SIZE,
+        validated_at: str | None = None,
+    ) -> dict[str, Any]:
+        """执行一次 UEBA 准线验证，可选择保存评分结果。"""
+        sample_limit = self._validate_sample_size(sample_size)
+        try:
+            target_logs = self.validation_repository.fetch_target_logs(
+                start_time=start_time,
+                end_time=end_time,
+                log_type=log_type,
+                limit=limit,
+            )
+        except Exception as exc:
+            return self._summary(
+                success=False,
+                start_time=start_time,
+                end_time=end_time,
+                log_type=log_type,
+                limit=limit,
+                model_version=model_version,
+                dry_run=dry_run,
+                processed_count=0,
+                results=[],
+                written_count=0,
+                no_baseline_count=0,
+                unreliable_baseline_count=0,
+                failed_count=0,
+                sample_limit=sample_limit,
+                message="validation target fetch failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
         results: list[UebaValidationResult] = []
         no_baseline_count = 0
         unreliable_baseline_count = 0
+        failed_count = 0
+        row_errors: list[str] = []
 
         for target_log in target_logs:
-            baseline = self._load_user_baseline(target_log.username, baseline_version)
+            try:
+                baseline = self._load_user_baseline(target_log.username, model_version)
+            except Exception as exc:
+                failed_count += 1
+                row_errors.append(f"{target_log.username}:{type(exc).__name__}: {exc}")
+                continue
+
             if baseline is None:
                 no_baseline_count += 1
             elif not baseline.is_reliable:
@@ -68,45 +120,126 @@ class UebaValidationService:
             result = self.score_calculator.calculate(
                 target_log,
                 baseline,
-                model_version=baseline_version or (baseline.model_version if baseline else None),
+                model_version=model_version or (baseline.model_version if baseline else None),
                 validated_at=validated_at,
             )
             results.append(result)
 
+        if dry_run or not results:
+            return self._summary(
+                success=True,
+                start_time=start_time,
+                end_time=end_time,
+                log_type=log_type,
+                limit=limit,
+                model_version=model_version,
+                dry_run=dry_run,
+                processed_count=len(target_logs),
+                results=results,
+                written_count=0,
+                no_baseline_count=no_baseline_count,
+                unreliable_baseline_count=unreliable_baseline_count,
+                failed_count=failed_count,
+                sample_limit=sample_limit,
+                message=self._message(len(target_logs), len(results), dry_run),
+                error=self._row_error_text(row_errors),
+            )
+
+        try:
+            written_count = self.validation_repository.save_validation_results(results)
+        except Exception as exc:
+            return self._summary(
+                success=False,
+                start_time=start_time,
+                end_time=end_time,
+                log_type=log_type,
+                limit=limit,
+                model_version=model_version,
+                dry_run=False,
+                processed_count=len(target_logs),
+                results=results,
+                written_count=0,
+                no_baseline_count=no_baseline_count,
+                unreliable_baseline_count=unreliable_baseline_count,
+                failed_count=failed_count,
+                sample_limit=sample_limit,
+                message="validation result save failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+        return self._summary(
+            success=True,
+            start_time=start_time,
+            end_time=end_time,
+            log_type=log_type,
+            limit=limit,
+            model_version=model_version,
+            dry_run=False,
+            processed_count=len(target_logs),
+            results=results,
+            written_count=written_count,
+            no_baseline_count=no_baseline_count,
+            unreliable_baseline_count=unreliable_baseline_count,
+            failed_count=failed_count,
+            sample_limit=sample_limit,
+            message=f"validation saved {written_count} of {len(results)} scored results",
+            error=self._row_error_text(row_errors),
+        )
+
+    def _summary(
+        self,
+        *,
+        success: bool,
+        start_time: str,
+        end_time: str,
+        log_type: str,
+        limit: int,
+        model_version: str | None,
+        dry_run: bool,
+        processed_count: int,
+        results: list[UebaValidationResult],
+        written_count: int,
+        no_baseline_count: int,
+        unreliable_baseline_count: int,
+        failed_count: int,
+        sample_limit: int,
+        message: str,
+        error: str | None,
+    ) -> dict[str, Any]:
+        """生成统一运行摘要。"""
         return {
-            "success": True,
-            "dry_run": True,
+            "success": success,
+            "dry_run": dry_run,
             "start_time": start_time,
             "end_time": end_time,
             "log_type": log_type,
             "limit": limit,
-            "baseline_version": baseline_version,
-            "processed_count": len(target_logs),
-            "selected_count": len(target_logs),
+            "model_version": model_version,
+            "baseline_version": model_version,
+            "processed_count": processed_count,
+            "selected_count": processed_count,
             "scored_count": len(results),
-            "written_count": 0,
-            "skipped_count": no_baseline_count,
+            "written_count": written_count,
+            "skipped_count": no_baseline_count + failed_count,
             "no_baseline_count": no_baseline_count,
             "unreliable_baseline_count": unreliable_baseline_count,
-            "failed_count": 0,
+            "failed_count": failed_count,
             "risk_level_counts": self._count_by(results, "ueba_risk_level"),
             "validation_status_counts": self._count_by(results, "validation_status"),
-            "sample_results": [
-                self._sample_result(result)
-                for result in results[:sample_limit]
-            ],
-            "message": self._message(len(target_logs), len(results)),
+            "sample_results": [self._sample_result(result) for result in results[:sample_limit]],
+            "message": message,
+            "error": error,
         }
 
     def _load_user_baseline(
         self,
         username: str,
-        baseline_version: str | None,
+        model_version: str | None,
     ) -> UserBaseline | None:
         """读取并转换某个用户的最新 baseline。"""
         baseline_row = self.baseline_store.get_user_baseline(
             username,
-            model_version=baseline_version,
+            model_version=model_version,
         )
         return self._coerce_user_baseline(baseline_row)
 
@@ -224,32 +357,34 @@ class UebaValidationService:
         return counts
 
     def _sample_result(self, result: UebaValidationResult) -> dict[str, Any]:
-        """返回受控的样例结果，避免 dry-run 摘要过大。"""
+        """返回受控的样例结果，避免摘要过大。"""
         return {
-            "validation_id": result.validation_id,
-            "source_log_id": result.source_log_id,
-            "timestamp": result.timestamp,
+            "log_id": result.source_log_id,
             "username": result.username,
-            "log_type": result.log_type,
-            "request_id": result.request_id,
-            "baseline_model_version": result.baseline_model_version,
-            "ueba_score": result.ueba_score,
-            "ueba_risk_level": result.ueba_risk_level,
+            "score": result.ueba_score,
+            "risk_level": result.ueba_risk_level,
             "validation_status": result.validation_status,
             "reason_codes": [reason.code for reason in result.ueba_anomaly_reasons],
         }
 
-    def _validate_sample_result_limit(self, limit: int) -> int:
-        """限制 dry-run 样例结果数量。"""
-        if not isinstance(limit, int) or limit < 0:
-            raise ValueError("sample_result_limit must be a non-negative integer")
-        return limit
+    def _validate_sample_size(self, sample_size: int) -> int:
+        """限制样例结果数量。"""
+        if not isinstance(sample_size, int) or sample_size < 0:
+            raise ValueError("sample_size must be a non-negative integer")
+        return sample_size
 
-    def _message(self, selected_count: int, scored_count: int) -> str:
-        """生成简短 dry-run 说明。"""
+    def _message(self, selected_count: int, scored_count: int, dry_run: bool) -> str:
+        """生成简短运行说明。"""
+        mode = "dry-run" if dry_run else "validation"
         if selected_count == 0:
-            return "dry-run selected 0 target logs"
-        return f"dry-run scored {scored_count} of {selected_count} target logs"
+            return f"{mode} selected 0 target logs"
+        return f"{mode} scored {scored_count} of {selected_count} target logs"
+
+    def _row_error_text(self, row_errors: list[str]) -> str | None:
+        """返回受控的单行错误摘要。"""
+        if not row_errors:
+            return None
+        return "; ".join(row_errors[:5])
 
 
 __all__ = ["UebaValidationService"]
