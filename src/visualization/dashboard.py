@@ -70,10 +70,18 @@ except ImportError as e:
     logger.warning(f"⚠️ 无法导入 AI 模块: {e}")
 
 from fpdf import FPDF
-from src.behavior.api import (
-    analyze_behavior_for_frontend,
-    analyze_behavior_from_clickhouse,
-)
+
+# Behavior API — 旧接口已清理，新只读 dashboard 接口将在 19-N 阶段实现
+# 当前 UEBA 异常排行页面显示接入中占位状态
+try:
+    from src.behavior.api import (  # noqa: F401
+        get_validation_summary,
+        get_validation_ranking,
+        get_user_validation_detail,
+    )
+    BEHAVIOR_API_AVAILABLE = True
+except ImportError:
+    BEHAVIOR_API_AVAILABLE = False
 
 # ClickHouse 客户端辅助函数
 def get_clickhouse_client():
@@ -403,193 +411,6 @@ def get_sample_search_results():
         {"时间": (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"), "用户": "lisi", "类型": "VPN 登录", 
          "IP": "192.168.1.101", "状态": "✅ 成功", "地点": "上海", "风险等级": "🟡 低危"},
     ]
-
-
-# ==================== Behavior 演示数据层 ====================
-
-def build_demo_behavior_payload() -> Dict[str, Any]:
-    """基于 VPN 样例结构构造可供 behavior 模块分析的演示 payload。"""
-    return {
-        "target_user": "sun.lei",
-        "history_logs": [
-            {
-                "timestamp": "2026-04-01 10:39:47",
-                "username": "sun.lei",
-                "source_ip": "101.89.15.237",
-                "location": "上海",
-                "action": "LOGIN",
-                "event_type": "LOGIN_SUCCESS",
-                "status": "SUCCESS",
-            },
-            {
-                "timestamp": "2026-04-01 12:00:24",
-                "username": "sun.lei",
-                "source_ip": "117.136.0.238",
-                "location": "上海",
-                "action": "LOGIN",
-                "event_type": "LOGIN_SUCCESS",
-                "status": "SUCCESS",
-            },
-            {
-                "timestamp": "2026-04-01 12:05:35",
-                "username": "sun.lei",
-                "source_ip": "117.136.0.213",
-                "location": "上海",
-                "action": "LOGIN",
-                "event_type": "LOGIN_SUCCESS",
-                "status": "SUCCESS",
-            },
-            {
-                "timestamp": "2026-04-02 08:51:38",
-                "username": "sun.lei",
-                "source_ip": "101.89.15.125",
-                "location": "上海",
-                "action": "LOGIN",
-                "event_type": "LOGIN_SUCCESS",
-                "status": "SUCCESS",
-            },
-            {
-                "timestamp": "2026-04-02 10:25:45",
-                "username": "sun.lei",
-                "source_ip": "101.89.15.20",
-                "location": "上海",
-                "action": "LOGIN",
-                "event_type": "LOGIN_SUCCESS",
-                "status": "SUCCESS",
-            },
-        ],
-        "detection_logs": [
-            {
-                "timestamp": "2026-04-02 21:53:34",
-                "username": "sun.lei",
-                "source_ip": "185.220.101.30",
-                "location": "阿姆斯特丹",
-                "action": "LOGIN",
-                "event_type": "LOGIN_FAIL",
-                "status": "FAIL",
-            }
-        ],
-    }
-
-
-def get_behavior_demo_result() -> Dict[str, Any]:
-    """调用 behavior 前端接口生成演示分析结果，失败时返回稳定结构。"""
-    try:
-        result = analyze_behavior_for_frontend(build_demo_behavior_payload())
-        return {**result, "source": "behavior_demo"}
-    except Exception as exc:
-        logger.exception("获取 behavior 演示分析失败")
-        return {
-            "success": False,
-            "source": "behavior_demo",
-            "target_user": None,
-            "baseline": {},
-            "profile": {},
-            "anomalies": [],
-            "summary": {},
-            "error": {
-                "code": "DASHBOARD_BEHAVIOR_DEMO_ERROR",
-                "message": str(exc),
-            },
-        }
-
-
-def convert_behavior_result_for_dashboard(result: Dict[str, Any]) -> Dict[str, Any]:
-    """将 behavior 返回结果整理为 dashboard 便于展示的结构。"""
-    anomalies = result.get("anomalies") if isinstance(result.get("anomalies"), list) else []
-    error = result.get("error") if isinstance(result.get("error"), dict) else None
-    return {
-        "source": result.get("source", "behavior_demo"),
-        "target_user": result.get("target_user"),
-        "baseline": result.get("baseline") if isinstance(result.get("baseline"), dict) else {},
-        "profile": result.get("profile") if isinstance(result.get("profile"), dict) else {},
-        "anomalies": anomalies,
-        "summary": result.get("summary") if isinstance(result.get("summary"), dict) else {},
-        "anomaly_count": len(anomalies),
-        "is_success": bool(result.get("success")),
-        "error": error,
-    }
-
-
-def get_behavior_analysis_for_dashboard(target_user: str = "zhangsan") -> Dict[str, Any]:
-    """优先读取 ClickHouse behavior，失败时回退到演示分析结果。"""
-    try:
-        clickhouse_result = analyze_behavior_from_clickhouse(target_user)
-    except Exception as exc:
-        logger.exception("获取 ClickHouse behavior 分析失败")
-        clickhouse_result = {
-            "success": False,
-            "source": "clickhouse",
-            "error": str(exc),
-        }
-
-    if clickhouse_result.get("success"):
-        dashboard_data = convert_behavior_result_for_dashboard(clickhouse_result)
-        dashboard_data["source"] = "clickhouse"
-        dashboard_data["fallback_reason"] = None
-        dashboard_data["clickhouse_error"] = None
-        return dashboard_data
-
-    demo_result = get_behavior_demo_result()
-    dashboard_data = convert_behavior_result_for_dashboard(demo_result)
-    dashboard_data["source"] = dashboard_data.get("source") or "behavior_demo"
-    dashboard_data["fallback_reason"] = clickhouse_result.get("error")
-    dashboard_data["clickhouse_error"] = clickhouse_result.get("error")
-    return dashboard_data
-
-
-def show_behavior_analysis_demo(
-    target_user: str = "zhangsan",
-    dashboard_data: Dict[str, Any] | None = None,
-) -> None:
-    """展示真实数据优先、演示数据兜底的用户行为分析结果。"""
-    st.divider()
-    st.subheader("🧭 用户行为分析")
-
-    if dashboard_data is None:
-        dashboard_data = get_behavior_analysis_for_dashboard(target_user)
-    if not dashboard_data["is_success"]:
-        error = dashboard_data.get("error") or {}
-        st.warning(f"Behavior 分析暂不可用：{error.get('message', '未知错误')}")
-        st.caption("数据来源：behavior_demo（调用失败，保留原页面 fallback）")
-        return
-
-    baseline = dashboard_data["baseline"]
-    summary = dashboard_data["summary"]
-
-    st.caption(f"数据来源：{dashboard_data['source']}")
-    if dashboard_data.get("fallback_reason"):
-        st.info(
-            "ClickHouse 数据不可用，已回退到 demo 数据。"
-            f" 原因：{dashboard_data['fallback_reason']}"
-        )
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("目标用户", dashboard_data.get("target_user") or "-")
-    with col2:
-        st.metric("基线样本数", str(baseline.get("sample_count", 0)))
-    with col3:
-        st.metric("基线可靠", "是" if baseline.get("is_reliable") else "否")
-    with col4:
-        st.metric("异常数量", str(dashboard_data["anomaly_count"]))
-
-    detail_col1, detail_col2, detail_col3 = st.columns(3)
-    with detail_col1:
-        st.markdown(f"**常用时间段**: {baseline.get('common_hours', [])}")
-    with detail_col2:
-        st.markdown(f"**常用 IP**: {baseline.get('common_ips', [])}")
-    with detail_col3:
-        st.markdown(f"**常用地点**: {baseline.get('common_locations', [])}")
-
-    st.markdown("**摘要**")
-    st.json(summary)
-
-    st.markdown("**异常列表**")
-    anomalies = dashboard_data["anomalies"]
-    if anomalies:
-        st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
-    else:
-        st.info("当前演示数据未检测到异常")
 
 
 # ==================== 真实接口层 ====================
@@ -1021,106 +842,16 @@ def get_anomaly_users(time_range="最近 24 小时", limit=10):
 
 
 def get_ueba_ranking_from_clickhouse(time_range: str = "最近 24 小时", limit: int = 10) -> Dict[str, Any]:
-    """从 logs_structured 表聚合用户风险排行"""
-    import clickhouse_connect
-    time_map = {
-        "最近 24 小时": 24,
-        "最近 7 天": 24 * 7,
-        "最近 30 天": 24 * 30,
-    }
-    hours = time_map.get(time_range, 24)
-    try:
-        client = clickhouse_connect.get_client(
-            host=settings.clickhouse_host,
-            port=settings.clickhouse_port,
-            username=settings.clickhouse_user,
-            password=settings.clickhouse_password,
-            database=settings.clickhouse_database,
-            connect_timeout=10
-        )
-    except Exception as e:
-        logger.error(f"ClickHouse 连接失败: {e}")
-        return {"success": False, "ranking": []}
+    """UEBA validation 排行查询 — 19-M0 已移除旧 risk_score 查询。
 
-    query = f"""
-    SELECT
-        username,
-        max(ifNull(risk_score, 0)) / 100.0 AS score,
-        count(*) AS event_count,
-        max(toTimezone(timestamp, 'Asia/Shanghai')) AS last_event_time
-    FROM {settings.clickhouse_table}
-    WHERE timestamp >= now() - INTERVAL {hours} HOUR
-      AND username != ''
-    GROUP BY username
-    ORDER BY score DESC, event_count DESC, last_event_time DESC
-    LIMIT {limit}
+    旧实现基于 logs_structured.risk_score（parser 输入侧标签），存在 SQL 注入风险。
+    新实现将在 19-N 阶段接入 ueba_validation_results 的只读查询。
     """
-    try:
-        result = client.query(query)
-        ranking = []
-        for idx, row in enumerate(result.result_rows, start=1):
-            username = row[0]
-            score = float(row[1]) if row[1] is not None else 0.0
-            event_count = int(row[2]) if row[2] is not None else 0
-            last_time = row[3]
-            last_time_str = last_time.strftime("%Y-%m-%d %H:%M") if last_time else ""
-            ranking.append({
-                "rank": idx,
-                "username": username,
-                "score": score,
-                "risk_level": _format_ueba_risk_level(score),
-                "event_count": event_count,
-                "last_event_time": last_time_str,
-            })
-        client.close()
-        return {"success": True, "ranking": ranking}
-    except Exception as e:
-        logger.error(f"查询排行失败: {e}", exc_info=True)
-        client.close()
-        return {"success": False, "ranking": []}
-
-
-def _format_ueba_risk_level(score: float) -> str:
-    """将 0~1 风险分映射为页面展示等级。"""
-    if score >= 0.8:
-        return "🔴 高危"
-    if score >= 0.5:
-        return "🟠 中危"
-    return "🟡 低危"
-
-
-def _demo_ranking_to_rows(sample_data: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
-    """把原有 demo 字典转成统一排行行结构。"""
-    return [
-        {
-            "rank": sample_data["排名"][index],
-            "username": sample_data["用户名"][index],
-            "score": sample_data["异常评分"][index],
-            "risk_level": sample_data["风险等级"][index],
-            "event_count": sample_data["异常事件数"][index],
-            "last_event_time": sample_data["最近异常时间"][index],
-        }
-        for index in range(len(sample_data["用户名"]))
-    ]
-
-
-def _ranking_rows_to_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
-    """把统一排行结构转成原页面使用的中文列。"""
-    return pd.DataFrame(
-        [
-            {
-                "排名": row["rank"],
-                "用户名": row["username"],
-                "异常评分": row["score"],
-                "风险等级": row["risk_level"],
-                "异常事件数": row["event_count"],
-                "最近异常时间": row["last_event_time"],
-            }
-            for row in rows
-        ]
+    logger.info(
+        "UEBA ranking query called (time_range=%s, limit=%s) — 接入中，返回空结果",
+        time_range, limit,
     )
-
-
+    return {"success": False, "ranking": []}
 
 
 def get_security_metrics():
@@ -1302,114 +1033,32 @@ def show_realtime_logs():
 
 
 def show_ueba_ranking():
-    """显示 UEBA 异常用户排行（仅从 ClickHouse 读取）"""
+    """显示 UEBA 异常用户排行 — 19-M0 已移除旧接口，新接入将在 19-N 阶段实现。
+
+    旧实现依赖：
+      - logs_structured.risk_score（parser 输入侧标签，非 UEBA 评分）
+      - analyze_behavior_from_clickhouse（src.behavior.api 旧接口，已不存在）
+
+    新接入将基于：
+      - ueba_validation_results 只读查询（UebaValidationRepository）
+      - 通过 src.behavior.api 新接口获取数据
+      - 不触发 validation，不写库，不重跑 baseline
+    """
     st.header("👥 UEBA 异常用户排行")
-    st.markdown("基于用户行为基线，识别异常用户并排序")
+    st.markdown("基于 UEBA validation 结果，识别异常用户并排序")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"])
-    with col2:
-        risk_filter = st.multiselect("风险等级", ["🔴 高危", "🟠 中危", "🟡 低危"], default=["🔴 高危", "🟠 中危", "🟡 低危"])
-        # 注意：risk_filter 目前仅用于前端展示，实际排行未过滤，您可以后续实现
-
-    st.divider()
-    st.subheader("🔴 异常用户 TOP10")
-
-    ranking_result = get_ueba_ranking_from_clickhouse(time_range, limit=10)
-    if not ranking_result.get("success") or not ranking_result.get("ranking"):
-        st.error("无法从 ClickHouse 获取排行数据，请检查后端服务是否正常")
-        return
-
-    ranking_rows = ranking_result["ranking"]
-    df_ranking = pd.DataFrame([
-        {
-            "排名": r["rank"],
-            "用户名": r["username"],
-            "异常评分": r["score"],
-            "风险等级": r["risk_level"],
-            "异常事件数": r["event_count"],
-            "最近异常时间": r["last_event_time"],
-        }
-        for r in ranking_rows
-    ])
-    st.dataframe(
-        df_ranking,
-        use_container_width=True,
-        hide_index=True,
-        column_config={"异常评分": st.column_config.ProgressColumn("异常评分", min_value=0, max_value=1, format="%.2f")}
+    st.info(
+        "UEBA validation dashboard 接入正在开发中（19-N 阶段）。\n\n"
+        "当前阶段（19-M0）已完成旧 behavior demo 接口清理。\n"
+        "新接入将基于 `ueba_validation_results` 表，只读查询 UEBA 评分结果。\n\n"
+        "如需查看 UEBA validation 结果，请先通过以下命令运行 validation 并导出：\n\n"
+        "```bash\n"
+        "PYTHONPATH=$(pwd) .venv/bin/python scripts/run_ueba_validation.py \\\n"
+        "  --start-time \"...\" --end-time \"...\" --model-version \"...\" --write\n\n"
+        "PYTHONPATH=$(pwd) .venv/bin/python scripts/export_ueba_validation_results.py \\\n"
+        "  --start-time \"...\" --end-time \"...\" --model-version \"...\" --format csv\n"
+        "```"
     )
-
-    st.divider()
-    st.subheader("📋 用户行为分析详情")
-
-    # 获取真实用户名列表（来自 ClickHouse）
-    real_usernames = [row["username"] for row in ranking_rows if row.get("username")]
-    if not real_usernames:
-        st.warning("没有找到任何用户日志数据")
-        return
-
-    selected_user = st.selectbox("选择用户查看行为分析", real_usernames)
-    # 直接调用行为分析接口（不再有 demo 回退）
-    behavior_result = analyze_behavior_from_clickhouse(selected_user)
-    if not behavior_result.get("success"):
-        st.error(f"行为分析失败：{behavior_result.get('error', '未知错误')}")
-        return
-
-        anomaly_events = selected_behavior_data.get("anomalies", [])
-        if not anomaly_events:
-            st.info("暂无异常行为")
-
-        for i, event in enumerate(anomaly_events):
-            event_time = event.get("timestamp", "-")
-            event_type = event.get("anomaly_type", "-")
-            with st.expander(f"⚠️ {event_time} - {event_type}"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"**时间**: {event_time}")
-                    st.markdown(f"**类型**: {event_type}")
-                    st.markdown(f"**描述**: {event.get('reason', '-')}")
-                with col2:
-                    st.markdown(f"**风险等级**: {event.get('risk_level', '-')}")
-                    st.markdown(f"**风险评分**: {event.get('risk_score', '-')}")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("✅ 标记为误报", key=f"false_{i}"):
-                        st.success("已标记为误报")
-                with col2:
-                    if st.button("🤖 生成 AI 建议", key=f"ai_{i}"):
-                        with st.spinner("🔍 AI 分析中..."):
-                            log_context = f"IP: {event['IP']}, 地点: {event['地点']}, 时间: {event['时间']}"
-                            ai_result = analyze_anomaly_with_ai(
-                                username=selected_user,
-                                anomaly_description=event['描述'],
-                                log_context=log_context
-                            )
-                        
-                        st.markdown("---")
-                        st.markdown(f"**🚨 威胁类型**: {ai_result.get('threat_type', 'UNKNOWN')}")
-                        st.markdown(f"**⚠️ 风险等级**: {ai_result.get('risk_level', 'MEDIUM')}")
-                        st.info(f"**📝 分析说明**: {ai_result.get('description', '')}")
-                        st.warning(f"**💡 处置建议**: {ai_result.get('suggestion', '')}")
-
-    detail_col1, detail_col2, detail_col3 = st.columns(3)
-    with detail_col1:
-        st.markdown(f"**常用时间段**: {baseline.get('common_hours', [])}")
-    with detail_col2:
-        st.markdown(f"**常用 IP**: {baseline.get('common_ips', [])}")
-    with detail_col3:
-        st.markdown(f"**常用地点**: {baseline.get('common_locations', [])}")
-
-    st.markdown("**摘要指标**")
-    st.json(summary)
-
-    st.markdown("**异常事件列表**")
-    anomalies = behavior_result.get("anomalies", [])
-    if anomalies:
-        st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
-    else:
-        st.info("未检测到异常行为")
 
 def show_security_score():
     """显示安全评分看板"""
