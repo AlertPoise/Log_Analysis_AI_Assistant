@@ -841,19 +841,6 @@ def get_anomaly_users(time_range="最近 24 小时", limit=10):
     return get_sample_anomaly_users()
 
 
-def get_ueba_ranking_from_clickhouse(time_range: str = "最近 24 小时", limit: int = 10) -> Dict[str, Any]:
-    """UEBA validation 排行查询 — 19-M0 已移除旧 risk_score 查询。
-
-    旧实现基于 logs_structured.risk_score（parser 输入侧标签），存在 SQL 注入风险。
-    新实现将在 19-N 阶段接入 ueba_validation_results 的只读查询。
-    """
-    logger.info(
-        "UEBA ranking query called (time_range=%s, limit=%s) — 接入中，返回空结果",
-        time_range, limit,
-    )
-    return {"success": False, "ranking": []}
-
-
 def get_security_metrics():
     """获取安全指标数据（统一入口）"""
     if STORAGE_AVAILABLE:
@@ -1032,33 +1019,213 @@ def show_realtime_logs():
         st.metric("高危事件数", "15", "+2")
 
 
-def show_ueba_ranking():
-    """显示 UEBA 异常用户排行 — 19-M0 已移除旧接口，新接入将在 19-N 阶段实现。
+def _ueba_api_error(action: str, result: dict) -> None:
+    """统一展示 UEBA API 错误。"""
+    error = result.get("error") or {}
+    st.error(f"{action}失败：{error.get('message', '未知错误')}")
+    if error.get("code"):
+        st.caption(f"错误代码：{error['code']}")
 
-    旧实现依赖：
-      - logs_structured.risk_score（parser 输入侧标签，非 UEBA 评分）
-      - analyze_behavior_from_clickhouse（src.behavior.api 旧接口，已不存在）
 
-    新接入将基于：
-      - ueba_validation_results 只读查询（UebaValidationRepository）
-      - 通过 src.behavior.api 新接口获取数据
-      - 不触发 validation，不写库，不重跑 baseline
-    """
-    st.header("👥 UEBA 异常用户排行")
-    st.markdown("基于 UEBA validation 结果，识别异常用户并排序")
-
+def _ueba_no_data_hint() -> None:
+    """显示空数据提示。"""
     st.info(
-        "UEBA validation dashboard 接入正在开发中（19-N 阶段）。\n\n"
-        "当前阶段（19-M0）已完成旧 behavior demo 接口清理。\n"
-        "新接入将基于 `ueba_validation_results` 表，只读查询 UEBA 评分结果。\n\n"
-        "如需查看 UEBA validation 结果，请先通过以下命令运行 validation 并导出：\n\n"
-        "```bash\n"
-        "PYTHONPATH=$(pwd) .venv/bin/python scripts/run_ueba_validation.py \\\n"
-        "  --start-time \"...\" --end-time \"...\" --model-version \"...\" --write\n\n"
-        "PYTHONPATH=$(pwd) .venv/bin/python scripts/export_ueba_validation_results.py \\\n"
-        "  --start-time \"...\" --end-time \"...\" --model-version \"...\" --format csv\n"
-        "```"
+        "当前条件下没有 UEBA validation 结果。\n\n"
+        "请先通过离线 validation 流程生成结果，再刷新本页面查看。"
     )
+
+
+def show_ueba_ranking():
+    """显示 UEBA validation 结果 — 只读查询 ueba_validation_results。
+
+    不触发 validation，不写库，不重跑 baseline。
+    """
+    st.header("👥 UEBA 异常验证结果")
+    st.caption("数据来源：ueba_validation_results（只读） | 不触发 validation | 不写数据库")
+
+    if not BEHAVIOR_API_AVAILABLE:
+        st.warning("UEBA Validation API 未就绪。请确认 src/behavior/api.py 已正确部署。")
+        return
+
+    # ---- 筛选器 ----
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    with filter_col1:
+        default_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        default_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        start_time = st.text_input("开始时间", value=default_start)
+        end_time = st.text_input("结束时间", value=default_end)
+    with filter_col2:
+        model_version = st.text_input("Model Version", value="ueba_baseline_v1")
+        validation_run_id = st.text_input("Validation Run ID（可选）", value="")
+    with filter_col3:
+        risk_filter = st.selectbox(
+            "风险等级", ["全部", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+        )
+        status_filter = st.selectbox(
+            "验证状态", ["全部", "VALIDATED", "NO_BASELINE", "UNRELIABLE_BASELINE"]
+        )
+
+    limit_val = st.slider("最大结果数", min_value=10, max_value=1000, value=100, step=10)
+
+    if not model_version.strip():
+        st.info("请输入 Model Version 后查询。")
+        return
+
+    st.divider()
+
+    # ---- 摘要指标 ----
+    summary_result = get_validation_summary(
+        start_time=start_time,
+        end_time=end_time,
+        model_version=model_version.strip(),
+        validation_run_id=validation_run_id.strip() or None,
+        limit=limit_val,
+    )
+    if not summary_result.get("success"):
+        _ueba_api_error("获取摘要", summary_result)
+        return
+
+    summary = summary_result.get("summary", {})
+    risk_counts = summary.get("risk_counts", {})
+    high_critical = risk_counts.get("HIGH", 0) + risk_counts.get("CRITICAL", 0)
+
+    metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
+    with metric_col1:
+        st.metric("验证总数", summary.get("total", 0))
+    with metric_col2:
+        st.metric("高风险 (HIGH+CRITICAL)", high_critical)
+    with metric_col3:
+        st.metric("最高分", summary.get("max_score", 0))
+    with metric_col4:
+        st.metric("平均分", f"{summary.get('avg_score', 0):.1f}")
+    with metric_col5:
+        latest = summary.get("latest_validated_at")
+        st.metric("最新验证", latest[:10] if latest else "-")
+
+    latest_run = summary.get("latest_validation_run_id")
+    if latest_run:
+        st.caption(f"最新批次：`{latest_run}`")
+
+    # ---- 分布图 ----
+    dist_col1, dist_col2 = st.columns(2)
+    with dist_col1:
+        st.subheader("风险等级分布")
+        if any(risk_counts.values()):
+            st.bar_chart(
+                pd.DataFrame({"数量": risk_counts}).T
+            )
+        else:
+            st.caption("暂无数据")
+    with dist_col2:
+        status_counts = summary.get("status_counts", {})
+        st.subheader("验证状态分布")
+        if any(status_counts.values()):
+            st.bar_chart(
+                pd.DataFrame({"数量": status_counts}).T
+            )
+        else:
+            st.caption("暂无数据")
+
+    st.divider()
+
+    # ---- 排行表 ----
+    st.subheader("用户 UEBA 风险排行")
+
+    risk_param = None if risk_filter == "全部" else risk_filter
+    status_param = None if status_filter == "全部" else status_filter
+
+    ranking_result = get_validation_ranking(
+        start_time=start_time,
+        end_time=end_time,
+        model_version=model_version.strip(),
+        validation_run_id=validation_run_id.strip() or None,
+        risk_level=risk_param,
+        validation_status=status_param,
+        limit=limit_val,
+    )
+    if not ranking_result.get("success"):
+        _ueba_api_error("获取排行", ranking_result)
+        return
+
+    ranking = ranking_result.get("ranking", [])
+    if not ranking:
+        _ueba_no_data_hint()
+        return
+
+    risk_emoji = {
+        "CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢",
+    }
+    ranking_rows = [
+        {
+            "排名": idx,
+            "用户名": r["username"],
+            "风险": f"{risk_emoji.get(r['risk_level'], '⚪')} {r['risk_level']}",
+            "最高分": r["max_score"],
+            "平均分": f"{r['avg_score']:.1f}",
+            "事件数": r["event_count"],
+            "高危次数": r["high_risk_count"],
+            "严重次数": r["critical_count"],
+            "最新验证": (r["latest_validated_at"] or "")[:16],
+        }
+        for idx, r in enumerate(ranking, start=1)
+    ]
+    st.dataframe(
+        pd.DataFrame(ranking_rows),
+        use_container_width=True,
+        hide_index=True,
+        column_config={"最高分": st.column_config.ProgressColumn("最高分", min_value=0, max_value=100, format="%d")},
+    )
+
+    # ---- 用户详情 ----
+    st.divider()
+    st.subheader("用户验证详情")
+
+    usernames = [r["username"] for r in ranking]
+    selected_user = st.selectbox("选择用户查看详情", usernames, key="ueba_detail_user")
+
+    if selected_user:
+        detail_result = get_user_validation_detail(
+            start_time=start_time,
+            end_time=end_time,
+            model_version=model_version.strip(),
+            username=selected_user,
+            validation_run_id=validation_run_id.strip() or None,
+            limit=limit_val,
+        )
+        if not detail_result.get("success"):
+            _ueba_api_error("获取详情", detail_result)
+        else:
+            events = detail_result.get("events", [])
+            if not events:
+                st.info(f"用户 {selected_user} 在当前条件下没有 validation 结果。")
+            else:
+                st.caption(f"共 {len(events)} 条记录")
+                for ev in events[:20]:
+                    with st.expander(
+                        f"{ev.get('ueba_risk_level', '-')} | 分数 {ev.get('ueba_score', 0)} "
+                        f"| {ev.get('validated_at', '-')[:16]}"
+                    ):
+                        detail_col1, detail_col2 = st.columns(2)
+                        with detail_col1:
+                            st.markdown(f"**validation_id**: `{ev.get('validation_id')}`")
+                            st.markdown(f"**run_id**: `{ev.get('validation_run_id')}`")
+                            st.markdown(f"**source_identity**: `{ev.get('source_identity')}`")
+                            st.markdown(f"**日志时间**: {ev.get('timestamp')}")
+                            st.markdown(f"**验证状态**: {ev.get('validation_status')}")
+                        with detail_col2:
+                            st.markdown(f"**UEBA 评分**: {ev.get('ueba_score', 0)}")
+                            st.markdown(f"**风险等级**: {ev.get('ueba_risk_level')}")
+                            st.markdown(f"**异常原因数**: {ev.get('reason_count', 0)}")
+                            if ev.get("error"):
+                                st.markdown(f"**错误**: {ev['error']}")
+                        reasons = ev.get("ueba_anomaly_reasons", [])
+                        if reasons:
+                            st.markdown("**异常原因明细**")
+                            st.dataframe(
+                                pd.DataFrame(reasons),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
 
 def show_security_score():
     """显示安全评分看板"""
