@@ -14,6 +14,8 @@ def _validation_result(validation_id: str = "validation-1") -> UebaValidationRes
     """Build a minimal validation result for schema tests."""
     return UebaValidationResult(
         validation_id=validation_id,
+        validation_run_id="run-1",
+        source_identity="request_id:req-1",
         source_log_id=101,
         timestamp="2024-03-01 10:00:00",
         username="alice",
@@ -50,6 +52,7 @@ def test_validation_target_log_stores_core_fields():
 
     assert target.id == 1001
     assert target.log_type == "vpn"
+    assert target.source_identity is None
     assert target.source_ip == "10.0.0.10"
     assert target.destination_ip == "10.0.1.20"
     assert target.is_unusual_ip is True
@@ -116,3 +119,12 @@ def test_risk_level_and_validation_status_store_expected_strings():
 
     assert result.ueba_risk_level == "CRITICAL"
     assert result.validation_status == "NO_BASELINE"
+
+
+
+def test_validation_result_stores_run_and_source_identity():
+    """Validation results should carry run and stable source identity fields."""
+    result = _validation_result()
+
+    assert result.validation_run_id == "run-1"
+    assert result.source_identity == "request_id:req-1"

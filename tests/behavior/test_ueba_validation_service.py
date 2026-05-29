@@ -14,6 +14,7 @@ END_TIME = "2024-03-02 00:00:00"
 LOG_TYPE = "vpn"
 MODEL_VERSION = "ueba_baseline_v1"
 VALIDATED_AT = "2024-03-02T00:00:05+00:00"
+VALIDATION_RUN_ID = "run-service-1"
 
 
 class FakeValidationRepository:
@@ -88,13 +89,21 @@ class SpyScoreCalculator(UebaScoreCalculator):
         super().__init__()
         self.calls = []
 
-    def calculate(self, target_log, baseline, model_version=None, validated_at=None):
+    def calculate(
+        self,
+        target_log,
+        baseline,
+        model_version=None,
+        validated_at=None,
+        validation_run_id="default_validation_run",
+    ):
         self.calls.append(
             {
                 "target_log": target_log,
                 "baseline": baseline,
                 "model_version": model_version,
                 "validated_at": validated_at,
+                "validation_run_id": validation_run_id,
             }
         )
         return super().calculate(
@@ -102,6 +111,7 @@ class SpyScoreCalculator(UebaScoreCalculator):
             baseline,
             model_version=model_version,
             validated_at=validated_at,
+            validation_run_id=validation_run_id,
         )
 
 
@@ -229,6 +239,7 @@ def test_dry_run_scores_target_logs_with_existing_baseline():
         limit=50,
         baseline_version=MODEL_VERSION,
         validated_at=VALIDATED_AT,
+        validation_run_id=VALIDATION_RUN_ID,
     )
 
     assert repository.fetch_calls == [
@@ -241,6 +252,8 @@ def test_dry_run_scores_target_logs_with_existing_baseline():
     ]
     assert baseline_store.calls == [{"username": "alice", "model_version": MODEL_VERSION}]
     assert len(calculator.calls) == 1
+    assert calculator.calls[0]["validation_run_id"] == VALIDATION_RUN_ID
+    assert summary["validation_run_id"] == VALIDATION_RUN_ID
     assert summary["processed_count"] == 1
     assert summary["selected_count"] == 1
     assert summary["scored_count"] == 1
@@ -290,6 +303,7 @@ def test_dry_run_no_baseline_counts_skipped_without_crashing():
         limit=50,
         baseline_version=MODEL_VERSION,
         validated_at=VALIDATED_AT,
+        validation_run_id=VALIDATION_RUN_ID,
     )
 
     assert len(calculator.calls) == 1
@@ -325,6 +339,7 @@ def test_dry_run_limits_sample_results_and_excludes_raw_log():
     assert summary["processed_count"] == 2
     assert summary["scored_count"] == 2
     assert len(summary["sample_results"]) == 1
+    assert summary["sample_results"][0]["source_identity"] == "request_id:req-1"
     assert "raw_log" not in summary["sample_results"][0]
 
 
@@ -411,6 +426,7 @@ def test_run_write_mode_saves_results_and_reports_written_count():
         model_version=MODEL_VERSION,
         dry_run=False,
         validated_at=VALIDATED_AT,
+        validation_run_id=VALIDATION_RUN_ID,
     )
 
     assert summary["success"] is True
@@ -431,6 +447,8 @@ def test_run_write_mode_saves_results_and_reports_written_count():
     assert repository.save_called is True
     assert len(repository.saved_results) == 1
     assert repository.saved_results[0].username == "alice"
+    assert repository.saved_results[0].validation_run_id == VALIDATION_RUN_ID
+    assert repository.saved_results[0].source_identity == "request_id:req-1"
 
 
 def test_run_write_mode_empty_targets_does_not_save_results():
@@ -608,6 +626,7 @@ def test_run_sample_results_respect_sample_size_and_omit_raw_log():
     assert "raw_log" not in sample
     assert set(sample) == {
         "log_id",
+        "source_identity",
         "username",
         "score",
         "risk_level",
@@ -646,6 +665,64 @@ def test_run_counts_single_baseline_lookup_failure():
     assert summary["skipped_count"] == 1
     assert summary["error"] is not None
     assert "baseline read failed" in summary["error"]
+
+
+
+
+
+def test_run_generates_validation_run_id_when_missing():
+    """Service should generate a run id when the caller does not provide one."""
+    repository = FakeValidationRepository([_target()])
+    baseline_store = FakeBaselineStore({"alice": _baseline()})
+    calculator = SpyScoreCalculator()
+
+    summary = _service(repository, baseline_store, calculator).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=True,
+        validated_at=VALIDATED_AT,
+    )
+
+    assert summary["validation_run_id"].startswith("ueba_validation_")
+    assert calculator.calls[0]["validation_run_id"] == summary["validation_run_id"]
+
+
+def test_run_uses_provided_validation_run_id():
+    """Service should preserve caller-provided validation_run_id."""
+    repository = FakeValidationRepository([_target()])
+    baseline_store = FakeBaselineStore({"alice": _baseline()})
+
+    summary = _service(repository, baseline_store).run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        model_version=MODEL_VERSION,
+        dry_run=True,
+        validation_run_id=VALIDATION_RUN_ID,
+    )
+
+    assert summary["validation_run_id"] == VALIDATION_RUN_ID
+
+
+def test_dry_run_summary_contains_validation_run_id():
+    """dry_run convenience API should include the validation run id."""
+    repository = FakeValidationRepository([_target()])
+    baseline_store = FakeBaselineStore({"alice": _baseline()})
+
+    summary = _service(repository, baseline_store).dry_run(
+        START_TIME,
+        END_TIME,
+        log_type=LOG_TYPE,
+        limit=50,
+        baseline_version=MODEL_VERSION,
+        validation_run_id=VALIDATION_RUN_ID,
+    )
+
+    assert summary["validation_run_id"] == VALIDATION_RUN_ID
 
 
 def test_validation_service_source_has_no_forbidden_stage_markers():

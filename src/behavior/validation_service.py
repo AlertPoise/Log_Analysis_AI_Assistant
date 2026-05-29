@@ -4,6 +4,8 @@
 返回受控摘要。它不更新源日志，也不创建数据库连接。
 """
 
+from datetime import datetime, timezone
+import hashlib
 from typing import Any
 
 from .baseline_store import BaselineStore
@@ -45,6 +47,7 @@ class UebaValidationService:
         baseline_version: str | None = None,
         sample_result_limit: int = DEFAULT_SAMPLE_RESULT_LIMIT,
         validated_at: str | None = None,
+        validation_run_id: str | None = None,
     ) -> dict[str, Any]:
         """执行一次不保存结果的 UEBA 准线验证。"""
         return self.run(
@@ -56,6 +59,7 @@ class UebaValidationService:
             dry_run=True,
             sample_size=sample_result_limit,
             validated_at=validated_at,
+            validation_run_id=validation_run_id,
         )
 
     def run(
@@ -68,9 +72,18 @@ class UebaValidationService:
         dry_run: bool = True,
         sample_size: int = DEFAULT_SAMPLE_SIZE,
         validated_at: str | None = None,
+        validation_run_id: str | None = None,
     ) -> dict[str, Any]:
         """执行一次 UEBA 准线验证，可选择保存评分结果。"""
         sample_limit = self._validate_sample_size(sample_size)
+        effective_validation_run_id = self._validation_run_id(
+            validation_run_id=validation_run_id,
+            start_time=start_time,
+            end_time=end_time,
+            log_type=log_type,
+            model_version=model_version,
+            dry_run=dry_run,
+        )
         try:
             target_logs = self.validation_repository.fetch_target_logs(
                 start_time=start_time,
@@ -86,6 +99,7 @@ class UebaValidationService:
                 log_type=log_type,
                 limit=limit,
                 model_version=model_version,
+                validation_run_id=effective_validation_run_id,
                 dry_run=dry_run,
                 processed_count=0,
                 results=[],
@@ -122,6 +136,7 @@ class UebaValidationService:
                 baseline,
                 model_version=model_version or (baseline.model_version if baseline else None),
                 validated_at=validated_at,
+                validation_run_id=effective_validation_run_id,
             )
             results.append(result)
 
@@ -133,6 +148,7 @@ class UebaValidationService:
                 log_type=log_type,
                 limit=limit,
                 model_version=model_version,
+                validation_run_id=effective_validation_run_id,
                 dry_run=dry_run,
                 processed_count=len(target_logs),
                 results=results,
@@ -155,6 +171,7 @@ class UebaValidationService:
                 log_type=log_type,
                 limit=limit,
                 model_version=model_version,
+                validation_run_id=effective_validation_run_id,
                 dry_run=False,
                 processed_count=len(target_logs),
                 results=results,
@@ -174,6 +191,7 @@ class UebaValidationService:
             log_type=log_type,
             limit=limit,
             model_version=model_version,
+            validation_run_id=effective_validation_run_id,
             dry_run=False,
             processed_count=len(target_logs),
             results=results,
@@ -195,6 +213,7 @@ class UebaValidationService:
         log_type: str,
         limit: int,
         model_version: str | None,
+        validation_run_id: str,
         dry_run: bool,
         processed_count: int,
         results: list[UebaValidationResult],
@@ -216,6 +235,7 @@ class UebaValidationService:
             "limit": limit,
             "model_version": model_version,
             "baseline_version": model_version,
+            "validation_run_id": validation_run_id,
             "processed_count": processed_count,
             "selected_count": processed_count,
             "scored_count": len(results),
@@ -360,12 +380,40 @@ class UebaValidationService:
         """返回受控的样例结果，避免摘要过大。"""
         return {
             "log_id": result.source_log_id,
+            "source_identity": result.source_identity,
             "username": result.username,
             "score": result.ueba_score,
             "risk_level": result.ueba_risk_level,
             "validation_status": result.validation_status,
             "reason_codes": [reason.code for reason in result.ueba_anomaly_reasons],
         }
+
+    def _validation_run_id(
+        self,
+        *,
+        validation_run_id: str | None,
+        start_time: str,
+        end_time: str,
+        log_type: str,
+        model_version: str | None,
+        dry_run: bool,
+    ) -> str:
+        """Return a caller-provided or generated run identifier."""
+        if validation_run_id is not None and validation_run_id.strip():
+            return validation_run_id.strip()
+        created_at = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        raw = "|".join(
+            [
+                start_time,
+                end_time,
+                log_type,
+                model_version or "",
+                "dry" if dry_run else "write",
+                created_at,
+            ]
+        )
+        short_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+        return f"ueba_validation_{created_at}_{short_hash}"
 
     def _validate_sample_size(self, sample_size: int) -> int:
         """限制样例结果数量。"""

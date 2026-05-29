@@ -7,6 +7,7 @@ coordinate batch validation workflows.
 
 from datetime import datetime, timezone
 import hashlib
+import json
 from typing import Iterable
 
 from .schemas import CountRatioItem, UserBaseline
@@ -28,6 +29,7 @@ class UebaScoreCalculator:
         baseline: UserBaseline | None,
         model_version: str | None = None,
         validated_at: str | None = None,
+        validation_run_id: str = "default_validation_run",
     ) -> UebaValidationResult:
         """Calculate a validation result for one target log."""
         effective_model_version = model_version or (baseline.model_version if baseline else None)
@@ -53,6 +55,7 @@ class UebaScoreCalculator:
                 reasons=reasons,
                 validation_status="NO_BASELINE",
                 validated_at=effective_validated_at,
+                validation_run_id=validation_run_id,
             )
 
         reasons: list[ScoreReason] = []
@@ -161,6 +164,7 @@ class UebaScoreCalculator:
             reasons=reasons,
             validation_status=validation_status,
             validated_at=effective_validated_at,
+            validation_run_id=validation_run_id,
         )
 
     def _score_source_ip(
@@ -331,10 +335,19 @@ class UebaScoreCalculator:
         reasons: list[ScoreReason],
         validation_status: str,
         validated_at: str,
+        validation_run_id: str,
     ) -> UebaValidationResult:
         """Create the validation result dataclass."""
+        source_identity = build_source_identity(target_log)
         return UebaValidationResult(
-            validation_id=self._validation_id(target_log, baseline_model_version),
+            validation_id=self._validation_id(
+                validation_run_id=validation_run_id,
+                source_identity=source_identity,
+                target_log=target_log,
+                model_version=baseline_model_version,
+            ),
+            validation_run_id=validation_run_id,
+            source_identity=source_identity,
             source_log_id=target_log.id,
             timestamp=str(target_log.timestamp),
             username=target_log.username,
@@ -350,14 +363,22 @@ class UebaScoreCalculator:
             request_id=target_log.request_id,
         )
 
-    def _validation_id(self, target_log: ValidationTargetLog, model_version: str | None) -> str:
-        """Generate a stable result id from log identity and model version."""
+    def _validation_id(
+        self,
+        *,
+        validation_run_id: str,
+        source_identity: str,
+        target_log: ValidationTargetLog,
+        model_version: str | None,
+    ) -> str:
+        """Generate a stable result id from run, source identity, and model version."""
         raw = "|".join(
             [
-                str(target_log.id),
-                target_log.username,
-                str(target_log.timestamp),
+                validation_run_id,
+                source_identity,
                 model_version or "",
+                str(target_log.timestamp),
+                target_log.username,
             ]
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
@@ -430,4 +451,55 @@ class UebaScoreCalculator:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-__all__ = ["UebaScoreCalculator"]
+SOURCE_IDENTITY_FIELDS = [
+    "timestamp",
+    "username",
+    "log_type",
+    "source_ip",
+    "destination_ip",
+    "src_country",
+    "src_city",
+    "vpn_gateway",
+    "action",
+    "event_type",
+    "result",
+    "auth_method",
+    "client_software",
+    "protocol",
+    "raw_log",
+]
+
+
+def build_source_identity(target_log: ValidationTargetLog) -> str:
+    """Build a stable source log identity without relying on source_log_id."""
+    request_id = _normalize_identity_value(target_log.request_id)
+    if request_id is not None:
+        return f"request_id:{request_id}"
+
+    existing_identity = _normalize_identity_value(target_log.source_identity)
+    if existing_identity is not None:
+        return existing_identity
+
+    payload = [
+        [field_name, _identity_text(getattr(target_log, field_name, None))]
+        for field_name in SOURCE_IDENTITY_FIELDS
+    ]
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:32]
+    return f"source_hash:{digest}"
+
+
+def _identity_text(value: object) -> str:
+    """Normalize identity fields for deterministic hashing."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _normalize_identity_value(value: object) -> str | None:
+    """Return a non-empty identity string when one is available."""
+    normalized = _identity_text(value)
+    return normalized or None
+
+
+__all__ = ["UebaScoreCalculator", "build_source_identity"]

@@ -116,6 +116,8 @@ def _result(
     """Build a representative validation result."""
     return UebaValidationResult(
         validation_id=validation_id,
+        validation_run_id="run-1",
+        source_identity="request_id:req-1",
         source_log_id=1001,
         timestamp=timestamp,
         username="alice",
@@ -237,13 +239,15 @@ def test_ensure_table_partitions_by_timestamp_month():
     assert "partition by toyyyymm(timestamp)" in normalize_sql(client.commands[0]).lower()
 
 
-def test_ensure_table_uses_non_nullable_baseline_model_version():
-    """baseline_model_version is part of ORDER BY and must not be Nullable."""
+def test_ensure_table_uses_non_nullable_identity_columns():
+    """Identity columns used by ORDER BY should not be Nullable."""
     client = FakeClient()
     UebaValidationRepository(client).ensure_table()
 
     columns = extract_create_table_columns(client.commands[0])
     assert columns["baseline_model_version"] == "String"
+    assert columns["validation_run_id"] == "String"
+    assert columns["source_identity"] == "String"
 
 
 def test_ensure_table_order_by_excludes_nullable_columns():
@@ -276,15 +280,16 @@ def test_ensure_table_contains_order_by():
 
     normalized = normalize_sql(client.commands[0]).lower()
     assert (
-        "order by (baseline_model_version, log_type, timestamp, username, source_log_id)"
+        "order by (baseline_model_version, validation_run_id, log_type, timestamp, username, source_identity)"
         in normalized
     )
     assert extract_order_by_fields(client.commands[0]) == [
         "baseline_model_version",
+        "validation_run_id",
         "log_type",
         "timestamp",
         "username",
-        "source_log_id",
+        "source_identity",
     ]
 
 
@@ -483,6 +488,14 @@ def test_validation_result_to_row_replaces_missing_baseline_version():
     assert row["baseline_created_at"] is None
     assert row["validation_status"] == "NO_BASELINE"
     assert row["baseline_is_reliable"] == 0
+
+
+def test_validation_result_to_row_writes_run_and_source_identity():
+    """Rows should include run id and source identity for append-only audit queries."""
+    row = UebaValidationRepository(FakeClient()).validation_result_to_row(_result())
+
+    assert row["validation_run_id"] == "run-1"
+    assert row["source_identity"] == "request_id:req-1"
 
 
 def test_validation_result_to_row_preserves_existing_baseline_version():
@@ -696,12 +709,16 @@ MODEL_VERSION = "MODEL_VERSION_SENTINEL"
 USERNAME = "USERNAME_SENTINEL"
 RISK_LEVEL = "RISK_LEVEL_SENTINEL"
 VALIDATION_STATUS = "VALIDATION_STATUS_SENTINEL"
+VALIDATION_RUN_ID = "VALIDATION_RUN_ID_SENTINEL"
+SOURCE_IDENTITY = "SOURCE_IDENTITY_SENTINEL"
 
 
 def _validation_row(**overrides):
     """Build one validation result table row for query tests."""
     row = {
         "validation_id": "validation-query-1",
+        "validation_run_id": "run-query-1",
+        "source_identity": "request_id:req-query-1",
         "source_log_id": 3001,
         "timestamp": "2024-04-01 10:00:00",
         "username": "alice",
@@ -772,6 +789,8 @@ def assert_query_sql_is_controlled(sql: str, parameters: dict, *, optional_filte
     assert RISK_LEVEL not in sql
     assert VALIDATION_STATUS not in sql
     assert USERNAME not in sql
+    assert VALIDATION_RUN_ID not in sql
+    assert SOURCE_IDENTITY not in sql
 
     required = {
         "start_time": START_TIME,
@@ -785,16 +804,24 @@ def assert_query_sql_is_controlled(sql: str, parameters: dict, *, optional_filte
         assert "ueba_risk_level = %(risk_level)s" in normalized
         assert "validation_status = %(validation_status)s" in normalized
         assert "username = %(username)s" in normalized
+        assert "validation_run_id = %(validation_run_id)s" in normalized
+        assert "source_identity = %(source_identity)s" in normalized
         assert parameters["risk_level"] == RISK_LEVEL
         assert parameters["validation_status"] == VALIDATION_STATUS
         assert parameters["username"] == USERNAME
+        assert parameters["validation_run_id"] == VALIDATION_RUN_ID
+        assert parameters["source_identity"] == SOURCE_IDENTITY
     else:
         assert "ueba_risk_level = %(risk_level)s" not in normalized
         assert "validation_status = %(validation_status)s" not in normalized
         assert "username = %(username)s" not in normalized
+        assert "validation_run_id = %(validation_run_id)s" not in normalized
+        assert "source_identity = %(source_identity)s" not in normalized
         assert "risk_level" not in parameters
         assert "validation_status" not in parameters
         assert "username" not in parameters
+        assert "validation_run_id" not in parameters
+        assert "source_identity" not in parameters
 
 
 def test_query_validation_results_reads_from_validation_results_table():
@@ -804,6 +831,8 @@ def test_query_validation_results_reads_from_validation_results_table():
     assert_query_sql_is_controlled(call["sql"], call["parameters"], optional_filters=False)
     assert len(rows) == 1
     assert rows[0]["validation_id"] == "validation-query-1"
+    assert rows[0]["validation_run_id"] == "run-query-1"
+    assert rows[0]["source_identity"] == "request_id:req-query-1"
     assert rows[0]["source_log_id"] == 3001
     assert rows[0]["baseline_model_version"] == "ueba_model_v1"
     assert rows[0]["ueba_score"] == 42
@@ -815,6 +844,8 @@ def test_query_validation_results_appends_optional_filters():
         risk_level=RISK_LEVEL,
         validation_status=VALIDATION_STATUS,
         username=USERNAME,
+        validation_run_id=VALIDATION_RUN_ID,
+        source_identity=SOURCE_IDENTITY,
     )
 
     assert_query_sql_is_controlled(call["sql"], call["parameters"], optional_filters=True)

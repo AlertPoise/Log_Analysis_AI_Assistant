@@ -16,6 +16,7 @@ class ValidationTargetLog:
     timestamp: str
     username: str
     log_type: str = "vpn"
+    source_identity: str | None = None
     source_ip: str | None = None
     destination_ip: str | None = None
     src_country: str | None = None
@@ -49,6 +50,8 @@ class UebaValidationResult:
     """UEBA validation result for one source log."""
 
     validation_id: str
+    validation_run_id: str
+    source_identity: str
     source_log_id: int
     timestamp: str
     username: str
@@ -70,6 +73,7 @@ class ValidationRunResult:
     """Summary of one UEBA validation batch run."""
 
     success: bool
+    validation_run_id: str | None = None
     selected_count: int = 0
     scored_count: int = 0
     written_count: int = 0

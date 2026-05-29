@@ -23,6 +23,8 @@ class UebaValidationRepository:
     NO_BASELINE_MODEL_VERSION = "__NO_BASELINE__"
     COLUMNS = [
         "validation_id",
+        "validation_run_id",
+        "source_identity",
         "source_log_id",
         "timestamp",
         "username",
@@ -40,6 +42,8 @@ class UebaValidationRepository:
     ]
     QUERY_COLUMNS = [
         "validation_id",
+        "validation_run_id",
+        "source_identity",
         "source_log_id",
         "timestamp",
         "username",
@@ -102,6 +106,8 @@ class UebaValidationRepository:
         CREATE TABLE IF NOT EXISTS {self._qualified_table()}
         (
             validation_id String,
+            validation_run_id String,
+            source_identity String,
             source_log_id UInt64,
             timestamp DateTime,
             username String,
@@ -120,7 +126,7 @@ class UebaValidationRepository:
         )
         ENGINE = MergeTree()
         PARTITION BY toYYYYMM(timestamp)
-        ORDER BY (baseline_model_version, log_type, timestamp, username, source_log_id)
+        ORDER BY (baseline_model_version, validation_run_id, log_type, timestamp, username, source_identity)
         """
         self._execute_command(sql)
 
@@ -176,7 +182,9 @@ class UebaValidationRepository:
         """Convert a validation result dataclass to a ClickHouse insert row."""
         return {
             "validation_id": result.validation_id,
-            "source_log_id": result.source_log_id,
+            "validation_run_id": result.validation_run_id,
+            "source_identity": result.source_identity,
+            "source_log_id": int(result.source_log_id or 0),
             "timestamp": self._to_clickhouse_datetime(
                 result.timestamp,
                 field_name="timestamp",
@@ -235,6 +243,8 @@ class UebaValidationRepository:
         risk_level: str | None = None,
         validation_status: str | None = None,
         username: str | None = None,
+        validation_run_id: str | None = None,
+        source_identity: str | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
         """Read validation results from the fixed result table."""
@@ -263,10 +273,18 @@ class UebaValidationRepository:
         if username is not None:
             filters.append("username = %(username)s")
             parameters["username"] = username
+        if validation_run_id is not None:
+            filters.append("validation_run_id = %(validation_run_id)s")
+            parameters["validation_run_id"] = validation_run_id
+        if source_identity is not None:
+            filters.append("source_identity = %(source_identity)s")
+            parameters["source_identity"] = source_identity
 
         sql = f"""
         SELECT
             validation_id,
+            validation_run_id,
+            source_identity,
             source_log_id,
             timestamp,
             username,

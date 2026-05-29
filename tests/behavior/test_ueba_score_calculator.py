@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.behavior.schemas import CountRatioItem, UserBaseline
-from src.behavior.score_calculator import UebaScoreCalculator
+from src.behavior.score_calculator import UebaScoreCalculator, build_source_identity
 from src.behavior.validation_schemas import ValidationTargetLog
 
 
@@ -78,12 +78,13 @@ def _target(**overrides) -> ValidationTargetLog:
     return ValidationTargetLog(**values)
 
 
-def _calculate(target_log, baseline=None):
-    """Calculate with a deterministic validation timestamp."""
+def _calculate(target_log, baseline=None, validation_run_id="run-1"):
+    """Calculate with deterministic validation metadata."""
     return UebaScoreCalculator().calculate(
         target_log,
         _baseline() if baseline is None else baseline,
         validated_at="2024-03-02 09:30:05",
+        validation_run_id=validation_run_id,
     )
 
 
@@ -104,6 +105,7 @@ def test_no_baseline_returns_low_risk_no_baseline_status():
         None,
         model_version="ueba_baseline_v1",
         validated_at="2024-03-02 09:30:05",
+        validation_run_id="run-1",
     )
 
     assert result.validation_status == "NO_BASELINE"
@@ -233,16 +235,92 @@ def test_score_is_clamped_to_one_hundred():
     assert result.ueba_risk_level == "CRITICAL"
 
 
-def test_validation_id_is_deterministic():
-    """The same log and model version should produce the same validation id."""
+def test_calculate_accepts_validation_run_id():
+    """Calculated results should carry the caller-provided run id."""
+    result = _calculate(_target(), validation_run_id="run-custom")
+
+    assert result.validation_run_id == "run-custom"
+
+
+def test_source_identity_uses_request_id_first():
+    """request_id should be the preferred stable source identity."""
+    target = _target(request_id="req-identity", source_ip="198.51.100.1")
+
+    assert build_source_identity(target) == "request_id:req-identity"
+    assert _calculate(target).source_identity == "request_id:req-identity"
+
+
+def test_source_identity_hash_is_stable_without_request_id():
+    """Composite source identity hashes should be stable and deterministic."""
+    first = _target(id=0, request_id=None, source_ip="198.51.100.1")
+    second = _target(id=999, request_id="", source_ip="198.51.100.1")
+
+    assert build_source_identity(first) == build_source_identity(second)
+    assert build_source_identity(first).startswith("source_hash:")
+
+
+def test_source_identity_distinguishes_logs_when_source_log_id_is_zero():
+    """Different source content should differ even when source_log_id is zero."""
+    first = _target(id=0, request_id=None, source_ip="198.51.100.1")
+    second = _target(id=0, request_id=None, source_ip="198.51.100.2")
+
+    assert build_source_identity(first) != build_source_identity(second)
+
+
+def test_validation_id_is_deterministic_for_same_run_id():
+    """The same source identity, model version, and run should produce the same id."""
     calculator = UebaScoreCalculator()
-    target = _target()
+    target = _target(id=0, request_id=None)
     baseline = _baseline()
 
-    first = calculator.calculate(target, baseline, validated_at="2024-03-02 09:30:05")
-    second = calculator.calculate(target, baseline, validated_at="2024-03-02 09:31:05")
+    first = calculator.calculate(
+        target,
+        baseline,
+        validated_at="2024-03-02 09:30:05",
+        validation_run_id="run-1",
+    )
+    second = calculator.calculate(
+        target,
+        baseline,
+        validated_at="2024-03-02 09:31:05",
+        validation_run_id="run-1",
+    )
 
     assert first.validation_id == second.validation_id
+
+
+def test_validation_id_changes_for_different_run_id():
+    """Different run ids should create separate append-only result identities."""
+    target = _target(id=0, request_id=None)
+    baseline = _baseline()
+    calculator = UebaScoreCalculator()
+
+    first = calculator.calculate(target, baseline, validation_run_id="run-1")
+    second = calculator.calculate(target, baseline, validation_run_id="run-2")
+
+    assert first.validation_id != second.validation_id
+
+
+def test_validation_id_distinguishes_source_identity_when_source_log_id_is_zero():
+    """source_identity should disambiguate source_log_id zero rows."""
+    calculator = UebaScoreCalculator()
+    baseline = _baseline()
+
+    first = calculator.calculate(
+        _target(id=0, request_id=None, source_ip="198.51.100.1"),
+        baseline,
+        validation_run_id="run-1",
+    )
+    second = calculator.calculate(
+        _target(id=0, request_id=None, source_ip="198.51.100.2"),
+        baseline,
+        validation_run_id="run-1",
+    )
+
+    assert first.source_log_id == 0
+    assert second.source_log_id == 0
+    assert first.source_identity != second.source_identity
+    assert first.validation_id != second.validation_id
 
 
 def test_score_calculator_source_has_no_forbidden_markers():

@@ -15,6 +15,7 @@ from src.behavior.validation_service import UebaValidationService
 START_TIME = "2024-03-01 00:00:00"
 END_TIME = "2024-03-02 00:00:00"
 MODEL_VERSION = "ueba_baseline_v1"
+VALIDATION_RUN_ID = "run-cli-1"
 
 
 def _argv(extra=None):
@@ -50,6 +51,7 @@ def _summary(success=True, dry_run=True, written_count=0):
         "end_time": END_TIME,
         "log_type": "vpn",
         "model_version": MODEL_VERSION,
+        "validation_run_id": VALIDATION_RUN_ID,
         "message": "ok",
         "error": None,
     }
@@ -77,6 +79,15 @@ def test_parse_args_defaults_to_dry_run():
     assert args.log_type == "vpn"
     assert args.limit == 1000
     assert args.sample_size == 5
+    assert args.validation_run_id is None
+
+
+def test_parse_args_supports_validation_run_id():
+    """CLI should accept an optional validation run id."""
+    args = validation_cli.parse_args(_argv(["--validation-run-id", VALIDATION_RUN_ID]))
+
+    assert args.validation_run_id == VALIDATION_RUN_ID
+
 
 
 def test_parse_args_supports_write():
@@ -192,6 +203,7 @@ def test_main_success_outputs_json_and_closes_client(monkeypatch, capsys):
         limit=1000,
         dry_run=True,
         sample_size=5,
+        validation_run_id=None,
     )
     fake_client.close.assert_called_once_with()
 
@@ -244,6 +256,7 @@ def test_main_write_passes_dry_run_false(monkeypatch, capsys):
     assert exit_code == 0
     assert json.loads(capsys.readouterr().out)["written_count"] == 1
     assert fake_service.run.call_args.kwargs["dry_run"] is False
+    assert fake_service.run.call_args.kwargs["validation_run_id"] is None
 
 
 def test_main_default_passes_dry_run_true(monkeypatch, capsys):
@@ -259,6 +272,26 @@ def test_main_default_passes_dry_run_true(monkeypatch, capsys):
     assert exit_code == 0
     assert json.loads(capsys.readouterr().out)["dry_run"] is True
     assert fake_service.run.call_args.kwargs["dry_run"] is True
+    assert fake_service.run.call_args.kwargs["validation_run_id"] is None
+
+
+
+
+
+def test_main_passes_validation_run_id(monkeypatch, capsys):
+    """--validation-run-id should be forwarded to the service and appear in JSON."""
+    fake_client = SimpleNamespace(close=Mock())
+    fake_service = Mock()
+    fake_service.run.return_value = _summary(success=True, dry_run=True)
+    monkeypatch.setattr(validation_cli, "create_clickhouse_client", Mock(return_value=fake_client))
+    monkeypatch.setattr(validation_cli, "build_service", Mock(return_value=fake_service))
+
+    exit_code = validation_cli.main(_argv(["--validation-run-id", VALIDATION_RUN_ID]))
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["validation_run_id"] == VALIDATION_RUN_ID
+    assert fake_service.run.call_args.kwargs["validation_run_id"] == VALIDATION_RUN_ID
 
 
 def test_cli_source_has_no_forbidden_stage_markers():

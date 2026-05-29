@@ -36,6 +36,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--end-time", required=True)
     parser.add_argument("--log-type", default="vpn")
     parser.add_argument("--model-version", required=True)
+    parser.add_argument("--validation-run-id")
     parser.add_argument("--limit", type=_positive_int, default=1000)
     parser.add_argument("--sample-size", type=_positive_int, default=5)
     parser.add_argument("--write", action="store_true", default=False)
@@ -88,6 +89,7 @@ def run_validation(args: argparse.Namespace, service: UebaValidationService) -> 
         limit=args.limit,
         dry_run=not args.write,
         sample_size=args.sample_size,
+        validation_run_id=args.validation_run_id,
     )
 
 
@@ -117,6 +119,7 @@ def failure_payload(message: str, args: argparse.Namespace | None = None) -> dic
         "end_time": getattr(args, "end_time", None),
         "log_type": getattr(args, "log_type", None),
         "model_version": getattr(args, "model_version", None),
+        "validation_run_id": getattr(args, "validation_run_id", None),
         "message": "validation CLI failed",
         "error": safe_message,
     }
