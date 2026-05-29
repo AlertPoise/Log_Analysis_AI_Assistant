@@ -38,6 +38,30 @@ class UebaValidationRepository:
         "validated_at",
         "error",
     ]
+    QUERY_COLUMNS = [
+        "validation_id",
+        "source_log_id",
+        "timestamp",
+        "username",
+        "log_type",
+        "request_id",
+        "baseline_model_version",
+        "baseline_created_at",
+        "baseline_is_reliable",
+        "ueba_score",
+        "ueba_risk_level",
+        "ueba_anomaly_reasons",
+        "validation_status",
+        "validated_at",
+        "error",
+        "created_at",
+    ]
+    DATETIME_QUERY_COLUMNS = {
+        "timestamp",
+        "baseline_created_at",
+        "validated_at",
+        "created_at",
+    }
     TARGET_LOG_COLUMNS = [
         "id",
         "timestamp",
@@ -202,6 +226,70 @@ class UebaValidationRepository:
 
         return written_count
 
+    def query_validation_results(
+        self,
+        start_time: str,
+        end_time: str,
+        model_version: str,
+        log_type: str = "vpn",
+        risk_level: str | None = None,
+        validation_status: str | None = None,
+        username: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Read validation results from the fixed result table."""
+        self._validate_time_window(start_time, end_time)
+        self._validate_required_text(model_version, "model_version")
+        self._validate_required_text(log_type, "log_type")
+
+        parameters: dict[str, Any] = {
+            "start_time": start_time,
+            "end_time": end_time,
+            "model_version": model_version,
+            "log_type": log_type,
+        }
+        filters = [
+            "baseline_model_version = %(model_version)s",
+            "log_type = %(log_type)s",
+            "timestamp >= %(start_time)s",
+            "timestamp < %(end_time)s",
+        ]
+        if risk_level is not None:
+            filters.append("ueba_risk_level = %(risk_level)s")
+            parameters["risk_level"] = risk_level
+        if validation_status is not None:
+            filters.append("validation_status = %(validation_status)s")
+            parameters["validation_status"] = validation_status
+        if username is not None:
+            filters.append("username = %(username)s")
+            parameters["username"] = username
+
+        sql = f"""
+        SELECT
+            validation_id,
+            source_log_id,
+            timestamp,
+            username,
+            log_type,
+            request_id,
+            baseline_model_version,
+            baseline_created_at,
+            baseline_is_reliable,
+            ueba_score,
+            ueba_risk_level,
+            ueba_anomaly_reasons,
+            validation_status,
+            validated_at,
+            error,
+            created_at
+        FROM {self._qualified_table()}
+        WHERE {" AND ".join(filters)}
+        ORDER BY timestamp ASC, username ASC, source_log_id ASC
+        LIMIT {self._validate_limit(limit)}
+        """
+        rows = self._execute_query(sql, parameters, fallback_columns=self.QUERY_COLUMNS)
+        return [self._validation_row_to_dict(row) for row in rows]
+
     def _execute_command(self, sql: str) -> None:
         """Execute a ClickHouse command with common client interfaces."""
         if hasattr(self.client, "command"):
@@ -212,7 +300,13 @@ class UebaValidationRepository:
             return
         raise TypeError("client must provide command(...) or execute(...)")
 
-    def _execute_query(self, sql: str, parameters: dict[str, Any]) -> list[dict[str, Any]]:
+    def _execute_query(
+        self,
+        sql: str,
+        parameters: dict[str, Any],
+        *,
+        fallback_columns: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Execute a ClickHouse query and return normalized row dictionaries."""
         if hasattr(self.client, "query"):
             result = self.client.query(sql, parameters=parameters)
@@ -220,9 +314,14 @@ class UebaValidationRepository:
             result = self.client.execute(sql, parameters)
         else:
             raise TypeError("client must provide query(...) or execute(...)")
-        return self._rows_to_dicts(result)
+        return self._rows_to_dicts(result, fallback_columns=fallback_columns)
 
-    def _rows_to_dicts(self, result: Any) -> list[dict[str, Any]]:
+    def _rows_to_dicts(
+        self,
+        result: Any,
+        *,
+        fallback_columns: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Normalize common ClickHouse client query result shapes."""
         if hasattr(result, "named_results"):
             named_results = result.named_results
@@ -232,23 +331,36 @@ class UebaValidationRepository:
         if hasattr(result, "result_rows") and hasattr(result, "column_names"):
             return [dict(zip(result.column_names, row)) for row in result.result_rows]
 
+        columns = fallback_columns or self.TARGET_LOG_COLUMNS
+
         if isinstance(result, list):
-            return self._list_rows_to_dicts(result)
+            return self._list_rows_to_dicts(result, columns)
 
         if isinstance(result, Iterable) and not isinstance(result, (str, bytes, dict)):
-            return self._list_rows_to_dicts(list(result))
+            return self._list_rows_to_dicts(list(result), columns)
 
         raise TypeError("unsupported query result format")
 
-    def _list_rows_to_dicts(self, rows: list[Any]) -> list[dict[str, Any]]:
-        """Convert list results made of dict rows or target-log tuples."""
+    def _list_rows_to_dicts(
+        self,
+        rows: list[Any],
+        columns: list[str],
+    ) -> list[dict[str, Any]]:
+        """Convert list results made of dict rows or tuples."""
         if not rows:
             return []
         if all(isinstance(row, dict) for row in rows):
             return [dict(row) for row in rows]
         if all(isinstance(row, tuple) for row in rows):
-            return [dict(zip(self.TARGET_LOG_COLUMNS, row)) for row in rows]
+            return [dict(zip(columns, row)) for row in rows]
         raise TypeError("unsupported query result format")
+
+    def _validation_row_to_dict(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Convert one validation result row to a stable query dictionary."""
+        result = {column: row.get(column) for column in self.QUERY_COLUMNS}
+        for column in self.DATETIME_QUERY_COLUMNS:
+            result[column] = self._format_unlabeled_datetime(result[column])
+        return result
 
     def _target_row_to_log(self, row: dict[str, Any]) -> ValidationTargetLog:
         """Convert one target-log row to the stable validation schema."""
@@ -300,6 +412,11 @@ class UebaValidationRepository:
         if not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
         return limit
+
+    def _validate_required_text(self, value: str, field_name: str) -> None:
+        """Validate required text filters."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name} must be a non-empty string")
 
     def _validate_time_window(self, start_time: str, end_time: str) -> None:
         """Validate the target-log time window."""
@@ -368,6 +485,14 @@ class UebaValidationRepository:
         if value.endswith(("Z", "z")):
             return value[:-1]
         return re.sub(r"[+-]\d{2}:?\d{2}$", "", value)
+
+    def _format_unlabeled_datetime(self, value: Any) -> str | None:
+        """Format DateTime query values without timezone labels."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        return str(value)
 
     def _reasons_to_json(self, reasons: list[ScoreReason]) -> str:
         """Serialize score reasons using the project JSON convention."""

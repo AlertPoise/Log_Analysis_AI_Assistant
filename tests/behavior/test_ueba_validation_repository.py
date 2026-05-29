@@ -29,6 +29,14 @@ class FakeNamedQueryResult:
         return [dict(zip(self.column_names, row)) for row in self.result_rows]
 
 
+class FakeColumnQueryResult:
+    """Minimal result_rows plus column_names result without named_results."""
+
+    def __init__(self, rows, column_names):
+        self.result_rows = rows
+        self.column_names = column_names
+
+
 class FakeClient:
     """Capture ClickHouse commands, inserts, and queries without a real database."""
 
@@ -682,3 +690,268 @@ def test_validation_repository_source_has_no_forbidden_stage_markers():
 
     for marker in forbidden:
         assert marker not in source
+
+
+MODEL_VERSION = "MODEL_VERSION_SENTINEL"
+USERNAME = "USERNAME_SENTINEL"
+RISK_LEVEL = "RISK_LEVEL_SENTINEL"
+VALIDATION_STATUS = "VALIDATION_STATUS_SENTINEL"
+
+
+def _validation_row(**overrides):
+    """Build one validation result table row for query tests."""
+    row = {
+        "validation_id": "validation-query-1",
+        "source_log_id": 3001,
+        "timestamp": "2024-04-01 10:00:00",
+        "username": "alice",
+        "log_type": "vpn",
+        "request_id": "req-query-1",
+        "baseline_model_version": "ueba_model_v1",
+        "baseline_created_at": "2024-03-31 00:00:00",
+        "baseline_is_reliable": 1,
+        "ueba_score": 42,
+        "ueba_risk_level": "MEDIUM",
+        "ueba_anomaly_reasons": "[]",
+        "validation_status": "VALIDATED",
+        "validated_at": "2024-04-01 10:00:10",
+        "error": None,
+        "created_at": "2024-04-01 10:00:11",
+    }
+    row.update(overrides)
+    return row
+
+
+def _validation_tuple(**overrides):
+    """Build one tuple row following validation result query columns."""
+    row = _validation_row(**overrides)
+    return tuple(row[column] for column in UebaValidationRepository.QUERY_COLUMNS)
+
+
+def capture_query_validation(query_result=None, **kwargs):
+    """Run query_validation_results and return the captured query call plus rows."""
+    client = FakeClient(
+        query_result=[_validation_row()] if query_result is None else query_result,
+        exc=kwargs.pop("exc", None),
+    )
+    repository = UebaValidationRepository(client)
+    rows = repository.query_validation_results(
+        START_TIME,
+        END_TIME,
+        MODEL_VERSION,
+        log_type=LOG_TYPE,
+        limit=kwargs.pop("limit", 25),
+        **kwargs,
+    )
+    assert len(client.queries) == 1
+    return client.queries[0], rows
+
+
+def assert_query_sql_is_controlled(sql: str, parameters: dict, *, optional_filters: bool) -> None:
+    """Check validation-result query SQL safety constraints."""
+    normalized = normalize_sql(sql).lower()
+
+    assert "from log_analysis.ueba_validation_results" in normalized
+    assert not re.search(r"\bselect\s+\*\b", normalized)
+    assert "baseline_model_version = %(model_version)s" in normalized
+    assert "log_type = %(log_type)s" in normalized
+    assert "timestamp >= %(start_time)s" in normalized
+    assert "timestamp < %(end_time)s" in normalized
+    assert "limit 25" in normalized
+    assert "logs_structured" not in normalized
+    assert "ueba_baseline_training_logs" not in normalized
+    assert "user_behavior_baselines" not in normalized
+
+    for keyword in ("insert", "update", "alter", "delete", "truncate"):
+        assert not re.search(rf"\b{keyword}\b", normalized)
+
+    assert START_TIME not in sql
+    assert END_TIME not in sql
+    assert MODEL_VERSION not in sql
+    assert LOG_TYPE not in sql
+    assert RISK_LEVEL not in sql
+    assert VALIDATION_STATUS not in sql
+    assert USERNAME not in sql
+
+    required = {
+        "start_time": START_TIME,
+        "end_time": END_TIME,
+        "model_version": MODEL_VERSION,
+        "log_type": LOG_TYPE,
+    }
+    assert {key: parameters[key] for key in required} == required
+
+    if optional_filters:
+        assert "ueba_risk_level = %(risk_level)s" in normalized
+        assert "validation_status = %(validation_status)s" in normalized
+        assert "username = %(username)s" in normalized
+        assert parameters["risk_level"] == RISK_LEVEL
+        assert parameters["validation_status"] == VALIDATION_STATUS
+        assert parameters["username"] == USERNAME
+    else:
+        assert "ueba_risk_level = %(risk_level)s" not in normalized
+        assert "validation_status = %(validation_status)s" not in normalized
+        assert "username = %(username)s" not in normalized
+        assert "risk_level" not in parameters
+        assert "validation_status" not in parameters
+        assert "username" not in parameters
+
+
+def test_query_validation_results_reads_from_validation_results_table():
+    """query_validation_results should read the fixed result table."""
+    call, rows = capture_query_validation()
+
+    assert_query_sql_is_controlled(call["sql"], call["parameters"], optional_filters=False)
+    assert len(rows) == 1
+    assert rows[0]["validation_id"] == "validation-query-1"
+    assert rows[0]["source_log_id"] == 3001
+    assert rows[0]["baseline_model_version"] == "ueba_model_v1"
+    assert rows[0]["ueba_score"] == 42
+
+
+def test_query_validation_results_appends_optional_filters():
+    """Optional risk, status, and username filters should be parameterized."""
+    call, _rows = capture_query_validation(
+        risk_level=RISK_LEVEL,
+        validation_status=VALIDATION_STATUS,
+        username=USERNAME,
+    )
+
+    assert_query_sql_is_controlled(call["sql"], call["parameters"], optional_filters=True)
+
+
+def test_query_validation_results_returns_empty_list_for_empty_result():
+    """Empty validation result queries should return an empty list."""
+    call, rows = capture_query_validation(query_result=[])
+
+    assert_query_sql_is_controlled(call["sql"], call["parameters"], optional_filters=False)
+    assert rows == []
+
+
+def test_query_validation_results_requires_model_version():
+    """model_version should reject empty text before querying."""
+    repository = UebaValidationRepository(FakeClient())
+
+    with pytest.raises(ValueError, match="model_version must be a non-empty string"):
+        repository.query_validation_results(START_TIME, END_TIME, "", log_type=LOG_TYPE)
+
+    with pytest.raises(ValueError, match="model_version must be a non-empty string"):
+        repository.query_validation_results(START_TIME, END_TIME, "   ", log_type=LOG_TYPE)
+
+
+def test_query_validation_results_requires_log_type():
+    """log_type should reject empty text before querying."""
+    repository = UebaValidationRepository(FakeClient())
+
+    with pytest.raises(ValueError, match="log_type must be a non-empty string"):
+        repository.query_validation_results(START_TIME, END_TIME, MODEL_VERSION, log_type="")
+
+    with pytest.raises(ValueError, match="log_type must be a non-empty string"):
+        repository.query_validation_results(START_TIME, END_TIME, MODEL_VERSION, log_type="   ")
+
+
+def test_query_validation_results_limit_must_be_positive():
+    """limit should reject non-positive values before querying."""
+    repository = UebaValidationRepository(FakeClient())
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repository.query_validation_results(START_TIME, END_TIME, MODEL_VERSION, log_type=LOG_TYPE, limit=0)
+
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        repository.query_validation_results(START_TIME, END_TIME, MODEL_VERSION, log_type=LOG_TYPE, limit=-1)
+
+
+def test_query_validation_results_time_window_must_be_ordered():
+    """start_time must be earlier than end_time before querying."""
+    repository = UebaValidationRepository(FakeClient())
+
+    with pytest.raises(ValueError, match="start_time must be earlier than end_time"):
+        repository.query_validation_results("B", "B", MODEL_VERSION, log_type=LOG_TYPE)
+
+    with pytest.raises(ValueError, match="start_time must be earlier than end_time"):
+        repository.query_validation_results("C", "B", MODEL_VERSION, log_type=LOG_TYPE)
+
+
+def test_query_validation_results_converts_dict_rows():
+    """Plain dict rows should convert to result dictionaries."""
+    _call, rows = capture_query_validation(
+        query_result=[_validation_row(baseline_created_at=None, error="row-error")]
+    )
+
+    assert rows[0]["baseline_created_at"] is None
+    assert rows[0]["error"] == "row-error"
+    assert rows[0]["baseline_is_reliable"] == 1
+
+
+def test_query_validation_results_converts_tuple_rows():
+    """Tuple rows should map by explicit validation result query columns."""
+    _call, rows = capture_query_validation(
+        query_result=[_validation_tuple(username="bob", ueba_risk_level="LOW")]
+    )
+
+    assert rows[0]["username"] == "bob"
+    assert rows[0]["ueba_risk_level"] == "LOW"
+    assert rows[0]["source_log_id"] == 3001
+
+
+def test_query_validation_results_converts_named_result_rows():
+    """ClickHouse named result rows should convert to result dictionaries."""
+    result = FakeNamedQueryResult(
+        rows=[_validation_tuple(validation_status="NO_BASELINE")],
+        column_names=UebaValidationRepository.QUERY_COLUMNS,
+    )
+
+    _call, rows = capture_query_validation(query_result=result)
+
+    assert rows[0]["validation_status"] == "NO_BASELINE"
+    assert rows[0]["validation_id"] == "validation-query-1"
+
+
+def test_query_validation_results_converts_column_result_rows():
+    """result_rows plus column_names rows should convert to result dictionaries."""
+    result = FakeColumnQueryResult(
+        rows=[_validation_tuple(request_id=None)],
+        column_names=UebaValidationRepository.QUERY_COLUMNS,
+    )
+
+    _call, rows = capture_query_validation(query_result=result)
+
+    assert rows[0]["request_id"] is None
+    assert rows[0]["created_at"] == "2024-04-01 10:00:11"
+
+
+def test_query_validation_results_formats_datetime_values_without_timezone_labels():
+    """DateTime result values should be returned as unlabeled strings."""
+    tz_datetime = datetime(2024, 4, 1, 10, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+    _call, rows = capture_query_validation(
+        query_result=[
+            _validation_row(
+                timestamp=tz_datetime,
+                baseline_created_at=datetime(2024, 3, 31, 0, 0, 0),
+                validated_at=datetime(2024, 4, 1, 10, 0, 10),
+                created_at=datetime(2024, 4, 1, 10, 0, 11),
+            )
+        ]
+    )
+
+    assert rows[0]["timestamp"] == "2024-04-01 10:00:00"
+    assert rows[0]["baseline_created_at"] == "2024-03-31 00:00:00"
+    assert rows[0]["validated_at"] == "2024-04-01 10:00:10"
+    assert rows[0]["created_at"] == "2024-04-01 10:00:11"
+
+
+def test_query_validation_results_does_not_swallow_query_exceptions():
+    """Query failures should propagate to the caller."""
+    client = FakeClient(exc=RuntimeError("boom"))
+    repository = UebaValidationRepository(client)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        repository.query_validation_results(START_TIME, END_TIME, MODEL_VERSION, log_type=LOG_TYPE, limit=25)
+
+    assert len(client.queries) == 1
+
+
+def test_query_validation_results_rejects_unsafe_database_identifier():
+    """database should reject injected SQL fragments for result queries too."""
+    with pytest.raises(ValueError, match="invalid ClickHouse identifier"):
+        UebaValidationRepository(FakeClient(), database="log_analysis; DROP TABLE x")
