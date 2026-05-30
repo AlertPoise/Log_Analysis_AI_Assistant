@@ -13,6 +13,7 @@
 | `04-ueba-storage-and-service.md` | 基线表设计、批量写入、Service 对外入口 |
 | `05-ueba-script-and-codex-rules.md` | 脚本入口、后期接口扩展、Codex 开发约束 |
 | `15-ueba-final-acceptance.md` | UEBA v1 阶段 12-14 最终验收结论、运行方式、字段事实和后续边界 |
+| `20-ueba-dashboard-plan.md` | 第 20 阶段：UEBA Dashboard 管理与风险分析页面开发约束 |
 
 
 ## 相关外部配置说明文件
