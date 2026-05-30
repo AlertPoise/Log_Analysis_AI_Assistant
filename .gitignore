@@ -42,6 +42,7 @@ env/
 local_only/
 AGENTS.md
 BEHAVIOR_MODULE_PLAN.md
+CLAUDE.md
 
 # 日志文件
 logs/
