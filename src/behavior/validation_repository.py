@@ -519,6 +519,127 @@ class UebaValidationRepository:
                 result.setdefault(row_id, []).append(detail)
         return result
 
+    def fetch_validation_ranking(
+        self,
+        *,
+        start_time: str,
+        end_time: str,
+        model_version: str,
+        log_type: str = "vpn",
+        validation_run_id: str | None = None,
+        risk_level: str | None = None,
+        validation_status: str | None = None,
+        username: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """在数据库侧按 username 聚合 validation 排行。
+
+        完整窗口聚合后再截断，不在事件层截断。
+        """
+        self._validate_time_window(start_time, end_time)
+        validated_limit = self._validate_limit(limit)
+        safe_limit = min(validated_limit, 1000)
+
+        parameters: dict[str, Any] = {
+            "start_time": start_time,
+            "end_time": end_time,
+            "model_version": model_version,
+            "log_type": log_type,
+        }
+        filters = [
+            "baseline_model_version = %(model_version)s",
+            "log_type = %(log_type)s",
+            "timestamp >= %(start_time)s",
+            "timestamp < %(end_time)s",
+        ]
+        if validation_run_id is not None:
+            filters.append("validation_run_id = %(run_id)s")
+            parameters["run_id"] = validation_run_id
+        if risk_level is not None:
+            filters.append("ueba_risk_level = %(risk_level)s")
+            parameters["risk_level"] = risk_level
+        if validation_status is not None:
+            filters.append("validation_status = %(validation_status)s")
+            parameters["validation_status"] = validation_status
+        if username is not None:
+            filters.append("username = %(username)s")
+            parameters["username"] = username
+
+        sql = f"""
+        SELECT
+            username,
+            max(ueba_score) AS max_score,
+            avg(ueba_score) AS avg_score,
+            count() AS event_count,
+            countIf(ueba_risk_level = 'HIGH') AS high_risk_count,
+            countIf(ueba_risk_level = 'CRITICAL') AS critical_count,
+            max(validated_at) AS latest_validated_at,
+            argMax(validation_run_id, validated_at) AS latest_validation_run_id,
+            multiIf(
+                countIf(ueba_risk_level = 'CRITICAL') > 0, 'CRITICAL',
+                countIf(ueba_risk_level = 'HIGH') > 0, 'HIGH',
+                countIf(ueba_risk_level = 'MEDIUM') > 0, 'MEDIUM',
+                'LOW'
+            ) AS overall_risk
+        FROM {self._qualified_table()}
+        WHERE {" AND ".join(filters)}
+        GROUP BY username
+        ORDER BY max_score DESC, critical_count DESC, high_risk_count DESC, event_count DESC, username ASC
+        LIMIT {safe_limit}
+        """
+        return self._execute_query(sql, parameters)
+
+    def fetch_validation_summary(
+        self,
+        *,
+        start_time: str,
+        end_time: str,
+        model_version: str,
+        log_type: str = "vpn",
+        validation_run_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """在数据库侧聚合 validation 摘要，不依赖事件列表 limit。"""
+        self._validate_time_window(start_time, end_time)
+
+        parameters: dict[str, Any] = {
+            "start_time": start_time,
+            "end_time": end_time,
+            "model_version": model_version,
+            "log_type": log_type,
+        }
+        filters = [
+            "baseline_model_version = %(model_version)s",
+            "log_type = %(log_type)s",
+            "timestamp >= %(start_time)s",
+            "timestamp < %(end_time)s",
+        ]
+        if validation_run_id is not None:
+            filters.append("validation_run_id = %(run_id)s")
+            parameters["run_id"] = validation_run_id
+
+        sql = f"""
+        SELECT
+            count() AS total,
+            countIf(ueba_risk_level = 'LOW') AS risk_low,
+            countIf(ueba_risk_level = 'MEDIUM') AS risk_medium,
+            countIf(ueba_risk_level = 'HIGH') AS risk_high,
+            countIf(ueba_risk_level = 'CRITICAL') AS risk_critical,
+            countIf(validation_status = 'VALIDATED') AS status_validated,
+            countIf(validation_status = 'NO_BASELINE') AS status_no_baseline,
+            countIf(validation_status = 'UNRELIABLE_BASELINE') AS status_unreliable,
+            countIf(validation_status = 'ERROR') AS status_error,
+            max(ueba_score) AS max_score,
+            avgOrDefault(ueba_score) AS avg_score,
+            max(validated_at) AS latest_validated_at,
+            argMax(validation_run_id, validated_at) AS latest_validation_run_id
+        FROM {self._qualified_table()}
+        WHERE {" AND ".join(filters)}
+        """
+        rows = self._execute_query(sql, parameters)
+        if not rows:
+            return None
+        return rows[0]
+
     def _execute_command(self, sql: str) -> None:
         """Execute a ClickHouse command with common client interfaces."""
         if hasattr(self.client, "command"):
@@ -638,7 +759,7 @@ class UebaValidationRepository:
 
     def _validate_limit(self, limit: int) -> int:
         """Validate target-log read limit."""
-        if not isinstance(limit, int) or limit <= 0:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
         return limit
 

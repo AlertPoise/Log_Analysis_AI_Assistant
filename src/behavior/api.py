@@ -20,16 +20,19 @@ from .validation_repository import UebaValidationRepository
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LIMIT = 100
-MAX_LIMIT = 1000
+# 冻结默认值（20-ueba-dashboard-plan §24）
+DEFAULT_RECENT_RISK_LIMIT = 20
+DEFAULT_RANKING_LIMIT = 20
+DEFAULT_USER_DETAIL_LIMIT = 50
+MAX_QUERY_LIMIT = 1000
 
 
-def _clamp_limit(limit: int) -> int:
-    """将 limit 截断到安全范围。"""
-    if not isinstance(limit, int) or limit <= 0:
-        return DEFAULT_LIMIT
-    if limit > MAX_LIMIT:
-        return MAX_LIMIT
+def _clamp_limit(limit: int, default: int = 20) -> int:
+    """安全归一化 limit：bool/非整数/负数/零回退到默认值，超上限截断。"""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return default
+    if limit > MAX_QUERY_LIMIT:
+        return MAX_QUERY_LIMIT
     return limit
 
 
@@ -123,6 +126,8 @@ def _resolve_validation_context(
     2. 根据 run_id 推导 model_version
     3. 双缺省 → 最新 validation batch
     4. 无 validation → 回退到最新 baseline
+
+    本函数捕获自身所有异常，通过返回 dict 中的 _error 键通知调用方。
     """
     resolved = {
         "model_version": model_version,
@@ -130,31 +135,37 @@ def _resolve_validation_context(
         "resolved_from": "explicit",
     }
 
-    repo = _build_repository(client, database)
+    try:
+        repo = _build_repository(client, database)
 
-    # 根据 run_id 推导 model_version
-    if validation_run_id is not None and model_version is None:
-        ctx = repo.get_latest_validation_context(
-            log_type=log_type,
-            validation_run_id=validation_run_id,
-        )
-        if ctx is not None:
-            resolved["model_version"] = ctx["baseline_model_version"]
-            resolved["resolved_from"] = "run_id"
+        if validation_run_id is not None and model_version is None:
+            ctx = repo.get_latest_validation_context(
+                log_type=log_type,
+                validation_run_id=validation_run_id,
+            )
+            if ctx is not None:
+                resolved["model_version"] = ctx["baseline_model_version"]
+                resolved["resolved_from"] = "run_id"
 
-    # 双缺省 → 最新 batch
-    if resolved["model_version"] is None and validation_run_id is None:
-        ctx = repo.get_latest_validation_context(log_type=log_type)
-        if ctx is not None:
-            resolved["model_version"] = ctx["baseline_model_version"]
-            resolved["validation_run_id"] = ctx["validation_run_id"]
-            resolved["resolved_from"] = "latest_validation"
+        if resolved["model_version"] is None and validation_run_id is None:
+            ctx = repo.get_latest_validation_context(log_type=log_type)
+            if ctx is not None:
+                resolved["model_version"] = ctx["baseline_model_version"]
+                resolved["validation_run_id"] = ctx["validation_run_id"]
+                resolved["resolved_from"] = "latest_validation"
 
-    # 无 validation → 回退 baseline
-    if resolved["model_version"] is None:
-        store = _build_baseline_store(client, database)
-        resolved["model_version"] = store.get_latest_model_version()
-        resolved["resolved_from"] = "latest_baseline"
+        if resolved["model_version"] is None:
+            store = _build_baseline_store(client, database)
+            resolved["model_version"] = store.get_latest_model_version()
+            resolved["resolved_from"] = "latest_baseline"
+
+    except Exception as exc:
+        logger.exception("_resolve_validation_context 失败")
+        resolved["_error"] = _fail("UEBA_DASHBOARD_QUERY_ERROR", {
+            "model_version": model_version,
+            "validation_run_id": validation_run_id,
+            "log_type": log_type,
+        }, exc)
 
     return resolved
 
@@ -244,22 +255,22 @@ def get_validation_summary(
     model_version: str | None = None,
     log_type: str = "vpn",
     validation_run_id: str | None = None,
-    limit: int = MAX_LIMIT,
 ) -> dict[str, Any]:
-    """返回指定窗口内 validation 结果的聚合摘要。"""
-    safe_limit = _clamp_limit(limit)
+    """返回指定窗口内 validation 结果的聚合摘要（数据库侧聚合，不截断）。"""
     filters: dict[str, Any] = {
         "start_time": start_time,
         "end_time": end_time,
         "model_version": model_version,
         "log_type": log_type,
         "validation_run_id": validation_run_id,
-        "limit": safe_limit,
     }
 
     resolved = _resolve_validation_context(
         client, database, model_version, validation_run_id, log_type,
     )
+    if resolved.get("_error") is not None:
+        return resolved["_error"]
+
     effective_model = resolved["model_version"]
     effective_run_id = resolved.get("validation_run_id") or validation_run_id
     filters["model_version_resolved"] = effective_model
@@ -276,62 +287,78 @@ def get_validation_summary(
 
     try:
         repo = _build_repository(client, database)
-        rows = repo.query_validation_results(
+        agg = repo.fetch_validation_summary(
             start_time=start_time,
             end_time=end_time,
             model_version=effective_model,
             log_type=log_type,
             validation_run_id=effective_run_id,
-            limit=safe_limit,
         )
-    except Exception as exc:
-        logger.exception("get_validation_summary 查询失败")
-        return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
 
-    if not rows:
-        return {
-            "success": True,
-            "error": None,
-            "filters": filters,
-            "summary": _empty_summary(effective_model),
+        if agg is None:
+            return {
+                "success": True,
+                "error": None,
+                "filters": filters,
+                "summary": _empty_summary(effective_model),
+            }
+
+        total = int(agg.get("total", 0))
+
+        if total == 0:
+            return {
+                "success": True,
+                "error": None,
+                "filters": filters,
+                "summary": _empty_summary(effective_model),
+            }
+
+        risk_low = int(agg.get("risk_low", 0))
+        risk_medium = int(agg.get("risk_medium", 0))
+        risk_high = int(agg.get("risk_high", 0))
+        risk_critical = int(agg.get("risk_critical", 0))
+        risk_unknown = max(0, total - risk_low - risk_medium - risk_high - risk_critical)
+
+        status_validated = int(agg.get("status_validated", 0))
+        status_no_baseline = int(agg.get("status_no_baseline", 0))
+        status_unreliable = int(agg.get("status_unreliable", 0))
+        status_error = int(agg.get("status_error", 0))
+        status_unknown = max(0, total - status_validated - status_no_baseline - status_unreliable - status_error)
+
+        risk_counts = {
+            "LOW": risk_low,
+            "MEDIUM": risk_medium,
+            "HIGH": risk_high,
+            "CRITICAL": risk_critical,
+            "UNKNOWN": risk_unknown,
+        }
+        status_counts = {
+            "VALIDATED": status_validated,
+            "NO_BASELINE": status_no_baseline,
+            "UNRELIABLE_BASELINE": status_unreliable,
+            "ERROR": status_error,
+            "UNKNOWN": status_unknown,
         }
 
-    risk_counts: dict[str, int] = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0, "UNKNOWN": 0}
-    status_counts: dict[str, int] = {"VALIDATED": 0, "NO_BASELINE": 0, "UNRELIABLE_BASELINE": 0, "ERROR": 0, "UNKNOWN": 0}
-    scores: list[int] = []
-    latest_validated_at: str | None = None
-    latest_run_id: str | None = None
+        max_score = int(agg.get("max_score", 0))
+        avg_score = round(float(agg.get("avg_score", 0)), 2)
+        latest_validated_at = agg.get("latest_validated_at")
+        latest_run_id = agg.get("latest_validation_run_id")
 
-    for row in rows:
-        risk = str(row.get("ueba_risk_level") or "").strip().upper()
-        risk_counts[risk if risk in risk_counts else "UNKNOWN"] += 1
+    except Exception as exc:
+        logger.exception("get_validation_summary 查询或映射失败")
+        return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
 
-        status = str(row.get("validation_status") or "").strip().upper()
-        status_counts[status if status in status_counts else "UNKNOWN"] += 1
-
-        score_val = row.get("ueba_score")
-        if isinstance(score_val, (int, float)):
-            scores.append(int(score_val))
-
-        validated = row.get("validated_at")
-        if isinstance(validated, str):
-            if latest_validated_at is None or validated > latest_validated_at:
-                latest_validated_at = validated
-                run_id = row.get("validation_run_id")
-                if isinstance(run_id, str):
-                    latest_run_id = run_id
-
-    avg_score = round(sum(scores) / len(scores), 2) if scores else 0.0
     return {
         "success": True,
         "error": None,
         "filters": filters,
         "summary": {
-            "total": len(rows),
+            "total": total,
             "risk_counts": risk_counts,
             "status_counts": status_counts,
             "no_baseline_count": status_counts.get("NO_BASELINE", 0),
-            "max_score": max(scores) if scores else 0,
+            "max_score": max_score,
             "avg_score": avg_score,
             "latest_validated_at": latest_validated_at,
             "latest_validation_run_id": latest_run_id,
@@ -352,10 +379,14 @@ def get_validation_ranking(
     risk_level: str | None = None,
     validation_status: str | None = None,
     username: str | None = None,
-    limit: int = DEFAULT_LIMIT,
+    limit: int = DEFAULT_RANKING_LIMIT,
 ) -> dict[str, Any]:
-    """返回按 max_score 降序的用户 UEBA validation 排行。"""
-    safe_limit = _clamp_limit(limit)
+    """返回按 max_score 降序的用户 UEBA validation 排行。
+
+    对完整筛选窗口聚合，按用户维度计算 max_score 后排序，
+    最后截断到前 limit 个用户。不在用户聚合前按事件数截断。
+    """
+    safe_limit = _clamp_limit(limit, default=DEFAULT_RANKING_LIMIT)
     filters: dict[str, Any] = {
         "start_time": start_time,
         "end_time": end_time,
@@ -371,6 +402,9 @@ def get_validation_ranking(
     resolved = _resolve_validation_context(
         client, database, model_version, validation_run_id, log_type,
     )
+    if resolved.get("_error") is not None:
+        return resolved["_error"]
+
     effective_model = resolved["model_version"]
     effective_run_id = resolved.get("validation_run_id") or validation_run_id
 
@@ -379,7 +413,7 @@ def get_validation_ranking(
 
     try:
         repo = _build_repository(client, database)
-        rows = repo.query_validation_results(
+        ranking_rows = repo.fetch_validation_ranking(
             start_time=start_time,
             end_time=end_time,
             model_version=effective_model,
@@ -390,76 +424,24 @@ def get_validation_ranking(
             username=username,
             limit=safe_limit,
         )
+
+        ranking: list[dict[str, Any]] = []
+        for row in ranking_rows:
+            ranking.append({
+                "username": str(row.get("username", "")),
+                "max_score": int(row.get("max_score", 0)),
+                "avg_score": round(float(row.get("avg_score", 0)), 2),
+                "event_count": int(row.get("event_count", 0)),
+                "high_risk_count": int(row.get("high_risk_count", 0)),
+                "critical_count": int(row.get("critical_count", 0)),
+                "latest_validated_at": row.get("latest_validated_at"),
+                "latest_validation_run_id": row.get("latest_validation_run_id"),
+                "risk_level": str(row.get("overall_risk", "LOW")),
+            })
     except Exception as exc:
-        logger.exception("get_validation_ranking 查询失败")
+        logger.exception("get_validation_ranking 查询或映射失败")
         return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
 
-    if not rows:
-        return {"success": True, "error": None, "filters": filters, "ranking": []}
-
-    user_agg: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        uname = str(row.get("username") or "").strip()
-        if not uname:
-            continue
-        if uname not in user_agg:
-            user_agg[uname] = {
-                "scores": [],
-                "risk_levels": [],
-                "event_count": 0,
-                "latest_validated_at": "",
-                "latest_validation_run_id": None,
-            }
-        agg = user_agg[uname]
-        score_val = row.get("ueba_score", 0)
-        if isinstance(score_val, (int, float)):
-            agg["scores"].append(int(score_val))
-        risk = str(row.get("ueba_risk_level") or "").strip().upper()
-        agg["risk_levels"].append(risk)
-        agg["event_count"] += 1
-        validated = row.get("validated_at")
-        if isinstance(validated, str) and validated > agg["latest_validated_at"]:
-            agg["latest_validated_at"] = validated
-            run_id = row.get("validation_run_id")
-            if isinstance(run_id, str):
-                agg["latest_validation_run_id"] = run_id
-
-    ranking: list[dict[str, Any]] = []
-    for uname, agg in user_agg.items():
-        scores = agg["scores"]
-        max_score = max(scores) if scores else 0
-        avg_score = round(sum(scores) / len(scores), 2) if scores else 0.0
-        high_count = sum(1 for r in agg["risk_levels"] if r == "HIGH")
-        critical_count = sum(1 for r in agg["risk_levels"] if r == "CRITICAL")
-        overall_risk = "LOW"
-        if critical_count > 0:
-            overall_risk = "CRITICAL"
-        elif high_count > 0:
-            overall_risk = "HIGH"
-        elif any(r == "MEDIUM" for r in agg["risk_levels"]):
-            overall_risk = "MEDIUM"
-
-        ranking.append({
-            "username": uname,
-            "max_score": max_score,
-            "avg_score": avg_score,
-            "event_count": agg["event_count"],
-            "high_risk_count": high_count,
-            "critical_count": critical_count,
-            "latest_validated_at": agg["latest_validated_at"] or None,
-            "latest_validation_run_id": agg["latest_validation_run_id"],
-            "risk_level": overall_risk,
-        })
-
-    ranking.sort(
-        key=lambda r: (
-            -r["max_score"],
-            -r["critical_count"],
-            -r["high_risk_count"],
-            -r["event_count"],
-            r["username"],
-        )
-    )
     return {"success": True, "error": None, "filters": filters, "ranking": ranking}
 
 
@@ -474,10 +456,10 @@ def get_user_validation_detail(
     log_type: str = "vpn",
     validation_run_id: str | None = None,
     source_identity: str | None = None,
-    limit: int = DEFAULT_LIMIT,
+    limit: int = DEFAULT_USER_DETAIL_LIMIT,
 ) -> dict[str, Any]:
     """返回单个用户的 validation 结果事件列表（含增强字段）。"""
-    safe_limit = _clamp_limit(limit)
+    safe_limit = _clamp_limit(limit, default=DEFAULT_USER_DETAIL_LIMIT)
     filters: dict[str, Any] = {
         "start_time": start_time,
         "end_time": end_time,
@@ -492,6 +474,9 @@ def get_user_validation_detail(
     resolved = _resolve_validation_context(
         client, database, model_version, validation_run_id, log_type,
     )
+    if resolved.get("_error") is not None:
+        return resolved["_error"]
+
     effective_model = resolved["model_version"]
     effective_run_id = resolved.get("validation_run_id") or validation_run_id
 
@@ -543,7 +528,11 @@ def get_user_validation_detail(
             "error": row.get("error"),
         })
 
-    events = _enrich_events_with_source_logs(events, repo)
+    try:
+        events = _enrich_events_with_source_logs(events, repo)
+    except Exception as exc:
+        logger.exception("get_user_validation_detail 增强字段回查失败")
+        return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
 
     return {
         "success": True,
@@ -609,7 +598,10 @@ def get_baseline_default_parameters() -> dict[str, Any]:
         config = UebaBaselineConfig()
     except Exception as exc:
         logger.exception("读取默认参数失败")
-        return {"success": False, "error": {"code": "CONFIG_ERROR", "message": f"{type(exc).__name__}: {exc}"}}
+        return {
+            "success": False,
+            "error": {"code": "CONFIG_ERROR", "message": "无法读取 UEBA 准线默认参数"},
+        }
 
     return {
         "success": True,
@@ -700,10 +692,10 @@ def get_recent_risk_events(
     username: str | None = None,
     risk_level: str | None = None,
     validation_status: str | None = None,
-    limit: int = 20,
+    limit: int = DEFAULT_RECENT_RISK_LIMIT,
 ) -> dict[str, Any]:
     """返回近期风险事件（默认排除 NO_BASELINE 和完全正常事件）。"""
-    safe_limit = min(limit, MAX_LIMIT)
+    safe_limit = _clamp_limit(limit, default=DEFAULT_RECENT_RISK_LIMIT)
     filters: dict[str, Any] = {
         "start_time": start_time,
         "end_time": end_time,
@@ -719,6 +711,9 @@ def get_recent_risk_events(
     resolved = _resolve_validation_context(
         client, database, model_version, validation_run_id, log_type,
     )
+    if resolved.get("_error") is not None:
+        return resolved["_error"]
+
     effective_model = resolved["model_version"]
     effective_run_id = resolved.get("validation_run_id") or validation_run_id
 
@@ -761,7 +756,11 @@ def get_recent_risk_events(
             "ueba_anomaly_reasons": reason_parsed,
         })
 
-    events = _enrich_events_with_source_logs(events, repo)
+    try:
+        events = _enrich_events_with_source_logs(events, repo)
+    except Exception as exc:
+        logger.exception("get_recent_risk_events 增强字段回查失败")
+        return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
 
     return {"success": True, "error": None, "filters": filters, "events": events}
 
@@ -778,10 +777,10 @@ def query_validation_events(
     username: str | None = None,
     risk_level: str | None = None,
     validation_status: str | None = None,
-    limit: int = 50,
+    limit: int = DEFAULT_USER_DETAIL_LIMIT,
 ) -> dict[str, Any]:
     """通用 validation 事件查询（不自动排除 NO_BASELINE 或 normal）。"""
-    safe_limit = min(limit, MAX_LIMIT)
+    safe_limit = _clamp_limit(limit, default=DEFAULT_USER_DETAIL_LIMIT)
     filters: dict[str, Any] = {
         "start_time": start_time,
         "end_time": end_time,
@@ -797,6 +796,9 @@ def query_validation_events(
     resolved = _resolve_validation_context(
         client, database, model_version, validation_run_id, log_type,
     )
+    if resolved.get("_error") is not None:
+        return resolved["_error"]
+
     effective_model = resolved["model_version"]
     effective_run_id = resolved.get("validation_run_id") or validation_run_id
 
@@ -839,7 +841,11 @@ def query_validation_events(
             "ueba_anomaly_reasons": reason_parsed,
         })
 
-    events = _enrich_events_with_source_logs(events, repo)
+    try:
+        events = _enrich_events_with_source_logs(events, repo)
+    except Exception as exc:
+        logger.exception("query_validation_events 增强字段回查失败")
+        return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
 
     return {"success": True, "error": None, "filters": filters, "events": events}
 
