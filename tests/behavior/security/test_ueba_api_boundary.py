@@ -24,13 +24,18 @@ def test_import_does_not_import_clickhouse_connect() -> None:
 
 
 def test_all_only_exports_dashboard_readonly_functions() -> None:
-    """__all__ 只暴露 3 个 dashboard 只读函数。"""
+    """__all__ 只暴露 dashboard 只读函数。"""
     module = importlib.import_module("src.behavior.api")
 
     assert set(module.__all__) == {
         "get_validation_summary",
         "get_validation_ranking",
         "get_user_validation_detail",
+        "get_baseline_summary",
+        "get_baseline_default_parameters",
+        "get_baseline_detail",
+        "get_recent_risk_events",
+        "query_validation_events",
     }
 
 

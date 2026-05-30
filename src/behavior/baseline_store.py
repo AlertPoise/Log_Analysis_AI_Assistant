@@ -6,6 +6,7 @@
 
 from collections.abc import Iterable
 from dataclasses import asdict
+from datetime import datetime
 import json
 import re
 from typing import Any
@@ -239,6 +240,100 @@ class BaselineStore:
             except json.JSONDecodeError:
                 pass
         return row
+
+    # ------------------------------------------------------------------
+    # 只读查询方法（20-C）
+    # ------------------------------------------------------------------
+
+    def get_latest_model_version(self) -> str | None:
+        """获取最近创建的 model_version。"""
+        sql = f"""
+        SELECT model_version
+        FROM {self._qualified_table()}
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+        rows = self._execute_query(sql, {})
+        if not rows:
+            return None
+        return str(rows[0].get("model_version", ""))
+
+    def get_baseline_summary(
+        self,
+        model_version: str,
+    ) -> dict[str, Any] | None:
+        """返回指定 model_version 的 baseline 聚合摘要。
+
+        防御多窗口：先确定最新窗口，再只聚合该窗口内的行。
+        """
+        # 找到该 model_version 的最新训练窗口
+        window_sql = f"""
+        SELECT
+            baseline_start_time,
+            baseline_end_time,
+            max(created_at) AS latest_created_at
+        FROM {self._qualified_table()}
+        WHERE model_version = %(model_version)s
+        GROUP BY baseline_start_time, baseline_end_time
+        ORDER BY latest_created_at DESC
+        LIMIT 1
+        """
+        window_rows = self._execute_query(
+            window_sql,
+            {"model_version": model_version},
+        )
+        if not window_rows:
+            return None
+
+        window = window_rows[0]
+        window_start = window["baseline_start_time"]
+        window_end = window["baseline_end_time"]
+
+        summary_sql = f"""
+        SELECT
+            count() AS user_count,
+            sum(sample_count) AS sample_log_count,
+            countIf(is_reliable = 1) AS reliable_user_count,
+            countIf(is_reliable = 0) AS unreliable_user_count,
+            min(b.baseline_start_time) AS summary_baseline_start_time,
+            max(b.baseline_end_time) AS summary_baseline_end_time,
+            max(b.created_at) AS latest_created_at
+        FROM {self._qualified_table()} AS b
+        WHERE b.model_version = %(model_version)s
+            AND b.baseline_start_time = %(selected_window_start)s
+            AND b.baseline_end_time = %(selected_window_end)s
+        """
+        summary_rows = self._execute_query(
+            summary_sql,
+            {
+                "model_version": model_version,
+                "selected_window_start": window_start,
+                "selected_window_end": window_end,
+            },
+        )
+        if not summary_rows:
+            return None
+
+        row = summary_rows[0]
+        return {
+            "model_version": model_version,
+            "baseline_start_time": self._format_dt(row["summary_baseline_start_time"]),
+            "baseline_end_time": self._format_dt(row["summary_baseline_end_time"]),
+            "sample_user_count": int(row["user_count"] or 0),
+            "sample_log_count": int(row["sample_log_count"] or 0),
+            "reliable_user_count": int(row["reliable_user_count"] or 0),
+            "unreliable_user_count": int(row["unreliable_user_count"] or 0),
+            "latest_created_at": self._format_dt(row["latest_created_at"]),
+        }
+
+    @staticmethod
+    def _format_dt(value: Any) -> str | None:
+        """将 DateTime 值格式化为统一字符串。"""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        return str(value)
 
     def _execute_command(self, sql: str) -> None:
         """执行不返回结果的 ClickHouse SQL。"""

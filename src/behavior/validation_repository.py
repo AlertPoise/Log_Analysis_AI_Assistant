@@ -66,6 +66,19 @@ class UebaValidationRepository:
         "validated_at",
         "created_at",
     }
+    SOURCE_LOG_DETAIL_COLUMNS = [
+        "id",
+        "source_ip",
+        "destination_ip",
+        "src_country",
+        "src_city",
+        "vpn_gateway",
+        "auth_method",
+        "client_software",
+        "protocol",
+        "raw_log",
+    ]
+    SOURCE_LOG_MAX_LOOKUP = 1000
     TARGET_LOG_COLUMNS = [
         "id",
         "timestamp",
@@ -307,6 +320,204 @@ class UebaValidationRepository:
         """
         rows = self._execute_query(sql, parameters, fallback_columns=self.QUERY_COLUMNS)
         return [self._validation_row_to_dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # 只读查询方法（20-C）
+    # ------------------------------------------------------------------
+
+    def get_latest_validation_context(
+        self,
+        *,
+        log_type: str = "vpn",
+        validation_run_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """返回最新 validation batch 的上下文信息。"""
+        if validation_run_id is not None:
+            sql = f"""
+            SELECT validation_run_id, baseline_model_version, max(validated_at) AS latest_validated_at
+            FROM {self._qualified_table()}
+            WHERE validation_run_id = %(run_id)s
+            GROUP BY validation_run_id, baseline_model_version
+            ORDER BY latest_validated_at DESC
+            LIMIT 1
+            """
+            rows = self._execute_query(sql, {"run_id": validation_run_id})
+        else:
+            sql = f"""
+            SELECT validation_run_id, baseline_model_version, max(validated_at) AS latest_validated_at
+            FROM {self._qualified_table()}
+            WHERE log_type = %(log_type)s
+            GROUP BY validation_run_id, baseline_model_version
+            ORDER BY latest_validated_at DESC
+            LIMIT 1
+            """
+            rows = self._execute_query(sql, {"log_type": log_type})
+
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "validation_run_id": str(row["validation_run_id"]),
+            "baseline_model_version": str(row["baseline_model_version"]),
+            "latest_validated_at": self._format_unlabeled_datetime(row["latest_validated_at"]),
+        }
+
+    def query_recent_risk_events(
+        self,
+        *,
+        start_time: str,
+        end_time: str,
+        model_version: str,
+        log_type: str = "vpn",
+        validation_run_id: str | None = None,
+        username: str | None = None,
+        risk_level: str | None = None,
+        validation_status: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """查询近期风险事件，默认排除 NO_BASELINE 和完全正常事件。"""
+        self._validate_time_window(start_time, end_time)
+        safe_limit = min(limit, 1000)
+
+        parameters: dict[str, Any] = {
+            "start_time": start_time,
+            "end_time": end_time,
+            "model_version": model_version,
+            "log_type": log_type,
+        }
+        filters = [
+            "baseline_model_version = %(model_version)s",
+            "log_type = %(log_type)s",
+            "timestamp >= %(start_time)s",
+            "timestamp < %(end_time)s",
+            "validation_status != 'NO_BASELINE'",
+            "("
+            "  length(ueba_anomaly_reasons) > 2"
+            "  OR ueba_risk_level IN ('MEDIUM', 'HIGH', 'CRITICAL')"
+            "  OR validation_status != 'VALIDATED'"
+            ")",
+        ]
+        if validation_run_id is not None:
+            filters.append("validation_run_id = %(run_id)s")
+            parameters["run_id"] = validation_run_id
+        if username is not None:
+            filters.append("username = %(username)s")
+            parameters["username"] = username
+        if risk_level is not None:
+            filters.append("ueba_risk_level = %(risk_level)s")
+            parameters["risk_level"] = risk_level
+        if validation_status is not None:
+            filters.append("validation_status = %(validation_status)s")
+            parameters["validation_status"] = validation_status
+
+        column_list = ", ".join(self.QUERY_COLUMNS)
+        sql = f"""
+        SELECT {column_list}
+        FROM {self._qualified_table()}
+        WHERE {" AND ".join(filters)}
+        ORDER BY timestamp DESC, validated_at DESC, username ASC, source_log_id ASC
+        LIMIT {safe_limit}
+        """
+        rows = self._execute_query(sql, parameters, fallback_columns=self.QUERY_COLUMNS)
+        return [self._validation_row_to_dict(row) for row in rows]
+
+    def query_validation_events_ordered(
+        self,
+        *,
+        start_time: str,
+        end_time: str,
+        model_version: str,
+        log_type: str = "vpn",
+        validation_run_id: str | None = None,
+        username: str | None = None,
+        risk_level: str | None = None,
+        validation_status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """通用 validation 事件查询（倒序），不自动排除 NO_BASELINE 或 normal。"""
+        self._validate_time_window(start_time, end_time)
+        safe_limit = min(limit, 1000)
+
+        parameters: dict[str, Any] = {
+            "start_time": start_time,
+            "end_time": end_time,
+            "model_version": model_version,
+            "log_type": log_type,
+        }
+        filters = [
+            "baseline_model_version = %(model_version)s",
+            "log_type = %(log_type)s",
+            "timestamp >= %(start_time)s",
+            "timestamp < %(end_time)s",
+        ]
+        if validation_run_id is not None:
+            filters.append("validation_run_id = %(run_id)s")
+            parameters["run_id"] = validation_run_id
+        if username is not None:
+            filters.append("username = %(username)s")
+            parameters["username"] = username
+        if risk_level is not None:
+            filters.append("ueba_risk_level = %(risk_level)s")
+            parameters["risk_level"] = risk_level
+        if validation_status is not None:
+            filters.append("validation_status = %(validation_status)s")
+            parameters["validation_status"] = validation_status
+
+        column_list = ", ".join(self.QUERY_COLUMNS)
+        sql = f"""
+        SELECT {column_list}
+        FROM {self._qualified_table()}
+        WHERE {" AND ".join(filters)}
+        ORDER BY timestamp DESC, validated_at DESC, username ASC, source_log_id ASC
+        LIMIT {safe_limit}
+        """
+        rows = self._execute_query(sql, parameters, fallback_columns=self.QUERY_COLUMNS)
+        return [self._validation_row_to_dict(row) for row in rows]
+
+    def fetch_source_log_details(
+        self,
+        source_log_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        """批量回查 logs_structured 的增强字段。
+
+        同一 id 匹配多行时全部保留为列表，由 API 层判断唯一性。
+        """
+        positive_ids = [i for i in source_log_ids if isinstance(i, int) and i > 0]
+        unique_ids = list(set(positive_ids))
+
+        if not unique_ids:
+            return {}
+
+        safe_ids = unique_ids[: self.SOURCE_LOG_MAX_LOOKUP]
+        id_list = ", ".join(str(i) for i in safe_ids)
+
+        columns_to_read = [c for c in self.SOURCE_LOG_DETAIL_COLUMNS if c != "raw_log"]
+        column_list = ", ".join(columns_to_read)
+
+        sql = f"""
+        SELECT {column_list},
+            length(ifNull(raw_log, '')) > 0 AS raw_log_available
+        FROM {self._qualified_source_table()}
+        WHERE id IN ({id_list})
+        """
+        rows = self._execute_query(sql, {})
+        result: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            row_id = int(row.get("id", 0))
+            if row_id > 0:
+                detail = {
+                    "source_ip": row.get("source_ip"),
+                    "destination_ip": row.get("destination_ip"),
+                    "src_country": row.get("src_country"),
+                    "src_city": row.get("src_city"),
+                    "vpn_gateway": row.get("vpn_gateway"),
+                    "auth_method": row.get("auth_method"),
+                    "client_software": row.get("client_software"),
+                    "protocol": row.get("protocol"),
+                    "raw_log_available": bool(row.get("raw_log_available")),
+                }
+                result.setdefault(row_id, []).append(detail)
+        return result
 
     def _execute_command(self, sql: str) -> None:
         """Execute a ClickHouse command with common client interfaces."""
