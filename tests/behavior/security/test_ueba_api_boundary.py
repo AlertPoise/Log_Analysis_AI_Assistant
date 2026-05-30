@@ -10,7 +10,7 @@ import importlib
 import sys
 from pathlib import Path
 
-API_PATH = Path(__file__).resolve().parents[2] / "src" / "behavior" / "api.py"
+API_PATH = Path(__file__).resolve().parents[3] / "src" / "behavior" / "api.py"
 
 
 def test_import_does_not_import_clickhouse_connect() -> None:

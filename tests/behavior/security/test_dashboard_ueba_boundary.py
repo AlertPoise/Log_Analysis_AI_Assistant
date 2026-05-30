@@ -9,7 +9,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-DASHBOARD_PATH = Path(__file__).resolve().parents[2] / "src" / "visualization" / "dashboard.py"
+DASHBOARD_PATH = Path(__file__).resolve().parents[3] / "src" / "visualization" / "dashboard.py"
 
 
 def test_behavior_api_available() -> None:
