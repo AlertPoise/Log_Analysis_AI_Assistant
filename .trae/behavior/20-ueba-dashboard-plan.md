@@ -149,29 +149,62 @@ UEBA 准线与风险分析
 
 这些字段必须来自数据库聚合或正式 service 返回结果。不得硬编码。不得使用 fixture 数据代替真实结果。
 
+### baseline 日志类型说明
+
+`user_behavior_baselines` 当前未持久化 `log_type` 字段。
+
+第 20 阶段页面显示：
+
+```text
+适用日志类型：VPN
+```
+
+该值来自 UEBA v1 当前固定业务边界，不是从 baseline 表读取。
+
+不得：
+
+- 将 `log_type` 描述为 baseline 表真实字段
+- 在第 20 阶段修改 schema
+- 为了页面展示向 baseline 表新增列
+
 ---
 
 ## 8. 当前准线选择与聚合规则
 
-页面需要展示"当前准线"，但数据库中可能同时存在多个 `model_version`、多个 `log_type` 和不同创建时间的 baseline。
+### 默认 baseline 选择规则（已冻结）
 
-20-A 必须基于真实表结构和现有数据冻结以下规则：
+默认：
 
-- 默认展示哪个 `model_version`
-- 默认展示哪个 `log_type`
-- 默认版本是否按最新 `created_at` 选择
-- 是否允许用户手动切换 `model_version`
-- 是否允许用户手动切换 `log_type`
-- baseline 批次如何识别
-- 同一批次不同用户存在不同 `created_at` 时，页面如何计算"最近更新时间"
-- 样本用户数如何计算
-- 样本日志数是否为所有用户 `sample_count` 的总和
-- 可靠用户数如何计算
-- 不可靠用户数如何计算
-- 训练开始时间和结束时间如何聚合
-- 无 baseline 时返回何种空结构
+```text
+优先读取最新 validation_run_id
+→ 使用该批次对应的 baseline_model_version
 
-20-C 不得自行猜测这些规则。必须以 20-A 输出并经用户确认的数据契约为准。
+如无 validation 结果
+→ 回退到 user_behavior_baselines 中最近创建的 model_version
+```
+
+当前数据库中每个 `model_version` 仅对应一个训练窗口，可按 `model_version` 唯一聚合。
+
+实现仍必须保留防御性处理：
+
+```text
+如未来同一个 model_version 出现多个训练窗口
+→ 选择最近创建的窗口批次
+→ 不得混合聚合多个窗口
+```
+
+### 聚合规则（已冻结）
+
+- 样本用户数：`uniqExact(username)`
+- 样本日志数：`SUM(sample_count)`
+- 可靠用户数：`countIf(is_reliable = 1)`
+- 不可靠用户数：`countIf(is_reliable = 0)`
+- 训练开始时间：`min(baseline_start_time)`
+- 训练结束时间：`max(baseline_end_time)`
+- 最近更新时间：`max(created_at)`
+- 无 baseline 时返回空结构：`{"success": True, "baseline": None}`
+
+20-C 不得自行猜测这些规则。
 
 ---
 
@@ -181,15 +214,20 @@ UEBA 准线与风险分析
 
 原因：部分构建参数只存在于正式配置对象中，并未随 baseline 持久化。不能把代码默认值伪装成数据库中已经生效的 baseline 参数。
 
-展示字段根据正式配置对象真实字段决定，至少核验：
+展示字段（已冻结）：
 
-```text
-最低样本数
-活跃时段配置
-常用来源 IP TopN
-常用地点 TopN
-可靠性阈值
+- 最低样本数（可靠性判定）
+- 活跃时段阈值
+- 常用来源 IP TopN
+- 常用地点 TopN
+
+当前不存在独立的 `reliability_threshold` 配置。真实可靠性条件：
+
+```python
+is_reliable = sample_count >= min_sample_count
 ```
+
+不得展示虚构的独立"可靠性阈值"。
 
 如果字段名称或语义与现有配置不一致，以当前正式代码为准，不得根据视觉稿编造字段。
 
@@ -222,15 +260,27 @@ UEBA 准线与风险分析
 
 ---
 
-## 11. 近期风险行为的默认筛选规则
+## 11. 近期风险行为的默认筛选规则（已冻结）
 
 "最近风险行为"不得混入完全正常的事件。
 
-默认列表只展示满足以下任一条件的事件：
+默认列表必须先排除 `NO_BASELINE`：
 
-- `ueba_anomaly_reasons` 非空
-- `validation_status != "VALIDATED"`
-- `ueba_risk_level` 属于 `MEDIUM`、`HIGH`、`CRITICAL`
+```text
+validation_status != 'NO_BASELINE'
+AND
+(
+    anomaly reasons 非空
+    OR risk_level IN ('MEDIUM', 'HIGH', 'CRITICAL')
+    OR validation_status != 'VALIDATED'
+)
+```
+
+说明：
+
+- `NO_BASELINE` 表示无法评估，不属风险事件，不得默认混入列表。
+- `NO_BASELINE` 必须使用独立指标卡单独展示数量。
+- 查询区必须允许主动筛选 `NO_BASELINE`。
 
 完全正常的事件（以下全部满足）：
 
@@ -243,7 +293,7 @@ ueba_anomaly_reasons = []
 
 不得默认出现在"最近风险行为"中。但完全正常事件仍允许通过风险行为查询区主动检索。
 
-20-A 必须确认最终筛选规则，20-C 必须按冻结后的规则实现。
+规则已冻结。20-C 必须按冻结后的规则实现。
 
 ---
 
@@ -290,26 +340,32 @@ location = "原始日志不可用"
 
 禁止隐藏事件、伪造字段、修改数据库 schema、向 `ueba_validation_results` 强行增加字段。第 20 阶段不修改数据库表结构。
 
-### source_log_id 回查唯一性约束
+### source_log_id 回查唯一性约束（已核验）
 
-20-A 必须核验：
+20-A 已确认：
 
-- `logs_structured.id` 的真实类型
-- `logs_structured.id` 是否稳定存在
-- `logs_structured.id` 是否在真实数据中具备足够唯一性
-- `source_log_id` 与 `logs_structured.id` 是否可以稳定关联
-- `source_log_id = 0` 的比例和来源
-- 回查失败时的降级行为
+- `logs_structured.id` 类型为 `UInt64`，非 Nullable，无 AUTO_INCREMENT
+- 当前已审计数据中，非零 `id` 没有重复
+- 当前已审计数据中，`source_log_id > 0` 的 JOIN 回查成功率为 100%
+- 数据库 schema 未强制保证 `logs_structured.id` 唯一
+- `source_log_id = 0` 的根因是 fixture 生成器未提供 `id` 字段，不是正式 validation 链路丢失
 
-只有确认关联稳定时，20-C 才允许接入增强字段。
+20-C 必须按尽力回查实现：
 
-如果无法确认稳定关联：
+| 情况 | 行为 |
+|------|------|
+| `source_log_id > 0` 且唯一匹配一条日志 | 合并来源 IP、国家、城市、VPN 网关等增强字段 |
+| `source_log_id = 0` | `source_ip = "--"`，`location = "原始日志不可用"` |
+| 无法匹配 | 降级为占位信息 |
+| 匹配结果不明确 | 降级为占位信息，不得猜测 |
 
-- 保留基础事件字段
-- 增强字段显示占位信息
-- 不修改数据库 schema
-- 不伪造关联结果
-- 不隐藏事件
+禁止：
+
+- 隐藏事件
+- 伪造字段
+- 修改 schema
+- 假设数据库强制保证 `id` 唯一
+- 在第 20 阶段顺手修复 fixture
 
 ---
 
@@ -476,50 +532,107 @@ dashboard.py
 
 ---
 
-## 19. 三个写操作的数据契约
-
-20-A 必须冻结三个写操作的输入、默认值、覆盖行为和错误语义。20-E 不得自行猜测。
+## 19. 三个写操作的数据契约（已冻结）
 
 ### 建立准线
 
-必须明确：
+必需输入：
 
 - `baseline_start_time`
 - `baseline_end_time`
-- `log_type`
 - `model_version`
-- 数据来源：`logs_structured` 或训练表
-- 是否允许覆盖同名 `model_version`
-- 同名版本已存在时如何提示
-- 构建完成后页面刷新哪些区域
 
-### 更新准线
+固定值：
 
-必须明确：
+- `log_type = "vpn"`
+
+行为约束：
+
+- 默认直接基于 `logs_structured` 的指定历史窗口构建 baseline
+- 同名 `model_version` 已存在时必须明确警告
+- 必须独立二次确认
+- 构建完成后只刷新准线信息区
+- 风险概览继续展示当前选中的既有 `validation_run_id`
+- 如需生成新的风险结果，必须由用户单独点击"运行风险分析"
+
+职责划分：
+
+```text
+建立准线
+→ 直接基于 logs_structured 的指定历史窗口构建
+
+更新训练日志并重建 baseline
+→ 更新 training logs
+→ 基于训练表重新构建
+```
+
+不得在第一版页面中为"建立准线"增加数据源切换选项。
+
+### 更新训练日志并重建 baseline
+
+必需输入：
 
 - `training_start_time`
 - `training_end_time`
-- `log_type`
 - `dataset_id`
-- 更新模式：`replace` 或 `append`
-- 默认更新模式
+- `baseline_purpose`
+- `mode`
 - `rebuild_model_version`
-- 更新完成后是否自动重建 baseline
-- 更新失败时是否禁止继续重建
-- 页面如何展示更新结果
+
+自动生成：
+
+- `import_batch_id`
+
+默认值：
+
+- `mode = "replace"`
+
+高级设置：
+
+- 允许用户选择 `append`
+
+行为约束：
+
+- `dataset_id` 由用户选择或填写
+- `import_batch_id` 自动生成
+- `rebuild_model_version` 由用户填写
+- 更新失败时禁止继续重建 baseline
+- 更新成功后基于训练表重建 baseline
+- 必须独立二次确认
+- 完成后刷新准线信息区
+- 不自动运行 validation
+- 不自动替换风险概览结果
 
 ### 运行风险分析
 
-必须明确：
+必需输入：
 
 - `validation_start_time`
 - `validation_end_time`
-- `log_type`
 - `baseline_model_version`
-- `validation_run_id` 生成规则
-- 是否允许用户手动指定 `validation_run_id`
-- 写入结果数量如何展示
-- validation 失败时如何展示 stage 和 error
+
+固定值：
+
+- `log_type = "vpn"`
+
+默认生成：
+
+- `validation_run_id`
+
+高级设置：
+
+- 允许用户覆盖 `validation_run_id`
+
+行为约束：
+
+- `baseline_model_version` 默认使用当前选中的版本
+- 必须独立二次确认
+- validation 成功后自动刷新：
+  - 风险概览
+  - 最近风险行为
+  - 用户排行
+  - 用户详情
+- 最新 `validation_run_id` 自动带入查询条件
 
 ---
 
@@ -645,32 +758,41 @@ Behavior API 不可用
 
 ---
 
-## 24. 默认查询条件
+## 24. 默认查询条件（已冻结）
 
-20-A 必须冻结：
+- 查询时间范围：最近 7 天
+- `validation_run_id`：默认最新批次
+- `model_version`：由最新 `validation_run_id` 推导；无 validation 结果时取最新 baseline
+- `log_type`：`"vpn"`
+- 风险等级筛选：全部
+- 最近风险事件 `limit`：20
+- 用户排行 `limit`：20
+- 用户详情 `limit`：50
+- 查询最大 `limit`：1000
+- 分页：第 20 阶段暂不实现
 
-- 默认查询时间范围
-- 默认 `validation_run_id` 是否选择最新批次
-- 默认 `model_version` 是否选择最新版本
-- 默认 `log_type`
-- 默认风险等级筛选
-- 最近风险事件默认条数
-- 用户排行默认条数
-- 用户详情默认条数
-- 查询最大上限
-- 是否支持分页或只支持 `limit`
-
-20-C 不得自行猜测默认值。
+20-C 必须按以上默认值实现。
 
 ---
 
 ## 25. 分阶段计划
 
-### 20-A：审计与数据契约冻结
+### 20-A：审计与数据契约冻结 — ✅ 已完成
 
-目标：完整审计 dashboard、Behavior API、baseline 表、validation 表和 `logs_structured`。输出页面数据契约。禁止修改正式代码。
+20-A 已完成。已确认：
 
-产出：每个页面区域对应的 API、输入参数、返回字段、空状态、错误状态、增强字段缺失时的降级显示。
+- dashboard 当前结构（五页手动路由、零 CSS、st.bar_chart）
+- baseline 表真实结构（无 `log_type`、无 `reliability_threshold`）
+- validation 表真实结构（`source_log_id` UInt64）
+- `logs_structured` 表结构（`id` UInt64，已审计数据中非零 ID 无重复）
+- `source_log_id=0` 根因（fixture 未设 `id`，非正式链路丢失）
+- 非零 `id` 回查稳定（100% 匹配率）
+- baseline 默认选择规则（已冻结）
+- 默认查询条件（已冻结）
+- 最近风险行为规则（已冻结：先排除 NO_BASELINE）
+- 三个写操作默认契约（已冻结）
+
+**20-A 已具备进入 20-B 的条件。** 未经用户明确授权，不得开始 20-B。
 
 ### 20-B：UEBA 静态页面骨架
 
