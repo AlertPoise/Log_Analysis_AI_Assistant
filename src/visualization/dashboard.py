@@ -73,7 +73,6 @@ from fpdf import FPDF
 # 当前 UEBA 异常排行页面显示接入中占位状态
 try:
     from src.behavior.api import (  # noqa: F401
-        get_validation_summary,
         get_validation_ranking,
         get_user_validation_detail,
     )
@@ -1193,34 +1192,13 @@ def show_ueba_ranking():
     if not BEHAVIOR_API_AVAILABLE:
         st.warning("UEBA Validation API 未就绪。请确认 src/behavior/api.py 已正确部署。")
     else:
-        default_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        default_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-
-        # 只读摘要
-        summary_result = get_validation_summary(
-            start_time=default_start,
-            end_time=default_end,
-            model_version="ueba_baseline_v1",
-            limit=1000,
-        )
-
-        if summary_result.get("success"):
-            summary = summary_result.get("summary", {})
-            risk_counts = summary.get("risk_counts", {})
-        else:
-            summary = {}
-            risk_counts = {}
-
         dist_col1, dist_col2 = st.columns(2)
         with dist_col1:
             st.markdown("#### 风险等级分布")
-            if any(risk_counts.values()):
-                chart_data = pd.DataFrame({
-                    "数量": {k: risk_counts.get(k, 0) for k in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]}
-                })
-                st.bar_chart(chart_data.T)
-            else:
-                _ueba_empty_state("暂无 UEBA validation 结果")
+            _ueba_empty_state(
+                "暂无 UEBA validation 结果"
+                "<br><small>真实风险等级分布将在后续只读接口接入后展示。</small>"
+            )
 
         with dist_col2:
             st.markdown("#### 最近风险行为")
@@ -1230,7 +1208,10 @@ def show_ueba_ranking():
                 use_container_width=True,
                 hide_index=True,
             )
-            _ueba_empty_state("近期风险行为只读接口将在后续阶段接入。")
+            _ueba_empty_state(
+                "暂无近期风险行为数据"
+                "<br><small>近期风险行为只读接口将在后续阶段接入。</small>"
+            )
 
     # ------------------------------------------------------------------
     # 区域 4：风险行为查询
