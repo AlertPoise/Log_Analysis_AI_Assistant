@@ -34,9 +34,9 @@ def test_expected_baseline_totals_and_user_counts(tmp_path):
     assert expected["fixture_id"] == "ueba_fixture_v2_monthly_seed_42"
     assert summary["model_version"] == "ueba_baseline_fixture_v2_monthly"
     assert expected["total_logs"] >= 60000
-    assert expected["total_logs"] == 66130
-    assert 10 <= expected["user_count"] <= 30
-    assert expected["user_count"] == 26
+    assert expected["total_logs"] == config.total_expected_logs
+    assert 10 <= expected["user_count"] <= 35
+    assert expected["user_count"] == config.expected_user_count
     assert len(users) == expected["user_count"]
     assert expected["total_logs"] == sum(user["sample_count"] for user in users.values())
     assert summary["total_logs"] == expected["total_logs"]
@@ -178,19 +178,19 @@ def _all_keys(users, field):
 
 
 def test_fixture_generates_full_may_and_june_windows(tmp_path):
-    """Default v2 fixture should cover May and June with the same 26 users per month."""
-    rows = list(iter_fixture_logs(AcceptanceConfig(output_dir=tmp_path)))
+    """Default v2 fixture should cover May and June with consistent users per month."""
+    config = AcceptanceConfig(output_dir=tmp_path)
+    rows = list(iter_fixture_logs(config))
     may_rows = [row for row in rows if "2026-05-01 00:00:00" <= row["timestamp"] < "2026-06-01 00:00:00"]
     june_rows = [row for row in rows if "2026-06-01 00:00:00" <= row["timestamp"] < "2026-07-01 00:00:00"]
     may_users = {row["username"] for row in may_rows}
     june_users = {row["username"] for row in june_rows}
 
     assert len(rows) >= 60000
-    assert len(rows) == 66130
-    assert len(may_rows) == 33065
-    assert len(june_rows) == 33065
-    assert len(may_users) == 26
-    assert len(june_users) == 26
+    assert len(rows) == config.total_expected_logs
+    assert len(may_rows) == len(june_rows)
+    assert len(may_users) == config.expected_user_count
+    assert len(june_users) == config.expected_user_count
     assert may_users == june_users
     assert max(row["timestamp"] for row in rows) < "2026-07-01 00:00:00"
 

@@ -339,7 +339,74 @@ def _build_user_specs(config: AcceptanceConfig) -> list[UserSpec]:
     specs.extend(_offhour_specs(config))
     specs.extend(_ip_long_tail_specs(config))
     specs.extend(_edge_specs(config))
+    if config.validation_baseline_user_count > 0:
+        specs.extend(_validation_baseline_specs(config))
     return specs
+
+
+def _validation_baseline_specs(config: AcceptanceConfig) -> list[UserSpec]:
+    """为 validation acceptance 提供可靠 baseline 用户。
+
+    - fixture_user_validation_normal : 稳定行为，LOW / VALIDATED
+    - fixture_user_validation_combo  : 稳定行为 + 后续 validation 触发 HIGH
+
+    fixture_user_validation_nobase 不在此生成（无需 baseline）。
+    """
+    sample_count = max(config.logs_per_main_user, config.min_sample_count + 50)
+    return [
+        UserSpec(
+            username="fixture_user_validation_normal",
+            user_type="validation_normal",
+            sample_count=sample_count,
+            hours=(9, 10, 14, 15),
+            source_ips=("10.10.90.1",),
+            source_ip_weights=(100,),
+            countries=("CN",),
+            country_weights=(100,),
+            cities=("Shanghai",),
+            city_weights=(100,),
+            vpn_gateways=("gw-1",),
+            vpn_gateway_weights=(100,),
+            results=("SUCCESS", "FAILED"),
+            result_weights=(98, 2),
+            actions=("LOGIN", "REAUTH"),
+            action_weights=(90, 10),
+            destination_ips=("10.0.1.1", "10.0.1.2", "10.0.1.3"),
+            destination_ip_weights=(40, 35, 25),
+            auth_methods=("password",),
+            auth_method_weights=(100,),
+            client_softwares=("OpenVPN",),
+            client_software_weights=(100,),
+            protocols=("tcp",),
+            protocol_weights=(100,),
+        ),
+        UserSpec(
+            username="fixture_user_validation_combo",
+            user_type="validation_combo",
+            sample_count=sample_count,
+            hours=(9, 10, 14, 15),
+            source_ips=("10.10.91.1", "10.10.91.2"),
+            source_ip_weights=(60, 40),
+            countries=("CN",),
+            country_weights=(100,),
+            cities=("Beijing",),
+            city_weights=(100,),
+            vpn_gateways=("gw-1",),
+            vpn_gateway_weights=(100,),
+            results=("SUCCESS", "FAILED"),
+            result_weights=(96, 4),
+            actions=("LOGIN", "REAUTH"),
+            action_weights=(88, 12),
+            destination_ips=("10.0.2.1", "10.0.2.2"),
+            destination_ip_weights=(60, 40),
+            auth_methods=("password",),
+            auth_method_weights=(100,),
+            client_softwares=("OpenVPN",),
+            client_software_weights=(100,),
+            protocols=("tcp",),
+            protocol_weights=(100,),
+        ),
+    ]
 
 
 def _stable_specs(config: AcceptanceConfig) -> list[UserSpec]:

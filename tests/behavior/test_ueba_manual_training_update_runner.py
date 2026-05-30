@@ -50,7 +50,13 @@ def test_generate_may_data_uses_only_may_window(tmp_path):
         runner.iter_fixture_window_logs(config, start_time=runner.MAY_START, end_time=runner.MAY_END)
     )
 
-    assert len(rows) == 33065
+    # 每窗口 = 10_stable + 4_multi + 3_highfail + 3_offhour + 2_longtail = 22 users * 1500
+    # + 2 validation baseline users * 1500 + edge_sample_counts(5+19+20+21=65)
+    expected_may = (config.stable_user_count + config.multi_location_user_count
+                    + config.high_failure_user_count + config.offhour_user_count
+                    + config.ip_long_tail_user_count + 2) * config.logs_per_main_user
+    expected_may += sum(config.edge_user_sample_counts)
+    assert len(rows) == expected_may
     assert {row["log_type"] for row in rows} == {"vpn"}
     assert {row["username"].startswith("fixture_user_") for row in rows} == {True}
     assert all(runner.MAY_START <= row["timestamp"] < runner.MAY_END for row in rows)
@@ -66,7 +72,11 @@ def test_generate_june_data_uses_only_june_window_and_keeps_variant_diff(tmp_pat
         runner.iter_fixture_window_logs(config, start_time=runner.JUNE_START, end_time=runner.JUNE_END)
     )
 
-    assert len(june_rows) == 33065
+    expected_june = (config.stable_user_count + config.multi_location_user_count
+                     + config.high_failure_user_count + config.offhour_user_count
+                     + config.ip_long_tail_user_count + 2) * config.logs_per_main_user
+    expected_june += sum(config.edge_user_sample_counts)
+    assert len(june_rows) == expected_june
     assert {row["log_type"] for row in june_rows} == {"vpn"}
     assert {row["username"].startswith("fixture_user_") for row in june_rows} == {True}
     assert all(runner.JUNE_START <= row["timestamp"] < runner.JUNE_END for row in june_rows)

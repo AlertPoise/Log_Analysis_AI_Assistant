@@ -91,15 +91,20 @@ def test_baseline_fingerprint_identifies_unchanged_and_changed_snapshots():
 def test_build_report_contains_required_fields(tmp_path):
     """Final report should expose the acceptance fields used for manual review."""
     config = AcceptanceConfig(output_dir=tmp_path)
+    per_month_users = config.expected_user_count
+    per_month_rows = (config.stable_user_count + config.multi_location_user_count
+                      + config.high_failure_user_count + config.offhour_user_count
+                      + config.ip_long_tail_user_count + config.validation_baseline_user_count
+                     ) * config.logs_per_main_user + sum(config.edge_user_sample_counts)
     context = {
         "fixture_stats": {
-            "may": {"rows": 33065, "users": 26},
-            "june": {"rows": 33065, "users": 26},
+            "may": {"rows": per_month_rows, "users": per_month_users},
+            "june": {"rows": per_month_rows, "users": per_month_users},
         },
-        "may_training_stats": {"rows": 33065},
-        "june_training_stats": {"rows": 33065},
-        "baseline_before_june_update": {"row_count": 26, "total_sample_count": 33065},
-        "baseline_after_june_rebuild": {"row_count": 26, "total_sample_count": 33065},
+        "may_training_stats": {"rows": per_month_rows},
+        "june_training_stats": {"rows": per_month_rows},
+        "baseline_before_june_update": {"row_count": per_month_users, "total_sample_count": per_month_rows},
+        "baseline_after_june_rebuild": {"row_count": per_month_users, "total_sample_count": per_month_rows},
         "baseline_unchanged_after_training_update": True,
         "training_table_replaced_by_june": True,
         "baseline_changed_after_rebuild": True,
@@ -113,10 +118,10 @@ def test_build_report_contains_required_fields(tmp_path):
     assert report["dataset_id"] == runner.DATASET_ID
     assert report["test_windows_note"] == runner.TEST_WINDOWS_NOTE
     assert "acceptance test windows only" in report["test_windows_note"]
-    assert report["may_rows"] == 33065
-    assert report["june_rows"] == 33065
-    assert report["may_users"] == 26
-    assert report["june_users"] == 26
+    assert report["may_rows"] == per_month_rows
+    assert report["june_rows"] == per_month_rows
+    assert report["may_users"] == per_month_users
+    assert report["june_users"] == per_month_users
     assert report["baseline_unchanged_after_training_update"] is True
     assert report["training_table_replaced_by_june"] is True
     assert report["baseline_changed_after_rebuild"] is True

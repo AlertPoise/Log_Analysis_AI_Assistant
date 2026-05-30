@@ -70,6 +70,7 @@ def _small_config(tmp_path):
         high_failure_user_count=0,
         offhour_user_count=0,
         ip_long_tail_user_count=0,
+        validation_baseline_user_count=0,
         logs_per_main_user=1,
         clickhouse_batch_size=10,
     )
