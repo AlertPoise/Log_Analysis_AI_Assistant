@@ -85,6 +85,13 @@ try:
 except ImportError:
     BEHAVIOR_API_AVAILABLE = False
 
+# UEBA 管理服务 — 第 20 阶段写操作入口
+try:
+    from src.behavior.ueba_management_service import UebaManagementService
+    UEBA_MANAGEMENT_AVAILABLE = True
+except ImportError:
+    UEBA_MANAGEMENT_AVAILABLE = False
+
 # ClickHouse 客户端辅助函数
 def get_clickhouse_client():
     """获取 ClickHouse 客户端实例"""
@@ -1177,8 +1184,66 @@ def _ueba_event_row(row: dict) -> dict:
     }
 
 
+def _ueba_get_management_service():
+    """惰性创建管理服务实例。"""
+    return UebaManagementService()
+
+
+_UEBA_RESULT_SAFE_DETAIL_LABELS = {
+    "model_version": "准线版本",
+    "rebuild_model_version": "重建版本",
+    "validation_run_id": "Validation Run ID",
+    "total_user_count": "用户总数",
+    "reliable_user_count": "可靠用户数",
+    "unreliable_user_count": "不可靠用户数",
+    "total_log_count": "日志总数",
+    "processed_count": "处理数",
+    "written_count": "写入数",
+    "no_baseline_count": "NO_BASELINE 数",
+    "duration_seconds": "耗时（秒）",
+}
+
+
+def _ueba_render_management_result(result: dict[str, Any]) -> None:
+    """按白名单展示管理操作结果，不暴露完整 details。"""
+    if not isinstance(result, dict):
+        return
+    if result.get("success"):
+        st.success(result.get("message", "操作完成。"))
+        details = result.get("details", {})
+        for key, label in _UEBA_RESULT_SAFE_DETAIL_LABELS.items():
+            if key in details:
+                val = details[key]
+                if isinstance(val, float):
+                    val = round(val, 2)
+                st.caption(f"{label}: {val}")
+    else:
+        err = result.get("error", {}) or {}
+        st.error(err.get("message", result.get("message", "操作失败。")))
+        st.caption(f"阶段: {result.get('stage', '--')}")
+        st.caption(f"错误码: {err.get('code', '--')}")
+
+
+def _ueba_set_flash(message: str) -> None:
+    """保存成功 flash 提示到 session state。"""
+    st.session_state["ueba_management_flash"] = message
+
+
+def _ueba_consume_flash() -> str | None:
+    """消费一次 flash 提示。"""
+    return st.session_state.pop("ueba_management_flash", None)
+
+
+def _ueba_resolve_validation_model_version(input_mv: str) -> str:
+    """解析 validation 的 model_version：输入优先，回退默认。"""
+    mv = str(input_mv).strip() if input_mv else ""
+    if mv:
+        return mv
+    return str(st.session_state.get("ueba_val_default_mv", "")).strip()
+
+
 def show_ueba_ranking():
-    """UEBA 准线与风险分析页面 — 接入真实只读 API。"""
+    """UEBA 准线与风险分析页面 — 接入真实只读 API 与写操作。"""
 
     # ------------------------------------------------------------------
     # 局部 CSS
@@ -1215,22 +1280,192 @@ def show_ueba_ranking():
     # 区域 2：准线管理
     # ------------------------------------------------------------------
     st.divider()
-    with st.container():
-        st.markdown("<h3>📋 准线管理</h3>", unsafe_allow_html=True)
-        btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
-        with btn_col1:
-            st.button("🏗️ 建立准线", disabled=True, width="stretch",
-                      key="ueba_btn_build")
-        with btn_col2:
-            st.button("🔄 更新准线", disabled=True, width="stretch",
-                      key="ueba_btn_update")
-        with btn_col3:
-            st.button("📊 查看默认参数", disabled=True, width="stretch",
-                      key="ueba_btn_params")
-        with btn_col4:
-            st.button("🔍 运行风险分析", disabled=True, width="stretch",
-                      key="ueba_btn_run")
-        _ueba_disabled_note("手动管理操作将在后续阶段接入。")
+
+    flash_msg = _ueba_consume_flash()
+    if flash_msg:
+        st.toast(flash_msg)
+
+    write_disabled = not UEBA_MANAGEMENT_AVAILABLE
+    if write_disabled:
+        st.warning("UEBA 管理服务不可用。写操作暂不可用，只读展示继续正常。")
+    st.markdown("<h3>📋 准线管理</h3>", unsafe_allow_html=True)
+    if "ueba_management_panel" not in st.session_state:
+        st.session_state["ueba_management_panel"] = None
+
+    btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
+    with btn_col1:
+        if st.button("🏗️ 建立准线", disabled=write_disabled, width="stretch", key="ueba_btn_build"):
+            st.session_state["ueba_management_panel"] = "build"
+    with btn_col2:
+        if st.button("🔄 更新准线", disabled=write_disabled, width="stretch", key="ueba_btn_update"):
+            st.session_state["ueba_management_panel"] = "update"
+    with btn_col3:
+        if st.button("📊 查看默认参数", width="stretch", key="ueba_btn_params"):
+            st.session_state["ueba_show_default_params"] = not st.session_state.get(
+                "ueba_show_default_params", False
+            )
+            st.session_state["ueba_management_panel"] = None
+    with btn_col4:
+        if st.button("🔍 运行风险分析", disabled=write_disabled, width="stretch", key="ueba_btn_run"):
+            st.session_state["ueba_management_panel"] = "validation"
+
+    if UEBA_MANAGEMENT_AVAILABLE:
+        panel = st.session_state.get("ueba_management_panel")
+
+        # --- 建立准线表单 ---
+        if panel == "build":
+            with st.form("ueba_form_build"):
+                st.markdown("#### 建立准线")
+                build_col1, build_col2 = st.columns(2)
+                with build_col1:
+                    build_start = st.text_input(
+                        "开始时间",
+                        value=(datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
+                        key="ueba_build_start",
+                    )
+                with build_col2:
+                    build_end = st.text_input(
+                        "结束时间",
+                        value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        key="ueba_build_end",
+                    )
+                build_mv = st.text_input("Model Version", placeholder="例如 ueba_baseline_v2", key="ueba_build_mv")
+                build_confirm = st.checkbox("我确认执行建立准线操作", key="ueba_confirm_build")
+                build_submit = st.form_submit_button("确认建立准线", type="primary")
+                if build_submit:
+                    if not build_confirm:
+                        st.warning("请先勾选二次确认。")
+                    else:
+                        with st.spinner("正在构建准线，请稍候..."):
+                            svc = _ueba_get_management_service()
+                            result = svc.build_baseline(
+                                baseline_start_time=build_start,
+                                baseline_end_time=build_end,
+                                model_version=build_mv,
+                                confirmed=True,
+                            )
+                        _ueba_render_management_result(result)
+                        if result.get("success"):
+                            _ueba_set_flash("准线建立成功。")
+                            st.session_state["ueba_management_panel"] = None
+                            st.rerun()
+            if st.button("取消", key="ueba_cancel_build"):
+                st.session_state["ueba_management_panel"] = None
+                st.rerun()
+
+        # --- 更新准线表单 ---
+        elif panel == "update":
+            with st.form("ueba_form_update"):
+                st.markdown("#### 更新训练日志并重建准线")
+                up_col1, up_col2 = st.columns(2)
+                with up_col1:
+                    up_start = st.text_input(
+                        "训练开始时间",
+                        value=(datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
+                        key="ueba_up_start",
+                    )
+                with up_col2:
+                    up_end = st.text_input(
+                        "训练结束时间",
+                        value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        key="ueba_up_end",
+                    )
+                up_ds = st.text_input("Dataset ID", placeholder="例如 monthly_2026_05", key="ueba_up_ds")
+                up_purpose = st.text_input("Baseline Purpose", placeholder="例如 monthly baseline update", key="ueba_up_purpose")
+                up_col3, up_col4 = st.columns(2)
+                with up_col3:
+                    up_mode = st.selectbox("Mode", ["replace", "append"], key="ueba_up_mode")
+                with up_col4:
+                    up_rebuild = st.text_input("重建 Model Version", placeholder="例如 ueba_baseline_v3", key="ueba_up_rebuild")
+                with st.expander("可选信息"):
+                    up_remark = st.text_input("Remark", key="ueba_up_remark")
+                    up_created_by = st.text_input("Created By", key="ueba_up_created_by")
+                up_confirm = st.checkbox("我确认执行更新准线操作", key="ueba_confirm_update")
+                up_submit = st.form_submit_button("确认更新并重建", type="primary")
+                if up_submit:
+                    if not up_confirm:
+                        st.warning("请先勾选二次确认。")
+                    else:
+                        with st.spinner("正在更新训练日志并重建准线，请稍候..."):
+                            svc = _ueba_get_management_service()
+                            result = svc.update_training_and_rebuild(
+                                training_start_time=up_start,
+                                training_end_time=up_end,
+                                dataset_id=up_ds,
+                                baseline_purpose=up_purpose,
+                                mode=up_mode,
+                                rebuild_model_version=up_rebuild,
+                                confirmed=True,
+                                remark=up_remark or None,
+                                created_by=up_created_by or None,
+                            )
+                        _ueba_render_management_result(result)
+                        if result.get("success"):
+                            _ueba_set_flash("准线更新并重建成功。")
+                            st.session_state["ueba_management_panel"] = None
+                            st.rerun()
+            if st.button("取消", key="ueba_cancel_update"):
+                st.session_state["ueba_management_panel"] = None
+                st.rerun()
+
+        # --- 运行风险分析表单 ---
+        elif panel == "validation":
+            with st.form("ueba_form_validation"):
+                st.markdown("#### 运行风险分析")
+                val_col1, val_col2 = st.columns(2)
+                with val_col1:
+                    val_start = st.text_input(
+                        "Validation 开始时间",
+                        value=(datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),
+                        key="ueba_val_start",
+                    )
+                with val_col2:
+                    val_end = st.text_input(
+                        "Validation 结束时间",
+                        value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        key="ueba_val_end",
+                    )
+                val_mv = st.text_input(
+                    "Baseline Model Version",
+                    value=st.session_state.get("ueba_val_default_mv", ""),
+                    placeholder="留空使用当前最新 baseline",
+                    key="ueba_val_mv",
+                )
+                with st.expander("高级选项"):
+                    val_run_id = st.text_input("Validation Run ID（可选）", placeholder="留空自动生成", key="ueba_val_run_id")
+                val_confirm = st.checkbox("我确认执行风险分析操作", key="ueba_confirm_validation")
+                val_submit = st.form_submit_button("确认运行风险分析", type="primary")
+                if val_submit:
+                    if not val_confirm:
+                        st.warning("请先勾选二次确认。")
+                    else:
+                        effective_val_mv = _ueba_resolve_validation_model_version(
+                            st.session_state.get("ueba_val_mv", "")
+                        )
+                        if not effective_val_mv:
+                            st.warning("请填写 Baseline Model Version，或先确保存在当前 baseline。")
+                        else:
+                            with st.spinner("正在运行风险分析，请稍候..."):
+                                svc = _ueba_get_management_service()
+                                result = svc.run_validation(
+                                    validation_start_time=val_start,
+                                    validation_end_time=val_end,
+                                    baseline_model_version=effective_val_mv,
+                                    validation_run_id=val_run_id or None,
+                                    confirmed=True,
+                                )
+                            _ueba_render_management_result(result)
+                            if result.get("success"):
+                                vr_id = (result.get("details", {}) or {}).get("validation_run_id")
+                                if vr_id:
+                                    st.session_state["ueba_q_run_id"] = vr_id
+                                st.session_state.pop("ueba_query_result", None)
+                                _ueba_set_flash("风险分析执行成功。")
+                                st.session_state["ueba_management_panel"] = None
+                                st.rerun()
+            if st.button("取消", key="ueba_cancel_validation"):
+                st.session_state["ueba_management_panel"] = None
+                st.rerun()
 
     # --- 区域 2.1：当前准线信息 ---
     st.subheader("📈 当前准线信息")
@@ -1270,10 +1505,19 @@ def show_ueba_ranking():
             with bl_col8:
                 st.metric("最近更新时间", str(bl.get("latest_created_at", "--"))[:16] if bl.get("latest_created_at") else "--")
 
-    # --- 区域 2.2：当前运行默认参数 ---
-    st.subheader("⚙️ 当前运行默认参数")
+            # 保存当前 model_version 供 validation 表单默认值
+            bl_mv = bl.get("model_version")
+            if bl_mv:
+                st.session_state["ueba_val_default_mv"] = str(bl_mv)
 
-    if BEHAVIOR_API_AVAILABLE:
+    # --- 区域 2.2：当前运行默认参数 ---
+    show_params = st.session_state.get("ueba_show_default_params", False)
+    if show_params:
+        st.subheader("⚙️ 当前运行默认参数")
+    else:
+        st.caption("💡 点击「📊 查看默认参数」按钮展开当前运行默认参数。")
+
+    if BEHAVIOR_API_AVAILABLE and show_params:
         param_ok, param_data = _ueba_safe_call(get_baseline_default_parameters)
         params = param_data.get("parameters", {}) if param_data else {}
         labels = param_data.get("display_labels", {}) if param_data else {}
@@ -1292,7 +1536,7 @@ def show_ueba_ranking():
                 st.metric(labels.get("top_source_city_limit", "地点 TopN"), params.get("top_source_city_limit", "--"))
         else:
             _ueba_disabled_note("默认参数暂不可用。")
-    else:
+    elif not BEHAVIOR_API_AVAILABLE:
         _ueba_disabled_note("默认参数暂不可用。")
 
     # ------------------------------------------------------------------
