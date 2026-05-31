@@ -91,10 +91,31 @@ def test_management_service_has_write_lock() -> None:
 
 
 def test_management_service_source_has_no_forbidden_imports() -> None:
-    """源码不应导入 subprocess / scripts / tests / local_only。"""
+    """使用 AST 解析，禁止 import subprocess / scripts / tests / local_only。"""
+    import ast
     source = MANAGEMENT_PATH.read_text(encoding="utf-8")
-    for term in ("subprocess", "from scripts", "import scripts", "tests/", "local_only/", ".tox/"):
-        assert term not in source, f"ueba_management_service.py 包含禁止导入: {term}"
+    tree = ast.parse(source)
+
+    forbidden_roots = {"subprocess", "scripts", "tests", "local_only"}
+    violations: list[str] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in forbidden_roots:
+                    violations.append(f"import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is not None:
+                root = node.module.split(".")[0]
+                if root in forbidden_roots:
+                    violations.append(f"from {node.module} import ...")
+
+    assert not violations, f"ueba_management_service.py 包含禁止导入: {violations}"
+
+    # 轻量文本检查
+    assert ".tox/" not in source
+    assert "raw_log" not in source
 
 
 def test_management_service_source_has_dry_run_false() -> None:

@@ -81,6 +81,19 @@ def _safe_short_error(msg: str) -> str:
     return cleaned
 
 
+def _sanitize_result(value: Any) -> Any:
+    """递归脱敏：对 str/dict/list 中的敏感信息做安全处理。"""
+    if isinstance(value, str):
+        return _redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {str(k): _sanitize_result(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_result(i) for i in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_result(i) for i in value)
+    return value
+
+
 def _error_result(
     operation: str,
     stage: str,
@@ -88,13 +101,15 @@ def _error_result(
     message: str,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    safe_details = _sanitize_result(details or {})
+    safe_message = _redact_sensitive_text(message)
     return {
         "success": False,
         "operation": operation,
         "stage": stage,
-        "message": message,
-        "error": {"code": code, "message": message},
-        "details": details or {},
+        "message": safe_message,
+        "error": {"code": code, "message": safe_message},
+        "details": safe_details,
     }
 
 
@@ -103,13 +118,14 @@ def _ok_result(
     message: str,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    safe_details = _sanitize_result(details or {})
     return {
         "success": True,
         "operation": operation,
         "stage": "COMPLETED",
         "message": message,
         "error": None,
-        "details": details or {},
+        "details": safe_details,
     }
 
 
@@ -186,6 +202,7 @@ class UebaManagementService:
             client = self._client_factory()
             client.command("SELECT 1")
             store = BaselineStore(client=client, database=self._database)
+            store.ensure_table()
 
             if store.get_baseline_summary(model_version) is not None:
                 return _error_result(operation, "CHECKING_MODEL_VERSION",
@@ -291,10 +308,12 @@ class UebaManagementService:
             "training_end_time": training_end_time,
             "log_type": "vpn",
         }
+        training_updated = False
         try:
             client = self._client_factory()
             client.command("SELECT 1")
             store = BaselineStore(client=client, database=self._database)
+            store.ensure_table()
             training_store = TrainingLogStore(client=client, database=self._database)
 
             if store.get_baseline_summary(rebuild_model_version) is not None:
@@ -313,7 +332,7 @@ class UebaManagementService:
                     start_time=start_str,
                     end_time=end_str,
                     dataset_id=dataset_id,
-                    purpose=baseline_purpose,
+                    baseline_purpose=baseline_purpose,
                     import_batch_id=import_batch_id,
                     log_type="vpn",
                     is_active=1,
@@ -325,13 +344,14 @@ class UebaManagementService:
                     start_time=start_str,
                     end_time=end_str,
                     dataset_id=dataset_id,
-                    purpose=baseline_purpose,
+                    baseline_purpose=baseline_purpose,
                     import_batch_id=import_batch_id,
                     log_type="vpn",
                     is_active=1,
                     remark=remark,
                     created_by=created_by,
                 )
+            training_updated = True
 
             # 构造通过训练表读取的 repository
             config = UebaBaselineConfig(model_version=rebuild_model_version)
@@ -367,9 +387,11 @@ class UebaManagementService:
 
         except Exception as exc:
             logger.exception("update_training_and_rebuild failed")
-            stage = "FAILED"
-            msg = "训练日志更新失败，未继续重建 baseline。"
-            return _error_result(operation, stage, "TRAINING_UPDATE_FAILED", msg, details=details)
+            if not training_updated:
+                return _error_result(operation, "FAILED", "TRAINING_UPDATE_FAILED",
+                                     "训练日志更新失败，未继续重建 baseline。", details=details)
+            return _error_result(operation, "BUILDING_BASELINE", "REBUILD_BASELINE_FAILED",
+                                 "训练日志更新成功，但重建 baseline 失败，请查看后端日志。", details=details)
         finally:
             _close_client(client)
             _WRITE_LOCK.release()
@@ -428,6 +450,7 @@ class UebaManagementService:
             client = self._client_factory()
             client.command("SELECT 1")
             store = BaselineStore(client=client, database=self._database)
+            store.ensure_table()
 
             if store.get_baseline_summary(baseline_model_version) is None:
                 return _error_result(operation, "CHECKING_MODEL_VERSION",
