@@ -89,6 +89,64 @@ def test_deterministic_log_id_is_stable_namespaced_and_bounded():
         deterministic_log_id(namespace="baseline", seed=True, user_index=1, row_index=0)
 
 
+def test_deterministic_log_id_accepts_legal_slot_maximums():
+    """Largest legal slot coordinates should remain positive UInt64 IDs."""
+    value = deterministic_log_id(
+        namespace="continuous",
+        seed=999_999,
+        month_index=999,
+        user_index=999,
+        row_index=999_999,
+    )
+
+    assert 0 < value <= MAX_UINT64
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("seed", 1_000_000),
+        ("month_index", 1000),
+        ("user_index", 1000),
+        ("row_index", 1_000_000),
+    ),
+)
+def test_deterministic_log_id_rejects_first_value_outside_each_slot(field, value):
+    """Slot bounds should reject the first coordinate that would cross slots."""
+    kwargs = {
+        "namespace": "continuous",
+        "seed": 0,
+        "month_index": 0,
+        "user_index": 0,
+        "row_index": 0,
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ValueError):
+        deterministic_log_id(**kwargs)
+
+
+def test_deterministic_log_id_keeps_adjacent_slots_isolated():
+    """Different legal coordinates in adjacent slots should not collide."""
+    pairs = (
+        (
+            {"seed": 1, "month_index": 0, "user_index": 0, "row_index": 0},
+            {"seed": 0, "month_index": 999, "user_index": 0, "row_index": 0},
+        ),
+        (
+            {"seed": 0, "month_index": 1, "user_index": 0, "row_index": 0},
+            {"seed": 0, "month_index": 0, "user_index": 999, "row_index": 0},
+        ),
+        (
+            {"seed": 0, "month_index": 0, "user_index": 1, "row_index": 0},
+            {"seed": 0, "month_index": 0, "user_index": 0, "row_index": 999_999},
+        ),
+    )
+
+    for left, right in pairs:
+        assert deterministic_log_id(namespace="baseline", **left) != deterministic_log_id(namespace="baseline", **right)
+
+
 def test_baseline_fixture_logs_have_stable_unique_positive_ids(tmp_path):
     """Baseline fixture rows should carry stable positive IDs without changing row counts."""
     config = AcceptanceConfig(output_dir=tmp_path)
