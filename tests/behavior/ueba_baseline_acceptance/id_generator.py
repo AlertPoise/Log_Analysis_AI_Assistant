@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 
 MAX_UINT64 = 2**64 - 1
 _NAMESPACE_CODES = {
@@ -17,6 +20,8 @@ _MAX_SEED = 10**6 - 1
 _MAX_MONTH_INDEX = 10**3 - 1
 _MAX_USER_INDEX = 10**3 - 1
 _MAX_ROW_INDEX = 10**6 - 1
+_CONTINUOUS_NAMESPACE_BASE = _NAMESPACE_CODES["continuous"] * _NAMESPACE_FACTOR
+_CONTINUOUS_NAMESPACE_LIMIT = (_NAMESPACE_CODES["continuous"] + 1) * _NAMESPACE_FACTOR
 
 
 def deterministic_log_id(
@@ -47,6 +52,25 @@ def deterministic_log_id(
     return value
 
 
+class MonotonicIdGenerator:
+    """Thread-safe monotonic positive UInt64 IDs for continuous fixture traffic."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_value = _CONTINUOUS_NAMESPACE_BASE
+
+    def next(self) -> int:
+        """Return a strictly increasing ID inside the continuous namespace."""
+        with self._lock:
+            candidate = _CONTINUOUS_NAMESPACE_BASE + time.time_ns() // 1_000
+            if candidate <= self._last_value:
+                candidate = self._last_value + 1
+            if candidate >= _CONTINUOUS_NAMESPACE_LIMIT or candidate > MAX_UINT64:
+                raise OverflowError("continuous namespace ID capacity exhausted")
+            self._last_value = candidate
+            return candidate
+
+
 def _namespace_code(namespace: str) -> int:
     if namespace not in _NAMESPACE_CODES:
         raise ValueError(f"unsupported namespace: {namespace!r}")
@@ -61,4 +85,4 @@ def _bounded_int(name: str, value: int, max_value: int) -> int:
     return value
 
 
-__all__ = ["MAX_UINT64", "deterministic_log_id"]
+__all__ = ["MAX_UINT64", "MonotonicIdGenerator", "deterministic_log_id"]
