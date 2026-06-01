@@ -150,3 +150,50 @@ def test_training_update_help_does_not_connect():
     # 上一参数化测试已覆盖，此测试确认 update CLI 模块可正常导入
     assert hasattr(update_cli, "main")
     assert hasattr(update_cli, "parse_args")
+
+
+def test_run_validation_main_forwards_model_version_and_time_window(monkeypatch, capsys):
+    """main 必须把 model_version 与 start/end time 原样传给 service。"""
+    fake_client = SimpleNamespace(close=Mock())
+    fake_service = Mock()
+    fake_service.run.return_value = {
+        "success": True,
+        "processed_count": 0,
+        "selected_count": 0,
+        "scored_count": 0,
+        "written_count": 0,
+        "skipped_count": 0,
+        "no_baseline_count": 0,
+        "unreliable_baseline_count": 0,
+        "failed_count": 0,
+        "dry_run": True,
+        "risk_level_counts": {},
+        "validation_status_counts": {},
+        "sample_results": [],
+        "message": "ok",
+        "error": None,
+    }
+    monkeypatch.setattr(validation_cli, "create_clickhouse_client", Mock(return_value=fake_client))
+    monkeypatch.setattr(validation_cli, "build_service", Mock(return_value=fake_service))
+
+    exit_code = validation_cli.main([
+        "--start-time", "2024-01-01 00:00:00",
+        "--end-time", "2024-02-01 00:00:00",
+        "--model-version", "ueba_model_v2",
+        "--log-type", "vpn-login",
+        "--limit", "77",
+        "--sample-size", "3",
+    ])
+
+    assert exit_code == 0
+    capsys.readouterr()
+    fake_service.run.assert_called_once_with(
+        start_time="2024-01-01 00:00:00",
+        end_time="2024-02-01 00:00:00",
+        log_type="vpn-login",
+        model_version="ueba_model_v2",
+        limit=77,
+        dry_run=True,
+        sample_size=3,
+        validation_run_id=None,
+    )

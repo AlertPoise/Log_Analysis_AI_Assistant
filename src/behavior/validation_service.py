@@ -90,6 +90,8 @@ class UebaValidationService:
                 end_time=end_time,
                 log_type=log_type,
                 limit=limit,
+                exclude_already_validated=(not dry_run and model_version is not None),
+                baseline_model_version=model_version,
             )
         except Exception as exc:
             return self._summary(

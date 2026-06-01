@@ -149,6 +149,8 @@ class UebaValidationRepository:
         end_time: str,
         log_type: str = "vpn",
         limit: int = 1000,
+        exclude_already_validated: bool = False,
+        baseline_model_version: str | None = None,
     ) -> list[ValidationTargetLog]:
         """Fetch structured source logs for later UEBA validation."""
         self._validate_time_window(start_time, end_time)
@@ -158,6 +160,28 @@ class UebaValidationRepository:
             "log_type": log_type,
             "limit": self._validate_limit(limit),
         }
+        filters = ["username != ''"]
+        if exclude_already_validated:
+            self._validate_required_text(
+                baseline_model_version or "",
+                "baseline_model_version",
+            )
+            parameters["baseline_model_version"] = baseline_model_version
+            filters.extend(
+                [
+                    "id > 0",
+                    f"""
+                    id NOT IN
+                    (
+                        SELECT source_log_id
+                        FROM {self._qualified_table()}
+                        WHERE baseline_model_version = %(baseline_model_version)s
+                            AND source_log_id > 0
+                    )
+                    """,
+                ]
+            )
+
         sql = f"""
         SELECT
             id,
@@ -184,7 +208,7 @@ class UebaValidationRepository:
         PREWHERE log_type = %(log_type)s
             AND timestamp >= %(start_time)s
             AND timestamp < %(end_time)s
-        WHERE username != ''
+        WHERE {" AND ".join(filters)}
         ORDER BY timestamp ASC, username ASC, id ASC
         LIMIT %(limit)s
         """
@@ -232,6 +256,10 @@ class UebaValidationRepository:
 
         self.ensure_table()
         rows = [self.validation_result_to_row(result) for result in results]
+        rows = self._new_validation_rows(rows)
+        if not rows:
+            return 0
+
         written_count = 0
 
         for start in range(0, len(rows), self.write_batch_size):
@@ -489,7 +517,6 @@ class UebaValidationRepository:
             return {}
 
         safe_ids = unique_ids[: self.SOURCE_LOG_MAX_LOOKUP]
-        id_list = ", ".join(str(i) for i in safe_ids)
 
         columns_to_read = [c for c in self.SOURCE_LOG_DETAIL_COLUMNS if c != "raw_log"]
         column_list = ", ".join(columns_to_read)
@@ -498,9 +525,9 @@ class UebaValidationRepository:
         SELECT {column_list},
             length(ifNull(raw_log, '')) > 0 AS raw_log_available
         FROM {self._qualified_source_table()}
-        WHERE id IN ({id_list})
+        WHERE id IN %(source_log_ids)s
         """
-        rows = self._execute_query(sql, {})
+        rows = self._execute_query(sql, {"source_log_ids": safe_ids})
         result: dict[int, list[dict[str, Any]]] = {}
         for row in rows:
             row_id = int(row.get("id", 0))
@@ -518,6 +545,73 @@ class UebaValidationRepository:
                 }
                 result.setdefault(row_id, []).append(detail)
         return result
+
+    def _new_validation_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """按逻辑唯一键过滤已存在或本批重复的 validation 行。"""
+        existing_keys = self._fetch_existing_validation_keys(rows)
+        seen_keys: set[tuple[str, int]] = set()
+        new_rows: list[dict[str, Any]] = []
+
+        for row in rows:
+            key = self._validation_unique_key(row)
+            if key is None:
+                continue
+            if key in existing_keys or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            new_rows.append(row)
+
+        return new_rows
+
+    def _fetch_existing_validation_keys(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> set[tuple[str, int]]:
+        """批量查询已存在的 baseline_model_version + source_log_id。"""
+        keys = {
+            key
+            for row in rows
+            if (key := self._validation_unique_key(row)) is not None
+        }
+        if not keys:
+            return set()
+
+        parameters = {
+            "baseline_model_versions": sorted({model_version for model_version, _ in keys}),
+            "source_log_ids": sorted({source_log_id for _, source_log_id in keys}),
+        }
+        sql = f"""
+        SELECT
+            baseline_model_version,
+            source_log_id
+        FROM {self._qualified_table()}
+        WHERE baseline_model_version IN %(baseline_model_versions)s
+            AND source_log_id IN %(source_log_ids)s
+        GROUP BY
+            baseline_model_version,
+            source_log_id
+        """
+        existing_rows = self._execute_query(
+            sql,
+            parameters,
+            fallback_columns=["baseline_model_version", "source_log_id"],
+        )
+        return {
+            (str(row["baseline_model_version"]), int(row["source_log_id"]))
+            for row in existing_rows
+            if row.get("baseline_model_version") is not None
+            and int(row.get("source_log_id") or 0) > 0
+        }
+
+    def _validation_unique_key(self, row: dict[str, Any]) -> tuple[str, int] | None:
+        """生成写入幂等使用的逻辑唯一键。"""
+        source_log_id = int(row.get("source_log_id") or 0)
+        if source_log_id <= 0:
+            return None
+        baseline_model_version = str(row.get("baseline_model_version") or "").strip()
+        if not baseline_model_version:
+            return None
+        return baseline_model_version, source_log_id
 
     def fetch_validation_ranking(
         self,
