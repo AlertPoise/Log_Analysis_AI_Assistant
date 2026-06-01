@@ -4,7 +4,7 @@
 数据库侧聚合和旧字段禁止等关键约束。
 
 完整 FakeClient SQL 形状测试保留在 tests/behavior/test_ueba_repository.py，
-等待 P4 迁入 local_only。
+保留在 local_only 中。
 """
 
 from __future__ import annotations

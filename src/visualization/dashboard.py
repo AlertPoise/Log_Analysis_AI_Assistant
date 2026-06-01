@@ -71,7 +71,7 @@ except ImportError as e:
 
 from fpdf import FPDF
 
-# Behavior API — 旧接口已清理，新只读 dashboard 接口将在 19-N 阶段实现
+# Behavior API — 旧接口已清理，新只读 dashboard 接口待后续实现
 # 当前 UEBA 异常排行页面显示接入中占位状态
 try:
     from src.behavior.api import (  # noqa: F401
@@ -842,10 +842,10 @@ def get_anomaly_users(time_range="最近 24 小时", limit=10):
 
 
 def get_ueba_ranking_from_clickhouse(time_range: str = "最近 24 小时", limit: int = 10) -> Dict[str, Any]:
-    """UEBA validation 排行查询 — 19-M0 已移除旧 risk_score 查询。
+    """UEBA validation 排行查询 — 已移除旧 risk_score 查询。
 
     旧实现基于 logs_structured.risk_score（parser 输入侧标签），存在 SQL 注入风险。
-    新实现将在 19-N 阶段接入 ueba_validation_results 的只读查询。
+    待后续接入 ueba_validation_results 的只读查询。
     """
     logger.info(
         "UEBA ranking query called (time_range=%s, limit=%s) — 接入中，返回空结果",
@@ -1033,7 +1033,7 @@ def show_realtime_logs():
 
 
 def show_ueba_ranking():
-    """显示 UEBA 异常用户排行 — 19-M0 已移除旧接口，新接入将在 19-N 阶段实现。
+    """显示 UEBA 异常用户排行 — 已移除旧接口，待后续接入。
 
     旧实现依赖：
       - logs_structured.risk_score（parser 输入侧标签，非 UEBA 评分）
@@ -1048,8 +1048,8 @@ def show_ueba_ranking():
     st.markdown("基于 UEBA validation 结果，识别异常用户并排序")
 
     st.info(
-        "UEBA validation dashboard 接入正在开发中（19-N 阶段）。\n\n"
-        "当前阶段（19-M0）已完成旧 behavior demo 接口清理。\n"
+        "UEBA validation dashboard 接入中。\n\n"
+        "旧 behavior demo 接口已清理。\n"
         "新接入将基于 `ueba_validation_results` 表，只读查询 UEBA 评分结果。\n\n"
         "如需查看 UEBA validation 结果，请先通过以下命令运行 validation 并导出：\n\n"
         "```bash\n"

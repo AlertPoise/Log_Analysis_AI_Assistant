@@ -322,7 +322,7 @@ class UebaValidationRepository:
         return [self._validation_row_to_dict(row) for row in rows]
 
     # ------------------------------------------------------------------
-    # 只读查询方法（20-C）
+    # 只读查询方法
     # ------------------------------------------------------------------
 
     def get_latest_validation_context(

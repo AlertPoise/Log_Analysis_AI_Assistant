@@ -67,12 +67,12 @@ def test_source_has_no_old_behavior_demo_interfaces() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 20-C：默认 limit 常量
+# 默认 limit 常量
 # ---------------------------------------------------------------------------
 
 
 def test_default_limit_constants_match_frozen_plan() -> None:
-    """默认 limit 常量必须匹配 20-ueba-dashboard-plan §24。"""
+    """默认 limit 常量必须与设计约束一致。"""
     module = importlib.import_module("src.behavior.api")
 
     assert module.DEFAULT_RECENT_RISK_LIMIT == 20
@@ -82,7 +82,7 @@ def test_default_limit_constants_match_frozen_plan() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 20-C：_clamp_limit 安全归一化（轻量纯函数测试）
+# _clamp_limit 安全归一化（轻量纯函数测试）
 # ---------------------------------------------------------------------------
 
 
@@ -111,7 +111,7 @@ def test_clamp_limit_edge_cases(limit_input: Any, default: int, expected: int) -
 
 
 # ---------------------------------------------------------------------------
-# 20-C：异常脱敏
+# 异常脱敏
 # ---------------------------------------------------------------------------
 
 
@@ -145,7 +145,7 @@ def test_get_baseline_default_parameters_error_sanitized() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 20-C：源码边界检查（轻量静态断言）
+# 源码边界检查（轻量静态断言）
 # ---------------------------------------------------------------------------
 
 

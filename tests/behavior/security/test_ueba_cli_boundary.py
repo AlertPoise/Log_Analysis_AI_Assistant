@@ -9,7 +9,7 @@
 - training update replace / append 边界
 
 完整参数组合/输出格式测试保留在原 4 个 CLI 测试文件中，
-等待 P4 迁入 local_only。
+保留在 local_only 中。
 """
 
 from __future__ import annotations

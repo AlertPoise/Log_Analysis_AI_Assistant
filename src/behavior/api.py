@@ -5,7 +5,7 @@
 不触发 validation、不写库、不重跑 baseline、
 不修改 logs_structured / user_behavior_baselines / ueba_baseline_training_logs。
 
-20-C 扩展：新增 baseline 摘要、默认参数、近期风险事件、增强字段回查。
+提供 baseline 摘要、默认参数、近期风险事件、增强字段回查。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .validation_repository import UebaValidationRepository
 
 logger = logging.getLogger(__name__)
 
-# 冻结默认值（20-ueba-dashboard-plan §24）
+# 冻结默认值
 DEFAULT_RECENT_RISK_LIMIT = 20
 DEFAULT_RANKING_LIMIT = 20
 DEFAULT_USER_DETAIL_LIMIT = 50
@@ -544,7 +544,7 @@ def get_user_validation_detail(
 
 
 # ---------------------------------------------------------------------------
-# baseline 相关只读查询（20-C 新增）
+# baseline 相关只读查询
 # ---------------------------------------------------------------------------
 
 
@@ -676,7 +676,7 @@ def get_baseline_detail(
 
 
 # ---------------------------------------------------------------------------
-# 近期风险行为与通用查询（20-C 新增）
+# 近期风险行为与通用查询
 # ---------------------------------------------------------------------------
 
 

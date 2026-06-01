@@ -2,7 +2,7 @@
 
 仅保护 database 标识符安全、DDL 表隔离、查询表隔离和参数化查询。
 完整序列化/批量写入测试保留在 tests/behavior/test_ueba_baseline_store.py，
-等待 P4 迁入 local_only。
+保留在 local_only 中。
 """
 
 from __future__ import annotations

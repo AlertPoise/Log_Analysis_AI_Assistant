@@ -36,7 +36,7 @@ def test_dashboard_five_pages_still_exist() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 20-E：UebaManagementService 静态边界
+# UebaManagementService 静态边界
 # ---------------------------------------------------------------------------
 
 MANAGEMENT_PATH = Path(__file__).resolve().parents[3] / "src" / "behavior" / "ueba_management_service.py"

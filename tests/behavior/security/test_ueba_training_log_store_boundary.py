@@ -7,7 +7,7 @@
 本边界测试保护的是参数化筛选，不绑定 PREWHERE 这一实现方式。
 
 完整 DDL 字段/INSERT_COLUMNS 测试保留在 tests/behavior/test_ueba_training_log_store.py，
-等待 P4 迁入 local_only。
+保留在 local_only 中。
 """
 
 from __future__ import annotations
