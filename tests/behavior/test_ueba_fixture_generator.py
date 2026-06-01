@@ -2,11 +2,18 @@
 
 import re
 
+import pytest
+
 from tests.behavior.ueba_baseline_acceptance.config import AcceptanceConfig
 from tests.behavior.ueba_baseline_acceptance.fixture_generator import (
     generate_expected_baselines,
     generate_fixture_outputs,
     iter_fixture_logs,
+)
+from tests.behavior.ueba_baseline_acceptance.id_generator import MAX_UINT64, deterministic_log_id
+from tests.behavior.ueba_baseline_acceptance.validation_fixture_generator import (
+    generate_validation_fixture_logs,
+    validation_fixture_expected_rows,
 )
 
 
@@ -42,6 +49,80 @@ def test_expected_baseline_totals_and_user_counts(tmp_path):
     assert summary["total_logs"] == expected["total_logs"]
     assert summary["user_count"] == expected["user_count"]
     assert summary["user_types"]["ip_long_tail"] == 2
+
+
+def test_deterministic_log_id_is_stable_namespaced_and_bounded():
+    """Acceptance fixture IDs should be deterministic, namespaced, and UInt64-safe."""
+    value = deterministic_log_id(
+        namespace="baseline",
+        seed=42,
+        user_index=1,
+        row_index=0,
+        month_index=0,
+    )
+
+    assert value == deterministic_log_id(
+        namespace="baseline",
+        seed=42,
+        user_index=1,
+        row_index=0,
+        month_index=0,
+    )
+    assert 0 < value <= MAX_UINT64
+    assert value != deterministic_log_id(
+        namespace="validation",
+        seed=42,
+        user_index=1,
+        row_index=0,
+        month_index=0,
+    )
+
+    for kwargs in (
+        {"namespace": "unknown", "seed": 42, "user_index": 1, "row_index": 0},
+        {"namespace": "baseline", "seed": -1, "user_index": 1, "row_index": 0},
+        {"namespace": "baseline", "seed": 42, "user_index": 1, "row_index": -1},
+    ):
+        with pytest.raises(ValueError):
+            deterministic_log_id(**kwargs)
+
+    with pytest.raises(TypeError):
+        deterministic_log_id(namespace="baseline", seed=True, user_index=1, row_index=0)
+
+
+def test_baseline_fixture_logs_have_stable_unique_positive_ids(tmp_path):
+    """Baseline fixture rows should carry stable positive IDs without changing row counts."""
+    config = AcceptanceConfig(output_dir=tmp_path)
+    rows = list(iter_fixture_logs(config))
+    repeat_rows = list(iter_fixture_logs(config))
+    ids = [row["id"] for row in rows]
+
+    assert len(rows) == config.total_expected_logs
+    assert all("id" in row for row in rows)
+    assert all(0 < value <= MAX_UINT64 for value in ids)
+    assert len(set(ids)) == len(ids)
+    assert ids == [row["id"] for row in repeat_rows]
+
+
+def test_validation_fixture_logs_have_positive_ids_and_separate_namespace(tmp_path):
+    """Validation fixture IDs should be positive, unique, and isolated from baseline IDs."""
+    config = AcceptanceConfig(output_dir=tmp_path)
+    rows = generate_validation_fixture_logs(config.fixture_id + "_validation", seed=config.seed)
+    ids = [row["id"] for row in rows]
+    same_coordinate_baseline_ids = {
+        deterministic_log_id(
+            namespace="baseline",
+            seed=config.seed,
+            user_index=(index % 3) + 1,
+            row_index=index,
+        )
+        for index in range(len(rows))
+    }
+
+    assert len(rows) == validation_fixture_expected_rows() == 13
+    assert all("id" in row for row in rows)
+    assert all(0 < value <= MAX_UINT64 for value in ids)
+    assert len(set(ids)) == len(ids)
+    assert set(ids).isdisjoint(same_coordinate_baseline_ids)
 
 
 def test_fixture_covers_enhanced_business_distributions(tmp_path):

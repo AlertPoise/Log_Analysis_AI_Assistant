@@ -107,15 +107,20 @@ def test_insert_logs_uses_explicit_columns_and_batches():
     """insert_logs should batch rows and always pass explicit column names."""
     client = FakeClickHouseClient()
     writer = FixtureClickHouseWriter(client, database="log_analysis", batch_size=2)
-    rows = [_row("u1"), _row("u2"), _row("u3")]
+    rows = [_row("u1", row_id=101), _row("u2", row_id=102), _row("u3", row_id=103)]
 
     inserted = writer.insert_logs(rows)
 
     assert inserted == 3
     assert len(client.inserts) == 2
+    assert INSERT_COLUMNS[0] == "id"
     assert client.inserts[0]["table"] == "logs_structured"
     assert client.inserts[0]["database"] == "log_analysis"
     assert client.inserts[0]["column_names"] == INSERT_COLUMNS
+    first_inserted = client.inserts[0]["rows"][0]
+    assert first_inserted[INSERT_COLUMNS.index("id")] == 101
+    assert first_inserted[INSERT_COLUMNS.index("username")] == rows[0]["username"]
+    assert first_inserted[INSERT_COLUMNS.index("raw_log")] == rows[0]["raw_log"]
     assert len(client.inserts[0]["rows"]) == 2
     assert len(client.inserts[1]["rows"]) == 1
 
@@ -212,8 +217,9 @@ def test_close_error_does_not_cover_original_error(tmp_path):
     assert "close failed" not in result["error"]
 
 
-def _row(username):
+def _row(username, row_id=1):
     return {
+        "id": row_id,
         "timestamp": "2026-05-01 09:00:00",
         "log_type": "vpn",
         "username": username,

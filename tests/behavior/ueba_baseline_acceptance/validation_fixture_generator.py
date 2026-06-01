@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .id_generator import deterministic_log_id
+
 
 def _ts(base: datetime, offset_minutes: int = 0) -> str:
     """生成固定时间戳字符串。"""
@@ -33,9 +35,18 @@ def generate_validation_fixture_logs(
     """
     base = datetime.strptime(validation_start, "%Y-%m-%d %H:%M:%S")
     rows: list[dict[str, Any]] = []
+    user_indexes: dict[str, int] = {}
 
     def _row(username, **overrides):
+        if username not in user_indexes:
+            user_indexes[username] = len(user_indexes) + 1
         r = {
+            "id": deterministic_log_id(
+                namespace="validation",
+                seed=seed,
+                user_index=user_indexes[username],
+                row_index=len(rows),
+            ),
             "timestamp": _ts(base, 0),
             "log_type": "vpn",
             "username": username,

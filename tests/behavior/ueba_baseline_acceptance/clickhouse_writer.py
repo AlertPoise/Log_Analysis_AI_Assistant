@@ -18,6 +18,7 @@ from .report_writer import ensure_output_dir, update_run_state, write_json
 LOGS_TABLE = "logs_structured"
 LOAD_RESULT_FILE = "load_result.json"
 INSERT_COLUMNS = [
+    "id",
     "timestamp",
     "log_type",
     "username",

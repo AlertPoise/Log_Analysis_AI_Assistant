@@ -16,6 +16,7 @@ from typing import Any
 import json
 
 from .config import AcceptanceConfig
+from .id_generator import deterministic_log_id
 from .report_writer import ensure_output_dir, update_run_state, write_json
 
 
@@ -113,6 +114,13 @@ def iter_fixture_logs(config: AcceptanceConfig) -> Iterator[dict[str, Any]]:
                 )
 
                 yield {
+                    "id": deterministic_log_id(
+                        namespace="baseline",
+                        seed=config.seed,
+                        user_index=user_index,
+                        row_index=row_index,
+                        month_index=month_index,
+                    ),
                     "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
                     "log_type": config.log_type,
                     "username": spec.username,
