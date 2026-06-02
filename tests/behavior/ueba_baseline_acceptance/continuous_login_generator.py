@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 import time
 from typing import Any
@@ -236,13 +236,8 @@ def _normal_row(username: str, sequence: int, seed: int) -> dict[str, Any]:
 
 
 def _timestamp_for_mode(sequence: int, *, off_hours: bool) -> str:
-    now = datetime.now()
-    if off_hours:
-        value = now.replace(hour=2, minute=sequence % 60, second=(sequence * 7) % 60, microsecond=0)
-    else:
-        hours = (9, 10, 14, 15)
-        value = now.replace(hour=hours[sequence % len(hours)], minute=sequence % 60, second=(sequence * 7) % 60, microsecond=0)
-    return value.strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    return now.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _validate_rate(logs_per_second: int) -> int:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 import json
+from secrets import compare_digest
 import signal
 import threading
 from typing import Any
@@ -111,7 +113,7 @@ class ContinuousLoginRequestHandler(BaseHTTPRequestHandler):
 
     def _authorize(self) -> bool:
         token = self.server.token
-        if token and self.headers.get(TOKEN_HEADER) != token:
+        if token and not compare_digest(token, self.headers.get(TOKEN_HEADER) or ""):
             self._json_response(401, {"error": "invalid or missing token"})
             return False
         return True
@@ -121,6 +123,9 @@ class ContinuousLoginRequestHandler(BaseHTTPRequestHandler):
         try:
             length = int(raw_length)
         except ValueError:
+            self._json_response(400, {"error": "invalid Content-Length"})
+            return None
+        if length < 0:
             self._json_response(400, {"error": "invalid Content-Length"})
             return None
         if length > MAX_REQUEST_BYTES:
@@ -198,7 +203,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def _is_loopback_host(host: str) -> bool:
     normalized = host.strip().lower()
-    return normalized in {"localhost", "::1"} or normalized.startswith("127.")
+    if normalized == "localhost":
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 if __name__ == "__main__":

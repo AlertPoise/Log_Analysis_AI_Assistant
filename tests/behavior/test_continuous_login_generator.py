@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 import json
 import threading
 import time
@@ -21,6 +22,7 @@ from tests.behavior.ueba_baseline_acceptance.continuous_login_http_server import
     create_http_server,
     validate_bind_security,
 )
+from tests.behavior.ueba_baseline_acceptance import run_continuous_login_manual_acceptance as manual_runner
 from tests.behavior.ueba_baseline_acceptance.id_generator import (
     MAX_UINT64,
     MonotonicIdGenerator,
@@ -215,7 +217,30 @@ def test_combo_anomaly_contains_multiple_anomaly_factors():
     assert row["event_type"] == "LOGIN_FAIL"
     assert row["is_off_hours"] is True
     assert row["is_unusual_ip"] is True
-    assert row["timestamp"][11:13] == "02"
+
+
+def test_all_modes_generate_timestamps_not_in_the_future():
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    generator = ContinuousLoginGenerator(writer_callback=FakeWriter())
+    for mode in ("normal", "off_hours", "combo_anomaly"):
+        rows = generator.generate_batch(5, mode=mode)
+        for row in rows:
+            ts = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M:%S")
+            assert ts <= now_utc + timedelta(seconds=2), f"{mode} timestamp {ts} is in the future vs UTC now {now_utc}"
+
+    normal_row = generator.generate_batch(1, mode="normal")[0]
+    normal_ts = datetime.strptime(normal_row["timestamp"], "%Y-%m-%d %H:%M:%S")
+    assert abs((now_utc - normal_ts).total_seconds()) < 120, "normal timestamp should be close to UTC now"
+
+    off_hours_row = generator.generate_batch(1, mode="off_hours")[0]
+    off_hours_ts = datetime.strptime(off_hours_row["timestamp"], "%Y-%m-%d %H:%M:%S")
+    assert abs((now_utc - off_hours_ts).total_seconds()) < 120, "off_hours timestamp should be close to UTC now, not hours old"
+    assert off_hours_row["is_off_hours"] is True, "off_hours must still signal the scorer"
+
+    combo_row = generator.generate_batch(1, mode="combo_anomaly")[0]
+    combo_ts = datetime.strptime(combo_row["timestamp"], "%Y-%m-%d %H:%M:%S")
+    assert abs((now_utc - combo_ts).total_seconds()) < 120, "combo_anomaly timestamp should be close to UTC now, not hours old"
+    assert combo_row["is_off_hours"] is True, "combo_anomaly must still signal off-hours to the scorer"
 
 
 def test_mixed_mode_uses_reproducible_80_15_5_split():
@@ -287,18 +312,53 @@ def test_http_status_rate_mode_start_stop_and_invalid_requests():
         thread.join(timeout=1.0)
 
 
-def test_http_non_loopback_requires_token_and_token_is_validated():
-    with pytest.raises(ValueError):
-        validate_bind_security("0.0.0.0", None)
-    validate_bind_security("0.0.0.0", "secret")
+def test_http_content_length_bounds_are_validated():
+    fake = FakeHTTPGenerator()
+    server = create_http_server(generator=fake, host="127.0.0.1", port=0)
+    thread = _serve(server)
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        assert _request_error_with_headers(base_url + "/rate", method="POST", data=b"{", headers={"Content-Length": "-1"}) == 400
+        assert _request_error_with_headers(base_url + "/rate", method="POST", data=b"{", headers={"Content-Length": "abc"}) == 400
+        assert _request_error_with_headers(base_url + "/rate", method="POST", data=b"x" * 5000, headers={"Content-Length": "5000"}) == 413
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1.0)
 
+
+@pytest.mark.parametrize(
+    ("host", "expect_loopback"),
+    (
+        ("127.0.0.1", True),
+        ("127.0.0.2", True),
+        ("::1", True),
+        ("localhost", True),
+        ("0.0.0.0", False),
+        ("192.168.1.10", False),
+        ("127.example.com", False),
+        ("", False),
+    ),
+)
+def test_loopback_detection_rejects_non_loopback_without_token(host, expect_loopback):
+    if expect_loopback:
+        validate_bind_security(host, None)
+    else:
+        with pytest.raises(ValueError):
+            validate_bind_security(host, None)
+
+
+def test_http_token_missing_wrong_and_correct():
     fake = FakeHTTPGenerator()
     server = create_http_server(generator=fake, host="127.0.0.1", port=0, token="secret")
     thread = _serve(server)
     base_url = f"http://127.0.0.1:{server.server_port}"
     try:
         assert _request_error(base_url + "/status") == 401
+        assert _request_error(base_url + "/status", headers={TOKEN_HEADER: "wrong"}) == 401
         assert _request_json(base_url + "/status", headers={TOKEN_HEADER: "secret"})["running"] is True
+        assert _request_error(base_url + "/rate", method="POST", payload={"logs_per_second": 10}) == 401
+        assert _request_json(base_url + "/rate", method="POST", payload={"logs_per_second": 10}, headers={TOKEN_HEADER: "secret"})["logs_per_second"] == 10
     finally:
         server.shutdown()
         server.server_close()
@@ -332,6 +392,15 @@ def _request_error(url, *, method="GET", payload=None, data=None, headers=None) 
     return exc_info.value.code
 
 
+def _request_error_with_headers(url, *, method="GET", data=None, headers=None) -> int:
+    request_headers = dict(headers or {})
+    request = Request(url, data=data, method=method, headers=request_headers)
+    with pytest.raises(HTTPError) as exc_info:
+        with urlopen(request, timeout=1.0) as response:
+            pass
+    return exc_info.value.code
+
+
 def _wait_until(predicate, *, timeout=1.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -348,3 +417,261 @@ def _stable_call_count(writer: FakeWriter, expected: int) -> bool:
             return False
         time.sleep(0.005)
     return writer.call_count() == expected
+
+
+class FakeQueryResult:
+    def __init__(self, rows):
+        self._rows = rows
+        self.column_names = list(rows[0].keys()) if rows else ["cnt"]
+        self.result_rows = [tuple(row.get(column) for column in self.column_names) for row in rows]
+
+    def named_results(self):
+        return list(self._rows)
+
+
+class FakeManualClient:
+    def __init__(self, *, continuous_count=0, baseline_count=1, latest_rows=None):
+        self.continuous_count = continuous_count
+        self.baseline_count = baseline_count
+        self.latest_rows = latest_rows or []
+        self.commands = []
+        self.queries = []
+        self.closed = False
+
+    def query(self, sql, parameters=None):
+        self.queries.append((sql, parameters or {}))
+        normalized = " ".join(sql.lower().split())
+        if "from log_analysis.logs_structured" in normalized and "order by id asc" in normalized:
+            return FakeQueryResult(self.latest_rows)
+        if "from log_analysis.logs_structured" in normalized and "uniqexact(id)" in normalized:
+            return FakeQueryResult([
+                {
+                    "rows": self.continuous_count,
+                    "invalid_ids": 0,
+                    "below_namespace": 0,
+                    "above_namespace": 0,
+                    "future_rows": 0,
+                    "unique_ids": self.continuous_count,
+                }
+            ])
+        if "from log_analysis.logs_structured" in normalized:
+            return FakeQueryResult([{"cnt": self.continuous_count}])
+        if "from log_analysis.user_behavior_baselines" in normalized and "where username" in normalized:
+            return FakeQueryResult([{"cnt": self.baseline_count}])
+        if "from log_analysis.user_behavior_baselines" in normalized:
+            return FakeQueryResult([{"cnt": 7}])
+        if "from log_analysis.ueba_baseline_training_logs" in normalized:
+            return FakeQueryResult([{"cnt": 11}])
+        if "from log_analysis.ueba_validation_results" in normalized:
+            return FakeQueryResult([{"cnt": 13}])
+        return FakeQueryResult([{"cnt": 0}])
+
+    def command(self, sql, parameters=None):
+        self.commands.append((sql, parameters or {}))
+        if "DELETE" in sql:
+            self.continuous_count = 0
+
+    def close(self):
+        self.closed = True
+
+
+class FakeManualProcess:
+    def __init__(self, *_args, **_kwargs):
+        self.terminated = False
+        self.killed = False
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _manual_args(*extra):
+    return [
+        "--confirm-write",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18765",
+        "--rate-seconds",
+        "1",
+        "--report-path",
+        ".tox/manual_test/continuous_runner_report.json",
+        "--server-log-path",
+        ".tox/manual_test/continuous_runner_server.log",
+        *extra,
+    ]
+
+
+def test_manual_runner_help_does_not_connect_clickhouse(capsys):
+    called = False
+
+    def fail_client(_config):
+        nonlocal called
+        called = True
+        raise AssertionError("client should not be created for --help")
+
+    with pytest.raises(SystemExit) as exc_info:
+        manual_runner.main(["--help"], client_factory=fail_client)
+
+    assert exc_info.value.code == 0
+    assert called is False
+    assert "--confirm-write" in capsys.readouterr().out
+
+
+def test_manual_runner_refuses_without_confirm_write():
+    called = False
+
+    def fail_client(_config):
+        nonlocal called
+        called = True
+        return FakeManualClient()
+
+    result = manual_runner.main(
+        ["--report-path", ".tox/manual_test/no_confirm_report.json"],
+        client_factory=fail_client,
+        process_factory=FakeManualProcess,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result == 1
+    assert called is False
+
+
+def test_manual_runner_cleanup_flags_require_confirm_cleanup():
+    called = False
+
+    def fail_client(_config):
+        nonlocal called
+        called = True
+        return FakeManualClient()
+
+    result = manual_runner.main(
+        _manual_args("--cleanup-before"),
+        client_factory=fail_client,
+        process_factory=FakeManualProcess,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result == 1
+    assert called is False
+
+
+def test_manual_runner_json_body_regression_has_no_extra_brace():
+    body = manual_runner.encode_json_body({"logs_per_second": 50})
+
+    assert json.loads(body.decode("utf-8")) == {"logs_per_second": 50}
+    assert not body.endswith(b"}}")
+    assert b'{"logs_per_second":50}}' not in body.replace(b" ", b"")
+
+
+def test_manual_runner_rejects_existing_old_logs_without_cleanup_before():
+    client = FakeManualClient(continuous_count=3, baseline_count=1)
+    process = FakeManualProcess()
+
+    result = manual_runner.main(
+        _manual_args(),
+        client_factory=lambda _config: client,
+        process_factory=lambda *args, **kwargs: process,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result == 1
+    assert process.terminated is False
+    assert any("existing continuous rows" in error for error in _read_manual_report()["errors"])
+    assert client.closed is True
+
+
+def test_manual_runner_failure_stops_server_and_keeps_data_by_default():
+    client = FakeManualClient(continuous_count=0, baseline_count=1)
+    process = FakeManualProcess()
+
+    def fake_http(_host, _port, method, path, payload=None):
+        if method == "GET" and path == "/status":
+            return manual_runner.HttpResponse(200, {"running": True})
+        return manual_runner.HttpResponse(200, {})
+
+    result = manual_runner.main(
+        _manual_args(),
+        client_factory=lambda _config: client,
+        process_factory=lambda *args, **kwargs: process,
+        http_request=fake_http,
+        sleep=lambda _seconds: None,
+    )
+
+    report = _read_manual_report()
+    assert result == 1
+    assert process.terminated is True
+    assert report["server_stopped"] is True
+    assert report["cleanup_performed"] is False
+    assert not client.commands
+
+
+def test_manual_runner_cleanup_sql_is_limited_to_raw_log_marker():
+    client = FakeManualClient(continuous_count=5)
+
+    manual_runner.cleanup_continuous_logs(client, "log_analysis")
+
+    sql, parameters = client.commands[0]
+    assert "ALTER TABLE log_analysis.logs_structured" in sql
+    assert "DELETE WHERE position(raw_log, 'ueba_continuous_fixture') > 0" in " ".join(sql.split())
+    assert "username LIKE" not in sql
+    assert parameters == {}
+
+
+def test_manual_runner_report_contains_required_fields():
+    report = {field: None for field in manual_runner.REQUIRED_REPORT_FIELDS}
+    report["success"] = False
+    report["errors"] = ["sample"]
+    path = manual_runner.PROJECT_ROOT / ".tox/manual_test/required_fields_report.json"
+
+    manual_runner.write_report(path, report)
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+
+    assert set(manual_runner.REQUIRED_REPORT_FIELDS).issubset(loaded)
+
+
+def test_manual_runner_report_serializes_top_level_and_nested_datetimes():
+    from datetime import date, datetime
+
+    report = {
+        "success": True,
+        "started_at": datetime(2026, 6, 1, 16, 48, 0),
+        "quality": {"rows": 5, "latest_timestamp": datetime(2026, 6, 1, 16, 49, 30)},
+        "mode_checks": {
+            "normal": {
+                "ok": True,
+                "sample": {"timestamp": datetime(2026, 6, 1, 16, 49, 0), "src_city": "北京"},
+            }
+        },
+        "a_date": date(2026, 6, 1),
+    }
+    path = manual_runner.PROJECT_ROOT / ".tox/manual_test/datetime_report.json"
+
+    manual_runner.write_report(path, report)
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded["started_at"] == "2026-06-01 16:48:00"
+    assert loaded["quality"]["latest_timestamp"] == "2026-06-01 16:49:30"
+    assert loaded["mode_checks"]["normal"]["sample"]["timestamp"] == "2026-06-01 16:49:00"
+    assert loaded["a_date"] == "2026-06-01"
+
+
+def test_manual_runner_json_default_rejects_unknown_types():
+    with pytest.raises(TypeError):
+        manual_runner._json_default(object())
+
+
+def _read_manual_report():
+    path = manual_runner.PROJECT_ROOT / ".tox/manual_test/continuous_runner_report.json"
+    return json.loads(path.read_text(encoding="utf-8"))
