@@ -89,6 +89,269 @@ YYYY-MM-DD HH:MM:SS
 0. 退出
 ```
 
+## Shell 全流程演示入口
+
+统一 Shell 演示入口：
+
+```bash
+tests/behavior/ueba_baseline_acceptance/run_ueba_demo.sh
+```
+
+该脚本只用于测试与演示编排，不重写 baseline、Validation、持续流量生成器或 ClickHouse 写入逻辑。基础准线流程复用 `tests.behavior.ueba_baseline_acceptance.runner`，训练表更新复用 `tests.behavior.ueba_baseline_acceptance.manual_training_update_runner`，持续流量联动验收复用 `tests.behavior.ueba_baseline_acceptance.run_continuous_validation_acceptance`，手动评分调用正式 CLI `scripts/run_ueba_validation.py`。
+
+Shell 根菜单：
+
+```text
+UEBA 全流程演示工具
+
+1. 环境检查
+2. 基础准线流程
+3. 训练表更新流程（暂未开放）
+4. 持续流量与 Validation
+5. 查看整体状态
+6. 一键执行基础准线完整流程（已禁用）
+7. 一键执行持续流量联动验收（暂未开放）
+8. 退出
+```
+
+新增 Shell 工具自己的状态、日志、PID 与报告统一写入：
+
+```text
+.tox/manual/ueba_demo_menu/
+```
+
+其中至少包括：
+
+```text
+baseline_acceptance/                           基础准线 runner 自定义输出目录
+training_update/                              训练表更新 runner 自定义输出目录
+continuous_login_http_server.pid              持续流量 HTTP Server PID
+continuous_login_http_server.log              持续流量 HTTP Server 日志
+current_window_start                          当前持续流量窗口起点
+current_window_end                            当前持续流量窗口终点
+current_window_state                          当前持续流量窗口状态（IDLE / ACTIVE / CLOSED）
+last_validation_result.json                   手动执行正式 Validation CLI 的最近一次结果
+validation_history.tsv                        本轮 menu_% run_id 历史
+continuous_validation_acceptance_report.json  一键持续流量联动验收报告
+```
+
+时间字段统一使用无标注字符串：
+
+```text
+YYYY-MM-DD HH:MM:SS
+```
+
+禁止使用 `Z`、`+00:00` 和 timezone-aware datetime。
+
+持续流量子菜单支持：
+
+```text
+1. 启动持续流量 HTTP Server
+2. 停止持续流量 HTTP Server
+3. 暂停持续流量
+4. 恢复持续流量
+5. 调速到 20/秒
+6. 调速到 50/秒
+7. 自定义调速
+8. 切换持续流量模式
+9. 使用正式 Validation CLI 评分当前持续流量
+10. 查看持续流量状态、日志与结果
+11. 精确清理本轮持续流量验收数据
+12. 一键持续流量联动验收（暂未开放）
+13. 返回上一级
+```
+
+持续流量窗口规则：
+
+```text
+1. Server 默认以 0 条/秒启动，并在 ready 后立即暂停。
+2. 恢复流量前先记录 window_start，再 POST /start。
+3. 暂停后先确认 paused=true，等待固定缓冲，再记录 window_end。
+4. 正式评分只接受 CLOSED 窗口。
+```
+
+真实 Validation 写库前会对同一个 ClickHouse 实例执行窗口隔离检查：
+
+```text
+total_count   = 指定窗口内全部 vpn 日志
+fixture_count = 指定窗口内 username = fixture_user_stable_0001 且 raw_log 带 ueba_continuous_fixture marker 的日志
+```
+
+只有 `fixture_count > 0` 且 `total_count == fixture_count` 时才允许继续；窗口被污染时会拒绝写库。`DRYRUN` 只用于查看，不会附带 `--write`。
+
+精确 cleanup 只删除当前 CLOSED 窗口内的精确目标数据：
+
+```text
+logs_structured:
+username = fixture_user_stable_0001
+position(raw_log, 'ueba_continuous_fixture') > 0
+
+ueba_validation_results:
+username = fixture_user_stable_0001
+startsWith(validation_run_id, 'menu_')
+baseline_model_version = ueba_baseline_fixture_v2_monthly
+log_type = vpn
+```
+
+不会删除 baseline、训练表或其他非菜单数据。
+
+ClickHouse 连接参数可通过环境变量覆盖。脚本统一读取并显式透传：
+
+```text
+CLICKHOUSE_HOST
+CLICKHOUSE_PORT
+CLICKHOUSE_USER / CLICKHOUSE_USERNAME
+CLICKHOUSE_PASSWORD
+CLICKHOUSE_DATABASE
+```
+
+EOF 安全规则：主菜单或子菜单遇到 EOF 会安全退出或返回上一级；不会自动停止 Server，不会自动清理数据。
+
+## 安全门禁规则
+
+### 查询失败与非数字响应
+
+所有 ClickHouse 标量查询（`clickhouse_scalar`）使用 `curl --fail` 确保 HTTP 非 2xx 返回非零退出码。查询失败或返回非数字文本时，隔离检查和 cleanup 会硬拒绝继续：
+
+- `total_count` / `fixture_count` 非数字 → 拒绝 Validation CLI 调用
+- cleanup 前/后计数查询失败或非数字 → 拒绝执行 DELETE
+- DELETE 执行失败 → cleanup 中止，不删除窗口状态文件
+- 只有两类数据（validation_results、logs_structured）均确认清理成功（计数归零），才会删除窗口状态文件
+
+### 空窗口与污染窗口
+
+Validation 写库前窗口隔离检查强制：
+- `fixture_count > 0`（空窗口拒绝）
+- `total_count == fixture_count`（污染窗口拒绝）
+- 两种失败使用不同的错误信息
+
+### 一键流程 YES 确认
+
+所有真实写库操作执行前必须输入大写 `YES`（仅接受大写）：
+
+**单项写库**：
+- 基础准线子菜单 2：生成模拟数据并写入 ClickHouse logs_structured
+- 基础准线子菜单 3：执行正式 baseline 构建并写入 user_behavior_baselines
+
+**手动 Validation 评分**：
+- 输入 `YES` 附加 `--write` 执行正式写库
+- 输入 `DRYRUN` 仅查看不写库
+
+**根菜单 6 (已禁用)**：基础准线一键流程不再可用 — 交互 Runner pipe 注入已废弃，共享表现场未恢复。请使用基础准线子菜单中的分步入口。
+
+输入不是 `YES` 或遇到 EOF → 取消操作，不写库，不 cleanup。
+
+### 启动失败回滚
+
+Server 启动过程中任一步骤失败（ready 超时、立即暂停失败、状态读取失败、paused 未确认），会自动回滚刚启动的进程：
+- 向本次启动的 PID 发送 SIGINT
+- 有限次数等待退出（最多 20 次 × 0.25s）
+- 进程退出后删除 PID 文件
+- 退出失败时保留 PID 文件供人工排查，不升级为强杀
+
+### PID 安全
+
+所有 `kill` 操作前强制校验 PID 为正整数（`^[1-9][0-9]*$`）：
+- PID 文件为空、非数字、0、负数时拒绝 kill
+- 历史 PID 文件无法验证归属时只报警，不自动 kill
+- 端口被未知进程占用时只报警，不 kill
+- 仅当前菜单会话内启动的 PID 可以安全管理
+
+### HTTP 错误码
+
+所有 HTTP 调用使用 `curl --fail` 语义：
+- HTTP 非 2xx 返回非零退出码
+- `/start`、`/stop`、`/rate`、`/mode` 失败时拒绝记录成功
+- 所有 HTTP 调用有有限 timeout（3-5 秒）
+
+### PID 归属
+
+PID 文件（`.tox/manual/ueba_demo_menu/continuous_login_http_server.pid`）只用于状态记录和排查，**不是自动 kill 的授权依据**。
+
+仅当前菜单会话本次通过 `$!` 启动的 Server 才允许自动停止：
+- 会话 PID 变量 `CURRENT_SESSION_SERVER_PID` 仅在本次菜单进程内有效
+- `jobs -pr` 确认 PID 仍属于当前 Shell 会话的后台 job
+- 历史 PID 文件无法验证归属 → 只报警，不 kill
+- 端口被未知进程占用 → 只报警，拒绝启动/停止，不 kill
+- 脚本重启后即失去对历史 PID 的自动管理权
+
+### ClickHouse 环境参数
+
+Shell 顶层定义的 `CLICKHOUSE_HOST`、`CLICKHOUSE_PORT`、`CLICKHOUSE_USERNAME`、`CLICKHOUSE_PASSWORD`、`CLICKHOUSE_DATABASE` 通过 `export` 统一透传给所有子进程：
+- 同时设置 `CLICKHOUSE_USER`（兼容部分脚本使用不同变量名）
+- 手动 Validation CLI 继续显式传入所有 5 个参数
+- 密码不出现在日志、summary 或 debug 输出中
+
+Python 侧 `AcceptanceConfig` 通过 `default_factory` 读取环境变量：
+- `CLICKHOUSE_USERNAME` 优先级高于 `CLICKHOUSE_USER`
+- `CLICKHOUSE_PORT` 必须为 1..65535 的正整数
+- 基础准线、训练表、持续流量 Server 和一键联动 Runner 使用同一组配置
+
+### 状态 JSON 严格解析
+
+Server `paused` 状态解析严格区分：
+- JSON 解析失败 → 错误，不伪装成 `paused=false`
+- 缺少 `paused` 字段 → 错误
+- `paused` 非布尔值 → 错误
+- 只有明确的 `true` 或 `false` 才被接受
+
+### 暂未开放的功能
+
+以下功能因下游工具链待独立加固或安全前提未满足而暂时禁用：
+
+- **训练表更新流程**（根菜单 3）：下游 Runner 缺少 timeout，长时间挂起风险
+- **一键执行基础准线完整流程**（根菜单 6）：交互 Runner pipe 注入已废弃，共享表现场未恢复。请使用基础准线子菜单中的分步入口
+- **一键持续流量联动验收**（根菜单 7 / 持续流量子菜单 12）：Python cleanup helper 精确用户名语义待加固
+
+手动持续流量流程仍然开放：
+- 启动 / 停止 / 暂停 / 恢复 Server
+- 调速 / 切换模式
+- CLOSED 窗口 Validation 评分（含 YES 确认 + 窗口隔离）
+- 精确 cleanup（含 DELETE 确认）
+
+### 临时文件
+
+所有测试临时文件均保存在项目内部 `.tox/manual/ueba_demo_shell_tests/`，不使用系统 `/tmp`。
+
+### 停止 Server 窗口关闭
+
+停止 Server 路径在关闭活动窗口前：
+1. POST /stop
+2. 读取 Server 状态
+3. 确认 `paused=true`
+4. 只有确认成功后才等待缓冲并记录 `end_time`
+
+状态读取失败或 `paused != true` 时，窗口保持 ACTIVE 状态，需人工检查。
+
+### 时间格式
+
+时间字段统一使用无标注字符串：
+`YYYY-MM-DD HH:MM:SS`
+禁止使用 `Z`、`+00:00` 和 timezone-aware datetime。
+
+### 写共享表声明
+
+基础准线流程中的写库操作直接写入共享 ClickHouse 表，**不是隔离沙箱**：
+
+- 菜单项 2（生成模拟数据）→ 写入 `logs_structured`
+- 菜单项 3（baseline 构建）→ 写入 `user_behavior_baselines`
+
+操作前菜单会显示明确提示。**不会自动 cleanup**。操作前请确认当前数据库现场。
+
+### 验收范围
+
+本轮验收仅执行**第一层只读冒烟验收**：
+- 菜单启动、环境检查、查看整体状态
+- 各禁用入口验证
+- 非法输入、EOF、安全退出
+- 8765 端口空闲、无残留进程
+- 不写库、不自动 cleanup
+
+**第二层受控业务验收未执行**。原因：数据库恢复安全前提未满足 —
+logs_structured 存在额外 fixture 数据（+58 行，来源待核验）、
+user_behavior_baselines 的 model_version 污染到 203 个 non-fixture 用户、
+ueba_baseline_training_logs 混入 non-fixture 数据。
+
 ## 月度训练表更新闭环
 
 非交互执行 5月初始化训练表、5月 baseline 构建、6月训练表替换、baseline 不变校验、6月 baseline 重建和差异验证：

@@ -1,19 +1,46 @@
 """Configuration for UEBA baseline acceptance fixtures."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+import os
 from pathlib import Path
+
+
+def _env_clickhouse_port() -> int:
+    raw = os.getenv("CLICKHOUSE_PORT", "8123")
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"CLICKHOUSE_PORT 必须为正整数，当前值: {raw!r}"
+        ) from exc
+    if port <= 0 or port > 65535:
+        raise ValueError(
+            f"CLICKHOUSE_PORT 必须为 1..65535 的正整数，当前值: {port}"
+        )
+    return port
 
 
 @dataclass(slots=True)
 class AcceptanceConfig:
     """Config for the offline UEBA baseline acceptance fixture tool."""
 
-    clickhouse_host: str = "localhost"
-    clickhouse_port: int = 8123
-    clickhouse_user: str = "default"
-    clickhouse_password: str = ""
-    clickhouse_database: str = "log_analysis"
+    clickhouse_host: str = field(
+        default_factory=lambda: os.getenv("CLICKHOUSE_HOST", "localhost")
+    )
+    clickhouse_port: int = field(default_factory=_env_clickhouse_port)
+    clickhouse_user: str = field(
+        default_factory=lambda: os.getenv(
+            "CLICKHOUSE_USERNAME",
+            os.getenv("CLICKHOUSE_USER", "default"),
+        )
+    )
+    clickhouse_password: str = field(
+        default_factory=lambda: os.getenv("CLICKHOUSE_PASSWORD", "")
+    )
+    clickhouse_database: str = field(
+        default_factory=lambda: os.getenv("CLICKHOUSE_DATABASE", "log_analysis")
+    )
 
     output_dir: Path = Path(".tox/ueba_baseline_acceptance")
 

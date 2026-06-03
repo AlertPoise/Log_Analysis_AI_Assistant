@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     config = AcceptanceConfig(dump_logs_jsonl=args.dump_logs_jsonl)
     if args.output_dir:
         config.output_dir = Path(args.output_dir)
+
     if args.monthly_training_update:
         result = run_monthly_training_update(config)
         print("success = {}".format(result["success"]))
@@ -38,60 +39,31 @@ def main(argv: list[str] | None = None) -> int:
             print("failed_checks = {}".format(result.get("failed_checks", [])))
         return 0 if result["success"] else 1
 
+    action_flags = [
+        args.generate_expected,
+        args.load_fixture,
+        args.build_baseline,
+        args.validate_baselines,
+        args.print_summary,
+    ]
+    action_count = sum(1 for f in action_flags if f)
+    if action_count > 1:
+        print("错误：一次只能指定一个非交互动作参数。同时指定多个参数会导致歧义，已拒绝执行。", file=__import__("sys").stderr)
+        return 2
+    if action_count == 1:
+        return _run_non_interactive(args, config)
+
     while True:
         _print_menu(config)
         choice = input("请选择操作：").strip()
         if choice == "1":
-            state = generate_fixture_outputs(config)
-            print("\n已生成 expected_baselines.json 和 fixture_summary.json。")
-            print(f"total_logs = {state['total_logs']}")
-            print(f"user_count = {state['user_count']}\n")
+            _handle_generate_expected(config)
         elif choice == "2":
-            result = load_fixture_to_clickhouse(config)
-            if result["success"]:
-                print("\n模拟数据已写入 ClickHouse。")
-            else:
-                print("\n模拟数据写入 ClickHouse 失败。")
-            print(f"expected_rows = {result['expected_rows']}")
-            print(f"inserted_rows = {result['inserted_rows']}")
-            print(f"database_rows = {result['database_rows']}")
-            print(f"error = {result['error']}\n")
+            _handle_load_fixture(config)
         elif choice == "3":
-            print("\n开始执行 UEBA baseline 构建。")
-            print("该步骤会调用 scripts/build_ueba_baseline.py，可能需要稍等。\n")
-            result = run_baseline_build(config)
-            if result["success"]:
-                print("UEBA baseline 构建完成。")
-            else:
-                print("UEBA baseline 构建失败。")
-            print("success = {}".format(result["success"]))
-            print("total_log_count = {}".format(result.get("total_log_count", 0)))
-            print("total_user_count = {}".format(result.get("total_user_count", 0)))
-            print("reliable_user_count = {}".format(result.get("reliable_user_count", 0)))
-            print("unreliable_user_count = {}".format(result.get("unreliable_user_count", 0)))
-            print("build_result_path = {}".format(Path(config.output_dir) / BUILD_RESULT_FILE))
-            if not result["success"]:
-                print("error = {}".format(result.get("error")))
-                print("请先检查菜单第 2 项是否已成功完成。")
-            print()
+            _handle_build_baseline(config)
         elif choice == "4":
-            print("\n开始对比 expected_baselines.json 与数据库实际 baseline。")
-            print("该步骤会读取 ClickHouse.user_behavior_baselines，并只验证 fixture_user_% 用户。\n")
-            result = validate_fixture_baselines(config)
-            if result["success"]:
-                print("UEBA baseline 对比验证通过。")
-            else:
-                print("UEBA baseline 对比验证失败。")
-            print("success = {}".format(result["success"]))
-            print("checked_users = {}".format(result.get("checked_users", 0)))
-            print("checked_items = {}".format(result.get("checked_items", 0)))
-            print("passed_items = {}".format(result.get("passed_items", 0)))
-            print("failed_items = {}".format(result.get("failed_items", 0)))
-            print("validation_report_path = {}".format(Path(config.output_dir) / VALIDATION_REPORT_FILE))
-            print("failed_diff_path = {}".format(Path(config.output_dir) / FAILED_DIFF_FILE))
-            if not result["success"]:
-                print("error = {}".format(result.get("error")))
-            print()
+            _handle_validate_baselines(config)
         elif choice == "5":
             _print_recent_summary(config)
         elif choice == "0":
@@ -99,6 +71,83 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         else:
             print("\n无效选择，请重新输入。\n")
+
+
+def _run_non_interactive(args: argparse.Namespace, config: AcceptanceConfig) -> int:
+    """Execute a single non-interactive action and exit."""
+    if args.generate_expected:
+        return _handle_generate_expected(config)
+    if args.load_fixture:
+        return _handle_load_fixture(config)
+    if args.build_baseline:
+        return _handle_build_baseline(config)
+    if args.validate_baselines:
+        return _handle_validate_baselines(config)
+    if args.print_summary:
+        _print_recent_summary(config)
+        return 0
+    return 0
+
+
+def _handle_generate_expected(config: AcceptanceConfig) -> int:
+    state = generate_fixture_outputs(config)
+    print("已生成 expected_baselines.json 和 fixture_summary.json。")
+    print(f"total_logs = {state['total_logs']}")
+    print(f"user_count = {state['user_count']}")
+    return 0
+
+
+def _handle_load_fixture(config: AcceptanceConfig) -> int:
+    result = load_fixture_to_clickhouse(config)
+    if result["success"]:
+        print("模拟数据已写入 ClickHouse。")
+    else:
+        print("模拟数据写入 ClickHouse 失败。")
+    print(f"expected_rows = {result['expected_rows']}")
+    print(f"inserted_rows = {result['inserted_rows']}")
+    print(f"database_rows = {result['database_rows']}")
+    print(f"error = {result['error']}")
+    return 0 if result["success"] else 1
+
+
+def _handle_build_baseline(config: AcceptanceConfig) -> int:
+    print("开始执行 UEBA baseline 构建。")
+    print("该步骤会调用 scripts/build_ueba_baseline.py，可能需要稍等。")
+    result = run_baseline_build(config)
+    if result["success"]:
+        print("UEBA baseline 构建完成。")
+    else:
+        print("UEBA baseline 构建失败。")
+    print("success = {}".format(result["success"]))
+    print("total_log_count = {}".format(result.get("total_log_count", 0)))
+    print("total_user_count = {}".format(result.get("total_user_count", 0)))
+    print("reliable_user_count = {}".format(result.get("reliable_user_count", 0)))
+    print("unreliable_user_count = {}".format(result.get("unreliable_user_count", 0)))
+    print("build_result_path = {}".format(Path(config.output_dir) / BUILD_RESULT_FILE))
+    if not result["success"]:
+        print("error = {}".format(result.get("error")))
+        print("请先检查 --load-fixture 是否已成功完成。")
+    return 0 if result["success"] else 1
+
+
+def _handle_validate_baselines(config: AcceptanceConfig) -> int:
+    print("开始对比 expected_baselines.json 与数据库实际 baseline。")
+    print("该步骤会读取 ClickHouse.user_behavior_baselines，并只验证 fixture_user_% 用户。")
+    result = validate_fixture_baselines(config)
+    if result["success"]:
+        print("UEBA baseline 对比验证通过。")
+    else:
+        print("UEBA baseline 对比验证失败。")
+    print("success = {}".format(result["success"]))
+    print("checked_users = {}".format(result.get("checked_users", 0)))
+    print("checked_items = {}".format(result.get("checked_items", 0)))
+    print("passed_items = {}".format(result.get("passed_items", 0)))
+    print("failed_items = {}".format(result.get("failed_items", 0)))
+    print("validation_report_path = {}".format(Path(config.output_dir) / VALIDATION_REPORT_FILE))
+    print("failed_diff_path = {}".format(Path(config.output_dir) / FAILED_DIFF_FILE))
+    if not result["success"]:
+        print("error = {}".format(result.get("error")))
+    return 0 if result["success"] else 1
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -113,6 +162,31 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--monthly-training-update",
         action="store_true",
         help="非交互执行月度训练表更新闭环验收。",
+    )
+    parser.add_argument(
+        "--generate-expected",
+        action="store_true",
+        help="非交互：生成 expected_baselines.json 和 fixture_summary.json",
+    )
+    parser.add_argument(
+        "--load-fixture",
+        action="store_true",
+        help="非交互：生成模拟数据并写入 ClickHouse logs_structured",
+    )
+    parser.add_argument(
+        "--build-baseline",
+        action="store_true",
+        help="非交互：执行 UEBA baseline 构建并写入 user_behavior_baselines",
+    )
+    parser.add_argument(
+        "--validate-baselines",
+        action="store_true",
+        help="非交互：对比 expected_baselines.json 与数据库实际 baseline",
+    )
+    parser.add_argument(
+        "--print-summary",
+        action="store_true",
+        help="非交互：打印最近一次验收摘要",
     )
     return parser.parse_args(argv)
 
