@@ -487,7 +487,7 @@ def load_fixture_window(
         "start_time": start_time,
         "end_time": end_time,
         "log_type": config.log_type,
-        "source_filter": "username LIKE 'fixture_user_%'",
+        "source_filter": "username IN (configured fixture usernames)",
         "duration_seconds": round(time.time() - begin, 3),
         "error": None if success else "fixture window row or user count mismatch",
     }
@@ -506,23 +506,24 @@ def clear_test_samples(config: AcceptanceConfig, client: Any) -> dict[str, Any]:
     TrainingLogStore(client=client, database=config.clickhouse_database).delete_dataset(DATASET_ID)
     BaselineStore(client=client, database=config.clickhouse_database).ensure_table()
     database = validate_identifier(config.clickhouse_database)
+    users = config.fixture_usernames
+    placeholders = ", ".join(f"%(cu{i})s" for i in range(len(users)))
     sql = f"""
     ALTER TABLE {database}.user_behavior_baselines
     DELETE
-    WHERE username LIKE 'fixture_user_%%'
+    WHERE username IN ({placeholders})
       AND model_version IN (%(may_model_version)s, %(june_model_version)s)
     SETTINGS mutations_sync = 1
     """
-    _execute_command(
-        client,
-        sql,
-        {"may_model_version": MAY_MODEL_VERSION, "june_model_version": JUNE_MODEL_VERSION},
-    )
+    params = {"may_model_version": MAY_MODEL_VERSION, "june_model_version": JUNE_MODEL_VERSION}
+    for i, u in enumerate(users):
+        params[f"cu{i}"] = u
+    _execute_command(client, sql, params)
     return {
         "success": True,
         "dataset_id": DATASET_ID,
         "log_filter": {
-            "username": "fixture_user_%",
+            "username": "exact fixture usernames via config",
             "log_type": config.log_type,
             "start_time": MAY_START,
             "end_time": JUNE_END,
@@ -816,7 +817,7 @@ def _print_menu(config: AcceptanceConfig) -> None:
     print("说明：")
     print("- 5 月 / 6 月只是测试数据窗口，用于演示初始化和手动更新流程。")
     print("- 正式使用时不要求每个月都跑。")
-    print("- 本工具只操作 fixture_user_% 测试数据和指定 dataset_id，不清理真实业务数据。")
+    print("- 本工具只操作精确 fixture 用户集合和指定 dataset_id，不清理真实业务数据。")
     print(f"- 输出目录：{config.output_dir}")
     print()
     for key, (label, _) in MENU_ACTIONS.items():

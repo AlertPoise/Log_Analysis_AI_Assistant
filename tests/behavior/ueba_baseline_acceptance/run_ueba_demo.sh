@@ -26,6 +26,7 @@ CURRENT_WINDOW_END_FILE="${STATE_ROOT}/current_window_end"
 CURRENT_WINDOW_STATE_FILE="${STATE_ROOT}/current_window_state"
 
 CURRENT_SESSION_SERVER_PID=""
+CLEANUP_DONE=0
 
 WINDOW_STATE_IDLE="IDLE"
 WINDOW_STATE_ACTIVE="ACTIVE"
@@ -87,25 +88,6 @@ read_input() {
     fi
 
     printf -v "${__result_var}" '%s' "${value}"
-    return 0
-}
-
-confirm_token() {
-    local expected="$1"
-    local prompt="$2"
-    local answer=""
-
-    if ! read_input answer "${prompt}" "检测到输入结束，已取消当前操作。"; then
-        return 1
-    fi
-    local answer_lower=""
-    local expected_lower=""
-    answer_lower="$(printf '%s' "${answer}" | tr '[:upper:]' '[:lower:]')"
-    expected_lower="$(printf '%s' "${expected}" | tr '[:upper:]' '[:lower:]')"
-    if [ "${answer_lower}" != "${expected_lower}" ]; then
-        echo "已取消当前操作。"
-        return 1
-    fi
     return 0
 }
 
@@ -964,9 +946,6 @@ run_training_update() {
     if ! ensure_clickhouse_ready_for_write_flow; then
         return 1
     fi
-    if ! confirm_token "YES" "请输入 YES 确认执行："; then
-        return 1
-    fi
     echo "开始执行训练表更新闭环（timeout=${TRAINING_UPDATE_TIMEOUT}s）..."
     (
         cd "${PROJECT_ROOT}" || exit 1
@@ -984,22 +963,265 @@ run_training_update() {
     return "${rc}"
 }
 
-run_full_process() {
-    echo "==== UEBA 全流程闭环 ===="
-    echo "顺序：训练表更新(3) → 基础准线一键流程(6) → 持续流量联动验收(7)"
-    echo ""
-    echo "==== 第 1/3 步：训练表更新 ===="
-    run_training_update || { echo "全流程中止：训练表更新失败。"; return 1; }
-    echo ""
-    echo "==== 第 2/3 步：基础准线一键流程 ===="
-    run_baseline_full_flow || { echo "全流程中止：基础准线流程失败。"; return 1; }
-    echo ""
-    echo "==== 第 3/3 步：持续流量联动验收 ===="
-    _run_continuous_acceptance || { echo "全流程中止：持续流量联动验收失败。"; return 1; }
-    echo ""
-    echo "UEBA 全流程闭环完成。"
-    record_summary "UEBA 全流程闭环成功"
+_fixture_usernames_sql() {
+    "${PYTHON_BIN}" -c "
+from tests.behavior.ueba_baseline_acceptance.config import AcceptanceConfig
+c = AcceptanceConfig()
+users = c.fixture_usernames + ['fixture_user_validation_nobase']
+print(','.join(repr(u) for u in users))
+"
+}
+
+_cleanup_model_versions_sql() {
+    printf "'ueba_baseline_fixture_v2_monthly','ueba_monthly_acceptance_may_init','ueba_monthly_acceptance_june_updated'"
+}
+
+_cleanup_config_time_window() {
+    "${PYTHON_BIN}" -c "
+from tests.behavior.ueba_baseline_acceptance.config import AcceptanceConfig
+c = AcceptanceConfig()
+print(c.start_time)
+print(c.end_time)
+"
+}
+
+_read_acceptance_report_window() {
+    local report_file="$1"
+    if [ ! -f "${report_file}" ]; then
+        return 1
+    fi
+    "${PYTHON_BIN}" -c "
+import json, sys
+with open('${report_file}') as f:
+    r = json.load(f)
+windows = []
+for key in ('normal_window', 'combo_window', 'idempotency_window'):
+    w = r.get(key, {})
+    if w.get('start') and w.get('end'):
+        windows.append((w['start'], w['end']))
+if not windows:
+    sys.exit(1)
+starts = [w[0] for w in windows]
+ends = [w[1] for w in windows]
+print(min(starts))
+print(max(ends))
+"
+}
+
+_continuous_cleanup_fallback_window() {
+    "${PYTHON_BIN}" -c "
+from datetime import datetime, timedelta, timezone
+now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+print((now - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S'))
+print((now + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S'))
+"
+}
+
+_cleanup_baseline_fixture_logs_for_continuous() {
+    local users_sql=""
+    local config_start=""
+    local config_end=""
+    local config_window=""
+    if ! users_sql="$(_fixture_usernames_sql)"; then
+        echo "错误：无法获取 fixture 用户名列表。"
+        return 1
+    fi
+    if ! config_window="$(_cleanup_config_time_window 2>/dev/null)"; then
+        echo "错误：无法获取 baseline fixture 时间窗口。"
+        return 1
+    fi
+    config_start="$(printf '%s\n' "${config_window}" | head -n 1)"
+    config_end="$(printf '%s\n' "${config_window}" | tail -n 1)"
+    if [ -z "${config_start}" ] || [ -z "${config_end}" ]; then
+        echo "错误：baseline fixture 时间窗口为空。"
+        return 1
+    fi
+    if ! clickhouse_query "ALTER TABLE ${CLICKHOUSE_DATABASE}.logs_structured DELETE WHERE username IN (${users_sql}) AND log_type='vpn' AND timestamp >= '${config_start}' AND timestamp < '${config_end}' SETTINGS mutations_sync=1" > /dev/null 2>&1; then
+        echo "错误：baseline fixture logs_structured 预清理失败。"
+        return 1
+    fi
+    echo "baseline fixture 输入日志已清理，保留 baseline 结果供持续评分使用。"
     return 0
+}
+
+_one_click_cleanup() {
+    echo "正在清理本轮演示数据（4 张表）..."
+    local users_sql=""
+    if ! users_sql="$(_fixture_usernames_sql)"; then
+        echo "错误：无法获取 fixture 用户名列表。"
+        return 1
+    fi
+
+    local model_versions=""
+    model_versions="$(_cleanup_model_versions_sql)"
+
+    # 尝试从连续验收报告获取本轮精确时间窗口
+    local continuous_start=""
+    local continuous_end=""
+    local report_window=""
+    if report_window="$(_read_acceptance_report_window "${CONTINUOUS_ACCEPTANCE_REPORT}" 2>/dev/null)"; then
+        continuous_start="$(printf '%s\n' "${report_window}" | head -n 1)"
+        continuous_end="$(printf '%s\n' "${report_window}" | tail -n 1)"
+    else
+        local fallback_window=""
+        if fallback_window="$(_continuous_cleanup_fallback_window 2>/dev/null)"; then
+            continuous_start="$(printf '%s\n' "${fallback_window}" | head -n 1)"
+            continuous_end="$(printf '%s\n' "${fallback_window}" | tail -n 1)"
+            echo "  continuous cleanup fallback window: ${continuous_start} .. ${continuous_end}"
+        fi
+    fi
+
+    # 获取 baseline fixture 配置时间窗口
+    local config_start=""
+    local config_end=""
+    local config_window=""
+    if config_window="$(_cleanup_config_time_window 2>/dev/null)"; then
+        config_start="$(printf '%s\n' "${config_window}" | head -n 1)"
+        config_end="$(printf '%s\n' "${config_window}" | tail -n 1)"
+    fi
+
+    # logs_structured: 分离 baseline fixture 和 continuous fixture 的清理
+    if [ -n "${config_start}" ] && [ -n "${config_end}" ]; then
+        if ! clickhouse_query "ALTER TABLE ${CLICKHOUSE_DATABASE}.logs_structured DELETE WHERE username IN (${users_sql}) AND log_type='vpn' AND timestamp >= '${config_start}' AND timestamp < '${config_end}' SETTINGS mutations_sync=1" > /dev/null 2>&1; then
+            echo "错误：logs_structured baseline fixture cleanup 失败。"
+            return 1
+        fi
+        echo "  logs_structured (baseline fixture window): 已清理"
+    fi
+    if [ -n "${continuous_start}" ] && [ -n "${continuous_end}" ]; then
+        if ! clickhouse_query "ALTER TABLE ${CLICKHOUSE_DATABASE}.logs_structured DELETE WHERE username IN (${users_sql}) AND log_type='vpn' AND position(raw_log, 'ueba_continuous_fixture') > 0 AND timestamp >= '${continuous_start}' AND timestamp < '${continuous_end}' SETTINGS mutations_sync=1" > /dev/null 2>&1; then
+            echo "错误：logs_structured continuous fixture cleanup 失败。"
+            return 1
+        fi
+        echo "  logs_structured (continuous fixture window): 已清理"
+    else
+        echo "错误：无法获取 continuous cleanup 时间窗口，拒绝清理 continuous 数据。"
+        return 1
+    fi
+
+    if ! clickhouse_query "ALTER TABLE ${CLICKHOUSE_DATABASE}.user_behavior_baselines DELETE WHERE username IN (${users_sql}) AND model_version IN (${model_versions}) SETTINGS mutations_sync=1" > /dev/null 2>&1; then
+        echo "错误：user_behavior_baselines cleanup 失败。"
+        return 1
+    fi
+    echo "  user_behavior_baselines: 已清理"
+
+    if ! clickhouse_query "ALTER TABLE ${CLICKHOUSE_DATABASE}.ueba_baseline_training_logs DELETE WHERE dataset_id='ueba_training_monthly_acceptance' SETTINGS mutations_sync=1" > /dev/null 2>&1; then
+        echo "错误：ueba_baseline_training_logs cleanup 失败。"
+        return 1
+    fi
+    echo "  ueba_baseline_training_logs: 已清理"
+
+    # ueba_validation_results: username + model_version + log_type + run_id 前缀 + 本轮/兜底时间窗口
+    if [ -n "${continuous_start}" ] && [ -n "${continuous_end}" ]; then
+        if ! clickhouse_query "ALTER TABLE ${CLICKHOUSE_DATABASE}.ueba_validation_results DELETE WHERE username IN (${users_sql}) AND baseline_model_version IN (${model_versions}) AND log_type='vpn' AND (startsWith(validation_run_id, 'continuous_normal_') OR startsWith(validation_run_id, 'continuous_combo_') OR startsWith(validation_run_id, 'continuous_idempotent_')) AND timestamp >= '${continuous_start}' AND timestamp < '${continuous_end}' SETTINGS mutations_sync=1" > /dev/null 2>&1; then
+            echo "错误：ueba_validation_results cleanup 失败。"
+            return 1
+        fi
+    else
+        echo "错误：无法获取 validation cleanup 时间窗口，拒绝清理 validation_results。"
+        return 1
+    fi
+    echo "  ueba_validation_results: 已清理"
+
+    echo "清理完成。"
+    return 0
+}
+
+_cleanup_once() {
+    if [ "${CLEANUP_DONE}" -eq 1 ]; then
+        echo "[cleanup] cleanup 已执行，跳过重复调用。"
+        return 0
+    fi
+    CLEANUP_DONE=1
+    echo "[cleanup] 执行一次性 cleanup ..."
+    _stop_demo_server 2>/dev/null || true
+    # 终止所有子进程，防止 cleanup 与数据写入产生竞态
+    pkill -P $$ 2>/dev/null || true
+    sleep 1
+    _one_click_cleanup
+}
+
+run_full_process() {
+    local step_rc=0
+    local cleanup_rc=0
+    CLEANUP_DONE=0
+
+    trap 'echo "收到 SIGINT，正在清理..." 1>&2; _cleanup_once; trap - INT TERM; exit 130' INT
+    trap 'echo "收到 SIGTERM，正在清理..." 1>&2; _cleanup_once; trap - INT TERM; exit 143' TERM
+
+    echo "==== UEBA 一键完整演示 ===="
+    echo "本流程自动完成环境检查、训练更新、基线构建、持续评分与清理。"
+    echo ""
+
+    echo "[1/5] 检查运行环境"
+    if ! ensure_clickhouse_ready_for_write_flow; then
+        step_rc=1
+    fi
+    if [ "${step_rc}" -eq 0 ]; then
+        echo "环境检查通过。"
+    else
+        echo "环境检查失败，流程中止。"
+    fi
+    echo ""
+
+    if [ "${step_rc}" -eq 0 ]; then
+        echo "[2/5] 更新训练数据并构建 baseline"
+        run_training_update || step_rc=1
+        echo ""
+        if [ "${step_rc}" -eq 0 ]; then
+            run_baseline_full_flow || step_rc=1
+        fi
+        if [ "${step_rc}" -eq 0 ]; then
+            _cleanup_baseline_fixture_logs_for_continuous || step_rc=1
+        fi
+        echo ""
+    fi
+
+    if [ "${step_rc}" -eq 0 ]; then
+        echo "[3/5] 生成持续流量并执行 Validation"
+        _run_continuous_acceptance || step_rc=1
+        echo ""
+    fi
+
+    if [ "${step_rc}" -eq 0 ]; then
+        echo "[4/5] 校验运行结果"
+        echo "训练更新、基线构建、持续评分已依次完成。"
+    else
+        echo "[4/5] 校验运行结果"
+        echo "前置步骤存在失败，跳过结果校验。"
+    fi
+    echo ""
+
+    echo "[5/5] 清理本轮演示数据"
+    if ! _cleanup_once; then
+        cleanup_rc=1
+        record_summary "清理失败"
+    fi
+    _stop_demo_server 2>/dev/null || true
+
+    trap - INT TERM
+    if [ "${step_rc}" -ne 0 ]; then
+        record_summary "UEBA 一键完整演示：FAIL（步骤失败）"
+        return 1
+    fi
+    if [ "${cleanup_rc}" -ne 0 ]; then
+        record_summary "UEBA 一键完整演示：FAIL（清理失败）"
+        return 1
+    fi
+    record_summary "UEBA 一键完整演示：PASS"
+    return 0
+}
+
+_stop_demo_server() {
+    local pid_file="${STATE_ROOT}/continuous_login_http_server.pid"
+    if [ -f "${pid_file}" ]; then
+        local pid
+        pid="$(cat "${pid_file}" 2>/dev/null)"
+        if [ -n "${pid}" ] && is_valid_positive_pid "${pid}"; then
+            kill "${pid}" 2>/dev/null || true
+            rm -f "${pid_file}"
+        fi
+    fi
 }
 
 run_baseline_full_flow() {
@@ -1010,9 +1232,6 @@ run_baseline_full_flow() {
     echo "  4. 对比理论准线与实际 baseline"
     echo ""
     echo "警告：数据将写入共享 ClickHouse 表，不会自动 cleanup。"
-    if ! confirm_token "YES" "请输入 YES 确认执行："; then
-        return 1
-    fi
 
     local step_rc=0
     echo ""
@@ -1038,39 +1257,17 @@ run_baseline_full_flow() {
 }
 
 _run_continuous_acceptance() {
-    local write_flag=""
-    local cleanup_flag=""
-    local cleanup_confirm=""
-
     if ! require_venv_python; then
         return 1
     fi
 
-    echo "即将执行持续流量联动验收。"
-    echo "该流程会启动持续流量 Server、生成日志、执行 Validation 评分。"
-    echo "需要使用 --confirm-write 才允许真实写库。"
-    if ! confirm_token "YES" "请输入 YES 确认允许写库验收："; then
-        return 1
-    fi
-    write_flag="--confirm-write"
-
-    echo ""
-    echo "是否在验收成功后自动 cleanup 本轮数据？"
-    if confirm_token "DELETE" "请输入 DELETE 确认允许自动 cleanup（其他输入或 EOF 表示跳过 cleanup）："; then
-        cleanup_flag="--confirm-cleanup --cleanup-after --keep-data-on-failure"
-        echo "已确认：成功后自动 cleanup，失败则保留数据。"
-    else
-        cleanup_flag="--keep-data-on-failure"
-        echo "已跳过自动 cleanup。"
-    fi
-
-    echo ""
-    echo "开始执行持续流量联动验收（timeout=${CONTINUOUS_ACCEPTANCE_TIMEOUT}s）..."
+    echo "启动持续流量联动验收（自动确认写库 + 成功后自动 cleanup）..."
+    echo "timeout=${CONTINUOUS_ACCEPTANCE_TIMEOUT}s"
     (
         cd "${PROJECT_ROOT}" || exit 1
         timeout "${CONTINUOUS_ACCEPTANCE_TIMEOUT}" "${PYTHON_BIN}" -m "${CONTINUOUS_ACCEPTANCE_MODULE}" \
-            ${write_flag} \
-            ${cleanup_flag} \
+            --confirm-write \
+            --confirm-cleanup --cleanup-after --keep-data-on-failure \
             --report-path "${CONTINUOUS_ACCEPTANCE_REPORT}" 2>&1
     )
     local rc=$?
@@ -1085,110 +1282,6 @@ _run_continuous_acceptance() {
         record_summary "持续流量联动验收失败 rc=${rc}"
     fi
     return "${rc}"
-}
-
-run_manual_validation_cli() {
-    local mode=""
-    local write_flag=""
-    local run_id=""
-    local start_time=""
-    local end_time=""
-    local state=""
-    local output=""
-    local rc=0
-
-    if ! require_venv_python; then
-        return 1
-    fi
-    state="$(get_window_state)"
-    start_time="$(get_window_start)"
-    end_time="$(get_window_end)"
-
-    if [ "${state}" != "${WINDOW_STATE_CLOSED}" ] || [ -z "${start_time}" ] || [ -z "${end_time}" ]; then
-        echo "错误：正式评分只接受 CLOSED 窗口，且必须同时存在 start_time 与 end_time。"
-        print_window_state
-        return 1
-    fi
-    if [ "${start_time}" \> "${end_time}" ] || [ "${start_time}" = "${end_time}" ]; then
-        echo "错误：窗口时间非法，必须满足 start_time < end_time。"
-        return 1
-    fi
-
-    if ! read_input mode "请输入 YES 执行正式写库评分，或输入 DRYRUN 仅查看不写库：" "检测到输入结束，已取消评分。"; then
-        return 1
-    fi
-    case "${mode}" in
-        YES)
-            write_flag="--write"
-            run_id="menu_$(date -u '+%Y%m%d%H%M%S')"
-            ;;
-        DRYRUN)
-            write_flag="--dry-run"
-            run_id="menu_$(date -u '+%Y%m%d%H%M%S')"
-            echo "仅查看，不允许写库。"
-            ;;
-        *)
-            echo "已取消评分。"
-            return 1
-            ;;
-    esac
-
-    print_clickhouse_config
-    if ! check_window_isolation "${start_time}" "${end_time}"; then
-        echo "窗口被污染，默认拒绝继续。"
-        return 1
-    fi
-
-    output="$(
-        cd "${PROJECT_ROOT}" &&
-        timeout "${VALIDATION_CLI_TIMEOUT}" "${PYTHON_BIN}" scripts/run_ueba_validation.py \
-            --start-time "${start_time}" \
-            --end-time "${end_time}" \
-            --log-type "${CONTINUOUS_LOG_TYPE}" \
-            --model-version "${CONTINUOUS_MODEL_VERSION}" \
-            --validation-run-id "${run_id}" \
-            ${write_flag} \
-            --host "${CLICKHOUSE_HOST}" \
-            --port "${CLICKHOUSE_PORT}" \
-            --username "${CLICKHOUSE_USERNAME}" \
-            --password "${CLICKHOUSE_PASSWORD}" \
-            --database "${CLICKHOUSE_DATABASE}" 2>&1
-    )"
-    rc=$?
-    printf '%s\n' "${output}" > "${LAST_VALIDATION_RESULT_FILE}"
-    pretty_print_json_file "${LAST_VALIDATION_RESULT_FILE}"
-
-    if [ "${rc}" -eq 0 ] && [ "${mode}" = "YES" ]; then
-        append_validation_history "${run_id}" "${start_time}" "${end_time}"
-        echo "正式 Validation CLI 写库评分完成。run_id=${run_id}"
-        record_summary "Validation CLI 写库评分成功 run_id=${run_id} window=${start_time}..${end_time}"
-    elif [ "${rc}" -eq 0 ]; then
-        echo "正式 Validation CLI dry-run 已完成。"
-        record_summary "Validation CLI dry-run 成功 run_id=${run_id} window=${start_time}..${end_time}"
-    else
-        echo "正式 Validation CLI 执行失败。"
-        record_summary "Validation CLI 执行失败 run_id=${run_id} window=${start_time}..${end_time}"
-    fi
-    return "${rc}"
-}
-
-validation_result_count_for_window() {
-    local start_time="$1"
-    local end_time="$2"
-    local raw=""
-    if ! raw="$(clickhouse_scalar "
-SELECT count()
-FROM ${CLICKHOUSE_DATABASE}.ueba_validation_results
-WHERE username = '${CONTINUOUS_USERNAME}'
-  AND startsWith(validation_run_id, 'menu_')
-  AND baseline_model_version = '${CONTINUOUS_MODEL_VERSION}'
-  AND log_type = '${CONTINUOUS_LOG_TYPE}'
-  AND timestamp >= '${start_time}'
-  AND timestamp < '${end_time}'
-")"; then
-        return 1
-    fi
-    printf '%s\n' "${raw}"
 }
 
 continuous_log_count_for_window() {
@@ -1206,102 +1299,6 @@ WHERE username = '${CONTINUOUS_USERNAME}'
         return 1
     fi
     printf '%s\n' "${raw}"
-}
-
-cleanup_current_round_data() {
-    local state=""
-    local start_time=""
-    local end_time=""
-    local before_validation="0"
-    local before_logs="0"
-    local after_validation="0"
-    local after_logs="0"
-
-    state="$(get_window_state)"
-    start_time="$(get_window_start)"
-    end_time="$(get_window_end)"
-
-    if [ "${state}" != "${WINDOW_STATE_CLOSED}" ] || [ -z "${start_time}" ] || [ -z "${end_time}" ]; then
-        echo "错误：精确 cleanup 只接受 CLOSED 窗口；窗口状态文件缺失时拒绝执行。"
-        print_window_state
-        return 1
-    fi
-    if ! confirm_token "DELETE" "请输入 DELETE 确认精确 cleanup："; then
-        return 1
-    fi
-
-    before_validation_raw="$(validation_result_count_for_window "${start_time}" "${end_time}")" || {
-        echo "错误：cleanup 前 validation 计数查询失败，拒绝执行 DELETE。"
-        return 1
-    }
-    before_logs_raw="$(continuous_log_count_for_window "${start_time}" "${end_time}")" || {
-        echo "错误：cleanup 前日志计数查询失败，拒绝执行 DELETE。"
-        return 1
-    }
-    if ! require_nonnegative_integer "${before_validation_raw}" "cleanup_before_validation_count"; then
-        return 1
-    fi
-    if ! require_nonnegative_integer "${before_logs_raw}" "cleanup_before_log_count"; then
-        return 1
-    fi
-    before_validation="${before_validation_raw}"
-    before_logs="${before_logs_raw}"
-    echo "cleanup 前计数：validation_results=${before_validation} continuous_logs=${before_logs}"
-
-    if ! clickhouse_query "
-ALTER TABLE ${CLICKHOUSE_DATABASE}.ueba_validation_results
-DELETE WHERE username = '${CONTINUOUS_USERNAME}'
-  AND startsWith(validation_run_id, 'menu_')
-  AND baseline_model_version = '${CONTINUOUS_MODEL_VERSION}'
-  AND log_type = '${CONTINUOUS_LOG_TYPE}'
-  AND timestamp >= '${start_time}'
-  AND timestamp < '${end_time}'
-SETTINGS mutations_sync = 1
-" > /dev/null 2>&1; then
-        echo "错误：validation results DELETE 执行失败，cleanup 中止。"
-        return 1
-    fi
-
-    if ! clickhouse_query "
-ALTER TABLE ${CLICKHOUSE_DATABASE}.logs_structured
-DELETE WHERE username = '${CONTINUOUS_USERNAME}'
-  AND position(raw_log, '${CONTINUOUS_MARKER}') > 0
-  AND timestamp >= '${start_time}'
-  AND timestamp < '${end_time}'
-SETTINGS mutations_sync = 1
-" > /dev/null 2>&1; then
-        echo "错误：logs_structured DELETE 执行失败，cleanup 中止。"
-        return 1
-    fi
-
-    after_validation_raw="$(validation_result_count_for_window "${start_time}" "${end_time}")" || {
-        echo "错误：cleanup 后 validation 计数查询失败，判定 cleanup 失败。"
-        return 1
-    }
-    after_logs_raw="$(continuous_log_count_for_window "${start_time}" "${end_time}")" || {
-        echo "错误：cleanup 后日志计数查询失败，判定 cleanup 失败。"
-        return 1
-    }
-    if ! require_nonnegative_integer "${after_validation_raw}" "cleanup_after_validation_count"; then
-        return 1
-    fi
-    if ! require_nonnegative_integer "${after_logs_raw}" "cleanup_after_log_count"; then
-        return 1
-    fi
-    after_validation="${after_validation_raw}"
-    after_logs="${after_logs_raw}"
-    echo "cleanup 后计数：validation_results=${after_validation} continuous_logs=${after_logs}"
-
-    if [ "${after_validation}" -ne 0 ] || [ "${after_logs}" -ne 0 ]; then
-        echo "警告：cleanup 后仍存在残留数据。"
-        return 1
-    fi
-
-    clear_window_files
-    : > "${VALIDATION_HISTORY_FILE}"
-    record_summary "精确 cleanup 成功 window=${start_time}..${end_time}"
-    echo "本轮持续流量验收数据已精确清理完成。"
-    return 0
 }
 
 show_file_if_exists() {
@@ -1452,130 +1449,6 @@ WHERE position(raw_log, '${CONTINUOUS_MARKER}') > 0
     print_divider
 }
 
-baseline_menu() {
-    local choice=""
-    while true; do
-        print_divider
-        echo "基础准线流程"
-        echo "注意：以下写库操作直接写入共享 ClickHouse 表"
-        echo "  - logs_structured（模拟数据）"
-        echo "  - user_behavior_baselines（基线结果）"
-        echo "  不会自动 cleanup，操作前请确认当前数据库现场。"
-        echo
-        echo "1. 生成理论准线文件（只读）"
-        echo "2. 生成模拟数据并写入 ClickHouse logs_structured（大写 YES 确认）"
-        echo "3. 执行正式 baseline 构建并写入 user_behavior_baselines（大写 YES 确认）"
-        echo "4. 对比理论准线与实际 baseline（只读）"
-        echo "5. 返回上一级"
-        echo "0. 返回上一级"
-        if ! read_input choice "请选择操作：" "检测到输入结束，返回主菜单。"; then
-            return 0
-        fi
-        case "${choice}" in
-            1) run_baseline_generate_expected ;;
-            2)
-                echo "此操作将生成 fixture 模拟数据并写入共享 ClickHouse 表 logs_structured。"
-                echo "数据不会被自动 cleanup。"
-                if ! confirm_token "YES" "请输入 YES 确认写入："; then
-                    continue
-                fi
-                run_baseline_load_fixture
-                ;;
-            3)
-                echo "此操作将执行正式 baseline 构建并写入共享 ClickHouse 表 user_behavior_baselines。"
-                echo "数据不会被自动 cleanup。"
-                if ! confirm_token "YES" "请输入 YES 确认构建："; then
-                    continue
-                fi
-                run_baseline_build_action
-                ;;
-            4) run_baseline_validate ;;
-            5|0) return 0 ;;
-            *) echo "无效输入，请重新选择。" ;;
-        esac
-    done
-}
-
-continuous_mode_menu() {
-    local choice=""
-    while true; do
-        print_divider
-        echo "持续流量模式切换"
-        echo "1. normal"
-        echo "2. new_ip"
-        echo "3. new_country"
-        echo "4. new_city"
-        echo "5. failed_login"
-        echo "6. off_hours"
-        echo "7. combo_anomaly"
-        echo "8. mixed"
-        echo "9. 返回上一级"
-        echo "0. 返回上一级"
-        if ! read_input choice "请选择模式：" "检测到输入结束，返回持续流量菜单。"; then
-            return 0
-        fi
-        case "${choice}" in
-            1) set_continuous_mode "normal" ;;
-            2) set_continuous_mode "new_ip" ;;
-            3) set_continuous_mode "new_country" ;;
-            4) set_continuous_mode "new_city" ;;
-            5) set_continuous_mode "failed_login" ;;
-            6) set_continuous_mode "off_hours" ;;
-            7) set_continuous_mode "combo_anomaly" ;;
-            8) set_continuous_mode "mixed" ;;
-            9|0) return 0 ;;
-            *) echo "无效输入，请重新选择。" ;;
-        esac
-    done
-}
-
-continuous_menu() {
-    local choice=""
-    local custom_rate=""
-    while true; do
-        print_divider
-        echo "持续流量与 Validation"
-        echo "1. 启动持续流量 HTTP Server"
-        echo "2. 停止持续流量 HTTP Server"
-        echo "3. 暂停持续流量"
-        echo "4. 恢复持续流量"
-        echo "5. 调速到 20/秒"
-        echo "6. 调速到 50/秒"
-        echo "7. 自定义调速"
-        echo "8. 切换持续流量模式"
-        echo "9. 使用正式 Validation CLI 评分当前持续流量"
-        echo "10. 查看持续流量状态、日志与结果"
-        echo "11. 精确清理本轮持续流量验收数据"
-        echo "12. 一键持续流量联动验收（需 YES 确认写库 + DELETE 二次确认 cleanup）"
-        echo "13. 返回上一级"
-        echo "0. 返回上一级"
-        if ! read_input choice "请选择操作：" "检测到输入结束，返回主菜单。"; then
-            return 0
-        fi
-        case "${choice}" in
-            1) start_continuous_server ;;
-            2) stop_continuous_server ;;
-            3) pause_continuous_server ;;
-            4) resume_continuous_server ;;
-            5) set_continuous_rate "20" ;;
-            6) set_continuous_rate "50" ;;
-            7)
-                if ! read_input custom_rate "请输入 0..1000 的日志速率：" "检测到输入结束，已取消调速。"; then
-                    continue
-                fi
-                set_continuous_rate "${custom_rate}"
-                ;;
-            8) continuous_mode_menu ;;
-            9) run_manual_validation_cli ;;
-            10) show_continuous_logs_and_status ;;
-            11) cleanup_current_round_data ;;
-            12) _run_continuous_acceptance ;;
-            13|0) return 0 ;;
-            *) echo "无效输入，请重新选择。" ;;
-        esac
-    done
-}
-
 main_menu() {
     local choice=""
     while true; do
@@ -1583,14 +1456,9 @@ main_menu() {
         echo "UEBA 全流程演示工具"
         echo
         echo "1. 环境检查"
-        echo "2. 基础准线流程"
-        echo "3. 训练表更新流程"
-        echo "4. 持续流量与 Validation"
-        echo "5. 查看整体状态"
-        echo "6. 一键执行基础准线完整流程"
-        echo "7. 一键持续流量联动验收（需 YES 确认写库 + DELETE 二次确认 cleanup）"
-        echo "8. 退出"
-        echo "9. 全流程闭环（3→6→7 按序执行，YES 确认）"
+        echo "2. 一键执行 UEBA 完整演示"
+        echo "3. 查看最近一次运行结果"
+        echo "4. 退出"
         echo
         if ! read_input choice "请选择操作：" "检测到输入结束，主菜单安全退出。"; then
             echo "未自动停止 Server，未自动清理数据库。"
@@ -1598,20 +1466,31 @@ main_menu() {
         fi
         case "${choice}" in
             1) environment_check ;;
-            2) baseline_menu ;;
-            3) run_training_update ;;
-            4) continuous_menu ;;
-            5) show_overall_status ;;
-	            6) run_baseline_full_flow ;;
-	            7) _run_continuous_acceptance ;;
-            9) run_full_process ;;
-            8|0)
+            2) run_full_process ;;
+            3) show_results ;;
+            4|0)
                 echo "安全退出。"
                 return 0
                 ;;
-            *) echo "无效输入，请重新显示菜单。" ;;
+            *) echo "无效输入，请重新选择。" ;;
         esac
     done
+}
+
+show_results() {
+    print_divider
+    echo "最近一次运行结果"
+    echo
+    show_overall_status
+    echo
+    print_divider
+    if [ -f "${SUMMARY_LOG_FILE}" ]; then
+        echo "执行摘要（最近 20 行）："
+        tail -n 20 "${SUMMARY_LOG_FILE}" 2>/dev/null || echo "（摘要日志为空）"
+    else
+        echo "尚未产生执行摘要。请先执行菜单 2。"
+    fi
+    echo
 }
 
 main() {

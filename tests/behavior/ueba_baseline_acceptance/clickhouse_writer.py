@@ -107,16 +107,21 @@ class FixtureClickHouseWriter:
 
     def clean_fixture_logs(self, config: AcceptanceConfig) -> None:
         """Delete only fixture rows within the configured window and log_type."""
+        users = config.fixture_usernames
+        placeholders = ", ".join(f"%(u{i})s" for i in range(len(users)))
         sql = f"""
         ALTER TABLE {self.database}.{self.table}
         DELETE
-        WHERE username LIKE 'fixture_user_%%'
+        WHERE username IN ({placeholders})
           AND log_type = %(log_type)s
           AND timestamp >= %(start_time)s
           AND timestamp < %(end_time)s
         SETTINGS mutations_sync = 1
         """
-        self._execute_command(sql, _base_parameters(config))
+        params = _base_parameters(config)
+        for i, u in enumerate(users):
+            params[f"u{i}"] = u
+        self._execute_command(sql, params)
 
     def insert_logs(self, rows: Iterable[dict[str, Any]]) -> int:
         """Insert fixture logs using explicit column names and configured batches."""
@@ -136,15 +141,20 @@ class FixtureClickHouseWriter:
 
     def count_fixture_logs(self, config: AcceptanceConfig) -> int:
         """Count fixture rows for this fixture window in ClickHouse."""
+        users = config.fixture_usernames
+        placeholders = ", ".join(f"%(cu{i})s" for i in range(len(users)))
         sql = f"""
         SELECT count() AS cnt
         FROM {self.database}.{self.table}
-        WHERE username LIKE 'fixture_user_%%'
+        WHERE username IN ({placeholders})
           AND log_type = %(log_type)s
           AND timestamp >= %(start_time)s
           AND timestamp < %(end_time)s
         """
-        return int(_scalar_query(self.client, sql, _base_parameters(config)))
+        params = _base_parameters(config)
+        for i, u in enumerate(users):
+            params[f"cu{i}"] = u
+        return int(_scalar_query(self.client, sql, params))
 
     def close(self) -> None:
         """Close the underlying client when it supports close()."""

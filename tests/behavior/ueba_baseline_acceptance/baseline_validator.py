@@ -147,8 +147,10 @@ def fetch_actual_baselines(
     config: AcceptanceConfig,
     client_factory: Callable[[AcceptanceConfig], Any] = create_clickhouse_client,
 ) -> dict[str, Any]:
-    """Fetch fixture_user_% baselines from ClickHouse using FINAL semantics."""
+    """Fetch fixture baselines from ClickHouse using FINAL semantics."""
     database = validate_identifier(config.clickhouse_database)
+    usernames = config.fixture_usernames
+    placeholders = ", ".join(f"%(vu{i})s" for i in range(len(usernames)))
     client = None
     try:
         client = client_factory(config)
@@ -157,16 +159,13 @@ def fetch_actual_baselines(
             {", ".join(SELECT_COLUMNS)}
         FROM {database}.{BASELINES_TABLE} FINAL
         WHERE model_version = %(model_version)s
-          AND username LIKE 'fixture_user_%%'
+          AND username IN ({placeholders})
         ORDER BY username
         """
-        rows = _query_rows(
-            client,
-            sql,
-            {
-                "model_version": config.model_version,
-            },
-        )
+        params = {"model_version": config.model_version}
+        for i, u in enumerate(usernames):
+            params[f"vu{i}"] = u
+        rows = _query_rows(client, sql, params)
     finally:
         if client is not None and hasattr(client, "close"):
             try:
@@ -183,7 +182,7 @@ def fetch_actual_baselines(
         "read_consistency": "FINAL",
         "baseline_start_time": config.start_time,
         "baseline_end_time": config.end_time,
-        "user_filter": "username LIKE 'fixture_user_%'",
+        "user_filter": "username IN (configured fixture usernames)",
         "user_count": len(users),
         "total_sample_count": total_sample_count,
         "users": dict(sorted(users.items())),
@@ -427,7 +426,7 @@ def _empty_actual_baselines(config: AcceptanceConfig, error: str) -> dict[str, A
         "read_consistency": "FINAL",
         "baseline_start_time": config.start_time,
         "baseline_end_time": config.end_time,
-        "user_filter": "username LIKE 'fixture_user_%'",
+        "user_filter": "username IN (configured fixture usernames)",
         "user_count": 0,
         "total_sample_count": 0,
         "users": {},

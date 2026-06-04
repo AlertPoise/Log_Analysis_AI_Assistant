@@ -336,18 +336,19 @@ def cleanup_acceptance_baselines(client: Any, config: AcceptanceConfig) -> None:
     """Remove prior fixture baselines for this acceptance's model versions."""
     BaselineStore(client=client, database=config.clickhouse_database).ensure_table()
     database = validate_identifier(config.clickhouse_database)
+    users = config.fixture_usernames
+    placeholders = ", ".join(f"%(cu{i})s" for i in range(len(users)))
     sql = f"""
     ALTER TABLE {database}.user_behavior_baselines
     DELETE
-    WHERE username LIKE 'fixture_user_%%'
+    WHERE username IN ({placeholders})
       AND model_version IN (%(may_model_version)s, %(june_model_version)s)
     SETTINGS mutations_sync = 1
     """
-    _execute_command(
-        client,
-        sql,
-        {"may_model_version": MAY_MODEL_VERSION, "june_model_version": JUNE_MODEL_VERSION},
-    )
+    params: dict = {"may_model_version": MAY_MODEL_VERSION, "june_model_version": JUNE_MODEL_VERSION}
+    for i, u in enumerate(users):
+        params[f"cu{i}"] = u
+    _execute_command(client, sql, params)
 
 
 def replace_training_table_from_fixture_logs(
@@ -385,7 +386,7 @@ def replace_training_table_from_fixture_logs(
         "import_batch_id": import_batch_id,
         "source_table": TrainingLogStore.SOURCE_TABLE,
         "target_table": TrainingLogStore.TARGET_TABLE,
-        "source_filter": "username LIKE 'fixture_user_%'",
+        "source_filter": "username IN (configured fixture usernames)",
         "selected_rows": selected_rows,
         "inserted_rows": selected_rows,
         "target_rows": target_rows,
@@ -400,15 +401,20 @@ def replace_training_table_from_fixture_logs(
 
 def count_fixture_source_rows(client: Any, config: AcceptanceConfig, start_time: str, end_time: str) -> int:
     database = validate_identifier(config.clickhouse_database)
+    users = config.fixture_usernames
+    placeholders = ", ".join(f"%(cu{i})s" for i in range(len(users)))
     sql = f"""
     SELECT count() AS cnt
     FROM {database}.logs_structured
-    WHERE username LIKE 'fixture_user_%%'
+    WHERE username IN ({placeholders})
       AND log_type = %(log_type)s
       AND timestamp >= %(start_time)s
       AND timestamp < %(end_time)s
     """
-    rows = _query_rows(client, sql, {"log_type": config.log_type, "start_time": start_time, "end_time": end_time})
+    params = {"log_type": config.log_type, "start_time": start_time, "end_time": end_time}
+    for i, u in enumerate(users):
+        params[f"cu{i}"] = u
+    rows = _query_rows(client, sql, params)
     return int((rows[0] if rows else {}).get("cnt") or 0)
 
 
@@ -433,6 +439,8 @@ def _insert_fixture_training_rows(
     import_batch_id: str,
 ) -> None:
     database = validate_identifier(config.clickhouse_database)
+    users = config.fixture_usernames
+    placeholders = ", ".join(f"%(cu{i})s" for i in range(len(users)))
     columns = ",\n            ".join(TrainingLogStore.INSERT_COLUMNS)
     sql = f"""
     INSERT INTO {database}.ueba_baseline_training_logs
@@ -488,26 +496,25 @@ def _insert_fixture_training_rows(
         %(remark)s AS remark,
         %(created_by)s AS created_by
     FROM {database}.logs_structured
-    WHERE username LIKE 'fixture_user_%%'
+    WHERE username IN ({placeholders})
       AND log_type = %(log_type)s
       AND timestamp >= %(start_time)s
       AND timestamp < %(end_time)s
     """
-    _execute_command(
-        client,
-        sql,
-        {
-            "dataset_id": DATASET_ID,
-            "baseline_purpose": baseline_purpose,
-            "import_batch_id": import_batch_id,
-            "source_table": TrainingLogStore.SOURCE_TABLE,
-            "remark": "monthly_training_update_acceptance",
-            "created_by": "acceptance",
-            "log_type": config.log_type,
-            "start_time": start_time,
-            "end_time": end_time,
-        },
-    )
+    params: dict = {
+        "dataset_id": DATASET_ID,
+        "baseline_purpose": baseline_purpose,
+        "import_batch_id": import_batch_id,
+        "source_table": TrainingLogStore.SOURCE_TABLE,
+        "remark": "monthly_training_update_acceptance",
+        "created_by": "acceptance",
+        "log_type": config.log_type,
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+    for i, u in enumerate(users):
+        params[f"cu{i}"] = u
+    _execute_command(client, sql, params)
 
 
 def run_json_command(command: list[str], stage: str) -> dict[str, Any]:
@@ -563,6 +570,8 @@ def fetch_fixture_stats(client: Any, config: AcceptanceConfig) -> dict[str, Any]
 
 def fetch_log_window_stats(client: Any, config: AcceptanceConfig, start_time: str, end_time: str) -> dict[str, Any]:
     database = validate_identifier(config.clickhouse_database)
+    users = config.fixture_usernames
+    placeholders = ", ".join(f"%(fu{i})s" for i in range(len(users)))
     sql = f"""
     SELECT
         count() AS rows,
@@ -570,12 +579,15 @@ def fetch_log_window_stats(client: Any, config: AcceptanceConfig, start_time: st
         min(timestamp) AS min_timestamp,
         max(timestamp) AS max_timestamp
     FROM {database}.logs_structured
-    WHERE username LIKE 'fixture_user_%%'
+    WHERE username IN ({placeholders})
       AND log_type = %(log_type)s
       AND timestamp >= %(start_time)s
       AND timestamp < %(end_time)s
     """
-    rows = _query_rows(client, sql, {"log_type": config.log_type, "start_time": start_time, "end_time": end_time})
+    params = {"log_type": config.log_type, "start_time": start_time, "end_time": end_time}
+    for i, u in enumerate(users):
+        params[f"fu{i}"] = u
+    rows = _query_rows(client, sql, params)
     return _stats_row(rows[0] if rows else {})
 
 
@@ -615,14 +627,19 @@ def fetch_training_table_stats(client: Any, config: AcceptanceConfig, start_time
 def fetch_baseline_snapshot(client: Any, config: AcceptanceConfig, model_version: str) -> dict[str, Any]:
     """Fetch a compact baseline snapshot for one model_version."""
     database = validate_identifier(config.clickhouse_database)
+    users = config.fixture_usernames
+    placeholders = ", ".join(f"%(fu{i})s" for i in range(len(users)))
     sql = f"""
     SELECT {", ".join(BASELINE_SELECT_COLUMNS)}
     FROM {database}.user_behavior_baselines FINAL
     WHERE model_version = %(model_version)s
-      AND username LIKE 'fixture_user_%%'
+      AND username IN ({placeholders})
     ORDER BY username
     """
-    rows = _query_rows(client, sql, {"model_version": model_version})
+    params = {"model_version": model_version}
+    for i, u in enumerate(users):
+        params[f"fu{i}"] = u
+    rows = _query_rows(client, sql, params)
     users: dict[str, dict[str, Any]] = {}
     for row in rows:
         username = str(row.get("username") or "")

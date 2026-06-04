@@ -88,6 +88,26 @@ class AcceptanceConfig:
         )
 
     @property
+    def fixture_usernames(self) -> list[str]:
+        """Return the exact list of fixture usernames used for destructive cleanup scoping."""
+        users: list[str] = []
+        for i in range(1, self.stable_user_count + 1):
+            users.append(f"fixture_user_stable_{i:04d}")
+        for i in range(1, self.multi_location_user_count + 1):
+            users.append(f"fixture_user_multi_{i:04d}")
+        for i in range(1, self.high_failure_user_count + 1):
+            users.append(f"fixture_user_failed_{i:04d}")
+        for i in range(1, self.offhour_user_count + 1):
+            users.append(f"fixture_user_offhour_{i:04d}")
+        for i in range(1, self.ip_long_tail_user_count + 1):
+            users.append(f"fixture_user_iptail_{i:04d}")
+        for count in self.edge_user_sample_counts:
+            users.append(f"fixture_user_edge_{count:04d}")
+        users.append("fixture_user_validation_normal")
+        users.append("fixture_user_validation_combo")
+        return users
+
+    @property
     def total_expected_logs(self) -> int:
         """Return total fixture log rows implied by this config."""
         main_user_count = (

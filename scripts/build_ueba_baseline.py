@@ -64,6 +64,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--common-vpn-gateway-min-ratio", type=float, default=DEFAULT_CONFIG.common_vpn_gateway_min_ratio)
     parser.add_argument("--model-version", default=DEFAULT_CONFIG.model_version)
     parser.add_argument("--write-batch-size", type=int, default=DEFAULT_CONFIG.write_batch_size)
+    parser.add_argument("--usernames", help="逗号分隔的用户名列表，用于限定基线构建范围（验收场景精确隔离）")
 
     parser.add_argument("--clickhouse-host", default=os.getenv("CLICKHOUSE_HOST", "localhost"))
     parser.add_argument("--clickhouse-port", type=int, default=_env_int("CLICKHOUSE_PORT", 8123))
@@ -77,6 +78,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--active-only can only be used with --source-table ueba_baseline_training_logs")
     if args.source_table == "ueba_baseline_training_logs" and not args.dataset_id:
         parser.error("--dataset-id is required when --source-table ueba_baseline_training_logs")
+    if args.usernames is not None:
+        raw = [u.strip() for u in args.usernames.split(",")]
+        raw = [u for u in raw if u]
+        if not raw:
+            parser.error("--usernames must contain at least one non-empty username")
+        args.usernames = sorted(set(raw))
     return args
 
 
@@ -153,6 +160,7 @@ def build_service(
     source_table: str = "logs_structured",
     dataset_id: str | None = None,
     active_only: bool = False,
+    usernames: list[str] | None = None,
 ) -> UebaService:
     """初始化 Repository、Merger、Builder、Store 和 Service。"""
     repository = UebaRepository(
@@ -161,6 +169,7 @@ def build_service(
         source_table=source_table,
         dataset_id=dataset_id,
         active_only=active_only,
+        usernames=usernames,
     )
     aggregate_merger = AggregateMerger()
     baseline_builder = BaselineBuilder(config=config)
@@ -206,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         config = build_config(args)
         start_time, end_time = resolve_time_window(args, config)
         client = create_clickhouse_client(args)
+        usernames = args.usernames
         service = build_service(
             client,
             args.clickhouse_database,
@@ -213,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             source_table=getattr(args, "source_table", "logs_structured"),
             dataset_id=getattr(args, "dataset_id", None),
             active_only=getattr(args, "active_only", False),
+            usernames=usernames,
         )
         result = service.build_baseline_once(
             start_time=start_time,

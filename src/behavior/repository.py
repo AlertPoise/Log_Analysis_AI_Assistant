@@ -22,6 +22,7 @@ class UebaRepository:
         source_table: str = "logs_structured",
         dataset_id: str | None = None,
         active_only: bool = False,
+        usernames: list[str] | None = None,
     ) -> None:
         """初始化 Repository。
 
@@ -33,6 +34,7 @@ class UebaRepository:
         self.source_table = self._validate_source_table(source_table)
         self.dataset_id = dataset_id
         self.active_only = active_only
+        self.usernames = self._normalize_usernames(usernames)
 
         if self.source_table == "ueba_baseline_training_logs" and not self.dataset_id:
             raise ValueError("dataset_id is required when source_table is ueba_baseline_training_logs")
@@ -262,6 +264,18 @@ class UebaRepository:
         """
         return self._execute_query(sql, parameters)
 
+    @staticmethod
+    def _normalize_usernames(usernames: list[str] | None) -> list[str] | None:
+        """Normalize and validate usernames. Empty list is rejected."""
+        if usernames is None:
+            return None
+        if not isinstance(usernames, list):
+            raise ValueError("usernames must be None or a non-empty list")
+        cleaned = sorted({u.strip() for u in usernames if u and u.strip()})
+        if not cleaned:
+            raise ValueError("usernames must be None or a non-empty list")
+        return cleaned
+
     def _execute_query(self, sql: str, parameters: dict[str, Any]) -> list[dict]:
         """执行查询并统一转换为 list[dict]。"""
         if hasattr(self.client, "query"):
@@ -298,13 +312,16 @@ class UebaRepository:
 
     def _base_parameters(self, start_time: Any, end_time: Any, log_type: str) -> dict[str, Any]:
         """构造所有查询共用的参数。"""
-        parameters = {
+        parameters: dict[str, Any] = {
             "start_time": start_time,
             "end_time": end_time,
             "log_type": log_type,
         }
         if self.source_table == "ueba_baseline_training_logs":
             parameters["dataset_id"] = self.dataset_id
+        if self.usernames:
+            for i, u in enumerate(self.usernames):
+                parameters[f"uname_{i}"] = u
         return parameters
 
     def _qualified_source_table(self) -> str:
@@ -322,6 +339,9 @@ class UebaRepository:
             conditions.append("dataset_id = %(dataset_id)s")
             if self.active_only:
                 conditions.append("is_active = 1")
+        if self.usernames:
+            placeholders = ", ".join(f"%(uname_{i})s" for i in range(len(self.usernames)))
+            conditions.append(f"username IN ({placeholders})")
         return "\n            AND ".join(conditions)
 
     def _validate_limit(self, limit: int) -> int:

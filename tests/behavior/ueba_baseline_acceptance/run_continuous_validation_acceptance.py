@@ -20,7 +20,7 @@ from typing import Any, NamedTuple
 
 from .clickhouse_writer import FixtureClickHouseWriter, create_clickhouse_client, validate_identifier
 from .config import AcceptanceConfig
-from .continuous_login_generator import ContinuousLoginGenerator
+from .continuous_login_generator import ContinuousLoginGenerator, DEFAULT_LOGS_PER_SECOND
 from .validation_cleanup import cleanup_validation_results
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -198,6 +198,8 @@ class ContinuousValidationRunner:
         self.validation_windows: dict[str, _Window] = {}
         self.baseline_count_before = 0
         self.baseline_hash_before = ""
+        self._logs_per_second = DEFAULT_LOGS_PER_SECOND
+        self.expected_logs_per_phase = self.args.run_seconds * self._logs_per_second
         self.report = _empty_report()
         self.report["model_version"] = self.model_version
 
@@ -355,20 +357,38 @@ class ContinuousValidationRunner:
     # 阶段严格校验
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _check_phase_consistency(phase: dict[str, Any], label: str) -> None:
+        """验证 generated/written/processed/scored/validation_result 五值一致。"""
+        generated = int(phase.get("generated_log_count", 0))
+        written = int(phase.get("written_count", 0))
+        processed = int(phase.get("processed_count", 0))
+        scored = int(phase.get("scored_count", 0))
+        vrc = int(phase.get("validation_result_count", 0))
+        if not (generated == written == processed == scored == vrc):
+            raise ManualAcceptanceError(
+                f"{label}: 计数不一致 — "
+                f"generated={generated} written={written} processed={processed} "
+                f"scored={scored} validation_result={vrc}"
+            )
+
+    def _check_count_in_expected_range(self, phase: dict[str, Any], label: str) -> None:
+        """验证 generated_log_count 在预期范围内；生成线程启动/暂停允许 ±1 tick。"""
+        generated = int(phase.get("generated_log_count", 0))
+        min_expected = self.expected_logs_per_phase - self._logs_per_second
+        max_expected = self.expected_logs_per_phase + self._logs_per_second
+        if not (min_expected <= generated <= max_expected):
+            raise ManualAcceptanceError(
+                f"{label}: generated_log_count={generated} 超出预期范围 "
+                f"[{min_expected}, {max_expected}]"
+            )
+
     def _validate_normal_phase(self, phase: dict[str, Any]) -> None:
-        if phase["generated_log_count"] <= 0:
-            raise ManualAcceptanceError("正常阶段: generated_log_count 必须 > 0")
         if not phase["validation_success"]:
             raise ManualAcceptanceError("正常阶段: Validation CLI 返回 success=false")
-        if phase["processed_count"] <= 0:
-            raise ManualAcceptanceError("正常阶段: processed_count 必须 > 0")
-        if phase["scored_count"] <= 0:
-            raise ManualAcceptanceError("正常阶段: scored_count 必须 > 0")
-        if phase["written_count"] <= 0:
-            raise ManualAcceptanceError("正常阶段: written_count 必须 > 0")
+        self._check_phase_consistency(phase, "正常阶段")
+        self._check_count_in_expected_range(phase, "正常阶段")
         vrc = int(phase.get("validation_result_count", 0))
-        if vrc <= 0:
-            raise ManualAcceptanceError("正常阶段: validation_result_count 必须 > 0")
 
         risk = phase.get("risk_level_counts", {})
         # 先检查各个非零风险级别 — 每个都独立抛出
@@ -399,25 +419,21 @@ class ContinuousValidationRunner:
             )
 
     def _validate_combo_phase(self, combo: dict[str, Any], normal: dict[str, Any]) -> None:
-        if combo["generated_log_count"] <= 0:
-            raise ManualAcceptanceError("组合异常阶段: generated_log_count 必须 > 0")
         if not combo["validation_success"]:
             raise ManualAcceptanceError("组合异常阶段: Validation CLI 返回 success=false")
-        if combo["processed_count"] <= 0:
-            raise ManualAcceptanceError("组合异常阶段: processed_count 必须 > 0")
-        if combo["scored_count"] <= 0:
-            raise ManualAcceptanceError("组合异常阶段: scored_count 必须 > 0")
-        if combo["written_count"] <= 0:
-            raise ManualAcceptanceError("组合异常阶段: written_count 必须 > 0")
+        self._check_phase_consistency(combo, "组合异常阶段")
+        self._check_count_in_expected_range(combo, "组合异常阶段")
         vrc = int(combo.get("validation_result_count", 0))
-        if vrc <= 0:
-            raise ManualAcceptanceError("组合异常阶段: validation_result_count 必须 > 0")
 
         risk = combo.get("risk_level_counts", {})
         high_critical = int(risk.get("HIGH", 0)) + int(risk.get("CRITICAL", 0))
         if high_critical < 1:
             raise ManualAcceptanceError(
                 f"组合异常阶段: HIGH + CRITICAL 必须 >= 1, 实际 risk={risk}"
+            )
+        if int(risk.get("CRITICAL", 0)) <= 0:
+            raise ManualAcceptanceError(
+                f"组合异常阶段: CRITICAL 必须 > 0, 实际 CRITICAL={risk.get('CRITICAL')}"
             )
         if combo["average_score"] <= normal["average_score"]:
             raise ManualAcceptanceError(
@@ -448,6 +464,16 @@ class ContinuousValidationRunner:
             raise ManualAcceptanceError(
                 f"幂等阶段: written_count 必须为 0, 实际 {phase['written_count']}"
             )
+        if phase["processed_count"] != 0:
+            raise ManualAcceptanceError(
+                f"幂等阶段: processed_count 必须为 0, 实际 {phase['processed_count']}"
+            )
+        if phase["scored_count"] != 0:
+            raise ManualAcceptanceError(
+                f"幂等阶段: scored_count 必须为 0, 实际 {phase['scored_count']}"
+            )
+        if phase["generated_log_count"] <= 0:
+            raise ManualAcceptanceError("幂等阶段: generated_log_count 必须 > 0")
         vrc = int(phase.get("validation_result_count", 0))
         if vrc != 0:
             raise ManualAcceptanceError(
@@ -783,7 +809,8 @@ class ContinuousValidationRunner:
         factory = self.generator_factory or (lambda **kw: ContinuousLoginGenerator(**kw))
         self.generator = factory(
             writer_callback=self.writer.insert_logs,
-            username=USERNAME, mode=mode, logs_per_second=20, tick_seconds=self.tick_seconds,
+            username=USERNAME, mode=mode, logs_per_second=self._logs_per_second,
+            tick_seconds=self.tick_seconds,
         )
 
 

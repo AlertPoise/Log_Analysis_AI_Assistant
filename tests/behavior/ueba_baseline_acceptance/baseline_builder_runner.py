@@ -53,9 +53,9 @@ class BaselineBuildRunResult:
         }
 
 
-def build_baseline_command(config: AcceptanceConfig) -> list[str]:
+def build_baseline_command(config: AcceptanceConfig, usernames: list[str] | None = None) -> list[str]:
     """Build the official scripts/build_ueba_baseline.py command."""
-    return [
+    cmd = [
         sys.executable,
         str(SCRIPT_PATH),
         "--clickhouse-host",
@@ -79,6 +79,9 @@ def build_baseline_command(config: AcceptanceConfig) -> list[str]:
         "--min-sample-count",
         str(config.min_sample_count),
     ]
+    if usernames:
+        cmd.extend(["--usernames", ",".join(usernames)])
+    return cmd
 
 
 def run_baseline_build(config: AcceptanceConfig) -> dict[str, Any]:
@@ -101,7 +104,7 @@ def run_baseline_build(config: AcceptanceConfig) -> dict[str, Any]:
         _mark_failed(config, build_result_path, precheck_error)
         return result
 
-    command = build_baseline_command(config)
+    command = build_baseline_command(config, usernames=config.fixture_usernames)
     redacted_command = _redact_command(command)
     try:
         completed = subprocess.run(
