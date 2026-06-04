@@ -70,18 +70,10 @@ except ImportError as e:
     logger.warning(f"⚠️ 无法导入 AI 模块: {e}")
 
 from fpdf import FPDF
-
-# Behavior API — 旧接口已清理，新只读 dashboard 接口待后续实现
-# 当前 UEBA 异常排行页面显示接入中占位状态
-try:
-    from src.behavior.api import (  # noqa: F401
-        get_validation_summary,
-        get_validation_ranking,
-        get_user_validation_detail,
-    )
-    BEHAVIOR_API_AVAILABLE = True
-except ImportError:
-    BEHAVIOR_API_AVAILABLE = False
+from src.behavior.api import (
+    analyze_behavior_for_frontend,
+    analyze_behavior_from_clickhouse,
+)
 
 # ClickHouse 客户端辅助函数
 def get_clickhouse_client():
@@ -411,6 +403,193 @@ def get_sample_search_results():
         {"时间": (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"), "用户": "lisi", "类型": "VPN 登录", 
          "IP": "192.168.1.101", "状态": "✅ 成功", "地点": "上海", "风险等级": "🟡 低危"},
     ]
+
+
+# ==================== Behavior 演示数据层 ====================
+
+def build_demo_behavior_payload() -> Dict[str, Any]:
+    """基于 VPN 样例结构构造可供 behavior 模块分析的演示 payload。"""
+    return {
+        "target_user": "sun.lei",
+        "history_logs": [
+            {
+                "timestamp": "2026-04-01 10:39:47",
+                "username": "sun.lei",
+                "source_ip": "101.89.15.237",
+                "location": "上海",
+                "action": "LOGIN",
+                "event_type": "LOGIN_SUCCESS",
+                "status": "SUCCESS",
+            },
+            {
+                "timestamp": "2026-04-01 12:00:24",
+                "username": "sun.lei",
+                "source_ip": "117.136.0.238",
+                "location": "上海",
+                "action": "LOGIN",
+                "event_type": "LOGIN_SUCCESS",
+                "status": "SUCCESS",
+            },
+            {
+                "timestamp": "2026-04-01 12:05:35",
+                "username": "sun.lei",
+                "source_ip": "117.136.0.213",
+                "location": "上海",
+                "action": "LOGIN",
+                "event_type": "LOGIN_SUCCESS",
+                "status": "SUCCESS",
+            },
+            {
+                "timestamp": "2026-04-02 08:51:38",
+                "username": "sun.lei",
+                "source_ip": "101.89.15.125",
+                "location": "上海",
+                "action": "LOGIN",
+                "event_type": "LOGIN_SUCCESS",
+                "status": "SUCCESS",
+            },
+            {
+                "timestamp": "2026-04-02 10:25:45",
+                "username": "sun.lei",
+                "source_ip": "101.89.15.20",
+                "location": "上海",
+                "action": "LOGIN",
+                "event_type": "LOGIN_SUCCESS",
+                "status": "SUCCESS",
+            },
+        ],
+        "detection_logs": [
+            {
+                "timestamp": "2026-04-02 21:53:34",
+                "username": "sun.lei",
+                "source_ip": "185.220.101.30",
+                "location": "阿姆斯特丹",
+                "action": "LOGIN",
+                "event_type": "LOGIN_FAIL",
+                "status": "FAIL",
+            }
+        ],
+    }
+
+
+def get_behavior_demo_result() -> Dict[str, Any]:
+    """调用 behavior 前端接口生成演示分析结果，失败时返回稳定结构。"""
+    try:
+        result = analyze_behavior_for_frontend(build_demo_behavior_payload())
+        return {**result, "source": "behavior_demo"}
+    except Exception as exc:
+        logger.exception("获取 behavior 演示分析失败")
+        return {
+            "success": False,
+            "source": "behavior_demo",
+            "target_user": None,
+            "baseline": {},
+            "profile": {},
+            "anomalies": [],
+            "summary": {},
+            "error": {
+                "code": "DASHBOARD_BEHAVIOR_DEMO_ERROR",
+                "message": str(exc),
+            },
+        }
+
+
+def convert_behavior_result_for_dashboard(result: Dict[str, Any]) -> Dict[str, Any]:
+    """将 behavior 返回结果整理为 dashboard 便于展示的结构。"""
+    anomalies = result.get("anomalies") if isinstance(result.get("anomalies"), list) else []
+    error = result.get("error") if isinstance(result.get("error"), dict) else None
+    return {
+        "source": result.get("source", "behavior_demo"),
+        "target_user": result.get("target_user"),
+        "baseline": result.get("baseline") if isinstance(result.get("baseline"), dict) else {},
+        "profile": result.get("profile") if isinstance(result.get("profile"), dict) else {},
+        "anomalies": anomalies,
+        "summary": result.get("summary") if isinstance(result.get("summary"), dict) else {},
+        "anomaly_count": len(anomalies),
+        "is_success": bool(result.get("success")),
+        "error": error,
+    }
+
+
+def get_behavior_analysis_for_dashboard(target_user: str = "zhangsan") -> Dict[str, Any]:
+    """优先读取 ClickHouse behavior，失败时回退到演示分析结果。"""
+    try:
+        clickhouse_result = analyze_behavior_from_clickhouse(target_user)
+    except Exception as exc:
+        logger.exception("获取 ClickHouse behavior 分析失败")
+        clickhouse_result = {
+            "success": False,
+            "source": "clickhouse",
+            "error": str(exc),
+        }
+
+    if clickhouse_result.get("success"):
+        dashboard_data = convert_behavior_result_for_dashboard(clickhouse_result)
+        dashboard_data["source"] = "clickhouse"
+        dashboard_data["fallback_reason"] = None
+        dashboard_data["clickhouse_error"] = None
+        return dashboard_data
+
+    demo_result = get_behavior_demo_result()
+    dashboard_data = convert_behavior_result_for_dashboard(demo_result)
+    dashboard_data["source"] = dashboard_data.get("source") or "behavior_demo"
+    dashboard_data["fallback_reason"] = clickhouse_result.get("error")
+    dashboard_data["clickhouse_error"] = clickhouse_result.get("error")
+    return dashboard_data
+
+
+def show_behavior_analysis_demo(
+    target_user: str = "zhangsan",
+    dashboard_data: Dict[str, Any] | None = None,
+) -> None:
+    """展示真实数据优先、演示数据兜底的用户行为分析结果。"""
+    st.divider()
+    st.subheader("🧭 用户行为分析")
+
+    if dashboard_data is None:
+        dashboard_data = get_behavior_analysis_for_dashboard(target_user)
+    if not dashboard_data["is_success"]:
+        error = dashboard_data.get("error") or {}
+        st.warning(f"Behavior 分析暂不可用：{error.get('message', '未知错误')}")
+        st.caption("数据来源：behavior_demo（调用失败，保留原页面 fallback）")
+        return
+
+    baseline = dashboard_data["baseline"]
+    summary = dashboard_data["summary"]
+
+    st.caption(f"数据来源：{dashboard_data['source']}")
+    if dashboard_data.get("fallback_reason"):
+        st.info(
+            "ClickHouse 数据不可用，已回退到 demo 数据。"
+            f" 原因：{dashboard_data['fallback_reason']}"
+        )
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("目标用户", dashboard_data.get("target_user") or "-")
+    with col2:
+        st.metric("基线样本数", str(baseline.get("sample_count", 0)))
+    with col3:
+        st.metric("基线可靠", "是" if baseline.get("is_reliable") else "否")
+    with col4:
+        st.metric("异常数量", str(dashboard_data["anomaly_count"]))
+
+    detail_col1, detail_col2, detail_col3 = st.columns(3)
+    with detail_col1:
+        st.markdown(f"**常用时间段**: {baseline.get('common_hours', [])}")
+    with detail_col2:
+        st.markdown(f"**常用 IP**: {baseline.get('common_ips', [])}")
+    with detail_col3:
+        st.markdown(f"**常用地点**: {baseline.get('common_locations', [])}")
+
+    st.markdown("**摘要**")
+    st.json(summary)
+
+    st.markdown("**异常列表**")
+    anomalies = dashboard_data["anomalies"]
+    if anomalies:
+        st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
+    else:
+        st.info("当前演示数据未检测到异常")
 
 
 # ==================== 真实接口层 ====================
@@ -940,7 +1119,8 @@ def _ranking_rows_to_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
             for row in rows
         ]
     )
-    return {"success": False, "ranking": []}
+
+
 
 
 def get_security_metrics():
