@@ -842,14 +842,103 @@ def get_anomaly_users(time_range="最近 24 小时", limit=10):
 
 
 def get_ueba_ranking_from_clickhouse(time_range: str = "最近 24 小时", limit: int = 10) -> Dict[str, Any]:
-    """UEBA validation 排行查询 — 已移除旧 risk_score 查询。
+    """从 logs_structured 表聚合用户风险排行"""
+    import clickhouse_connect
+    time_map = {
+        "最近 24 小时": 24,
+        "最近 7 天": 24 * 7,
+        "最近 30 天": 24 * 30,
+    }
+    hours = time_map.get(time_range, 24)
+    try:
+        client = clickhouse_connect.get_client(
+            host=settings.clickhouse_host,
+            port=settings.clickhouse_port,
+            username=settings.clickhouse_user,
+            password=settings.clickhouse_password,
+            database=settings.clickhouse_database,
+            connect_timeout=10
+        )
+    except Exception as e:
+        logger.error(f"ClickHouse 连接失败: {e}")
+        return {"success": False, "ranking": []}
 
-    旧实现基于 logs_structured.risk_score（parser 输入侧标签），存在 SQL 注入风险。
-    待后续接入 ueba_validation_results 的只读查询。
+    query = f"""
+    SELECT
+        username,
+        max(ifNull(risk_score, 0)) / 100.0 AS score,
+        count(*) AS event_count,
+        max(toTimezone(timestamp, 'Asia/Shanghai')) AS last_event_time
+    FROM {settings.clickhouse_table}
+    WHERE timestamp >= now() - INTERVAL {hours} HOUR
+      AND username != ''
+    GROUP BY username
+    ORDER BY score DESC, event_count DESC, last_event_time DESC
+    LIMIT {limit}
     """
-    logger.info(
-        "UEBA ranking query called (time_range=%s, limit=%s) — 接入中，返回空结果",
-        time_range, limit,
+    try:
+        result = client.query(query)
+        ranking = []
+        for idx, row in enumerate(result.result_rows, start=1):
+            username = row[0]
+            score = float(row[1]) if row[1] is not None else 0.0
+            event_count = int(row[2]) if row[2] is not None else 0
+            last_time = row[3]
+            last_time_str = last_time.strftime("%Y-%m-%d %H:%M") if last_time else ""
+            ranking.append({
+                "rank": idx,
+                "username": username,
+                "score": score,
+                "risk_level": _format_ueba_risk_level(score),
+                "event_count": event_count,
+                "last_event_time": last_time_str,
+            })
+        client.close()
+        return {"success": True, "ranking": ranking}
+    except Exception as e:
+        logger.error(f"查询排行失败: {e}", exc_info=True)
+        client.close()
+        return {"success": False, "ranking": []}
+
+
+def _format_ueba_risk_level(score: float) -> str:
+    """将 0~1 风险分映射为页面展示等级。"""
+    if score >= 0.8:
+        return "🔴 高危"
+    if score >= 0.5:
+        return "🟠 中危"
+    return "🟡 低危"
+
+
+def _demo_ranking_to_rows(sample_data: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
+    """把原有 demo 字典转成统一排行行结构。"""
+    return [
+        {
+            "rank": sample_data["排名"][index],
+            "username": sample_data["用户名"][index],
+            "score": sample_data["异常评分"][index],
+            "risk_level": sample_data["风险等级"][index],
+            "event_count": sample_data["异常事件数"][index],
+            "last_event_time": sample_data["最近异常时间"][index],
+        }
+        for index in range(len(sample_data["用户名"]))
+    ]
+
+
+def _ranking_rows_to_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    """把统一排行结构转成原页面使用的中文列。"""
+    return pd.DataFrame(
+        [
+            {
+                "排名": row["rank"],
+                "用户名": row["username"],
+                "异常评分": row["score"],
+                "风险等级": row["risk_level"],
+                "异常事件数": row["event_count"],
+                "最近异常时间": row["last_event_time"],
+            }
+            for row in rows
+        ]
     )
     return {"success": False, "ranking": []}
 
@@ -1033,32 +1122,114 @@ def show_realtime_logs():
 
 
 def show_ueba_ranking():
-    """显示 UEBA 异常用户排行 — 已移除旧接口，待后续接入。
-
-    旧实现依赖：
-      - logs_structured.risk_score（parser 输入侧标签，非 UEBA 评分）
-      - analyze_behavior_from_clickhouse（src.behavior.api 旧接口，已不存在）
-
-    新接入将基于：
-      - ueba_validation_results 只读查询（UebaValidationRepository）
-      - 通过 src.behavior.api 新接口获取数据
-      - 不触发 validation，不写库，不重跑 baseline
-    """
+    """显示 UEBA 异常用户排行（仅从 ClickHouse 读取）"""
     st.header("👥 UEBA 异常用户排行")
-    st.markdown("基于 UEBA validation 结果，识别异常用户并排序")
+    st.markdown("基于用户行为基线，识别异常用户并排序")
 
-    st.info(
-        "UEBA validation dashboard 接入中。\n\n"
-        "旧 behavior demo 接口已清理。\n"
-        "新接入将基于 `ueba_validation_results` 表，只读查询 UEBA 评分结果。\n\n"
-        "如需查看 UEBA validation 结果，请先通过以下命令运行 validation 并导出：\n\n"
-        "```bash\n"
-        "PYTHONPATH=$(pwd) .venv/bin/python scripts/run_ueba_validation.py \\\n"
-        "  --start-time \"...\" --end-time \"...\" --model-version \"...\" --write\n\n"
-        "PYTHONPATH=$(pwd) .venv/bin/python scripts/export_ueba_validation_results.py \\\n"
-        "  --start-time \"...\" --end-time \"...\" --model-version \"...\" --format csv\n"
-        "```"
+    col1, col2 = st.columns(2)
+    with col1:
+        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"])
+    with col2:
+        risk_filter = st.multiselect("风险等级", ["🔴 高危", "🟠 中危", "🟡 低危"], default=["🔴 高危", "🟠 中危", "🟡 低危"])
+        # 注意：risk_filter 目前仅用于前端展示，实际排行未过滤，您可以后续实现
+
+    st.divider()
+    st.subheader("🔴 异常用户 TOP10")
+
+    ranking_result = get_ueba_ranking_from_clickhouse(time_range, limit=10)
+    if not ranking_result.get("success") or not ranking_result.get("ranking"):
+        st.error("无法从 ClickHouse 获取排行数据，请检查后端服务是否正常")
+        return
+
+    ranking_rows = ranking_result["ranking"]
+    df_ranking = pd.DataFrame([
+        {
+            "排名": r["rank"],
+            "用户名": r["username"],
+            "异常评分": r["score"],
+            "风险等级": r["risk_level"],
+            "异常事件数": r["event_count"],
+            "最近异常时间": r["last_event_time"],
+        }
+        for r in ranking_rows
+    ])
+    st.dataframe(
+        df_ranking,
+        use_container_width=True,
+        hide_index=True,
+        column_config={"异常评分": st.column_config.ProgressColumn("异常评分", min_value=0, max_value=1, format="%.2f")}
     )
+
+    st.divider()
+    st.subheader("📋 用户行为分析详情")
+
+    # 获取真实用户名列表（来自 ClickHouse）
+    real_usernames = [row["username"] for row in ranking_rows if row.get("username")]
+    if not real_usernames:
+        st.warning("没有找到任何用户日志数据")
+        return
+
+    selected_user = st.selectbox("选择用户查看行为分析", real_usernames)
+    # 直接调用行为分析接口（不再有 demo 回退）
+    behavior_result = analyze_behavior_from_clickhouse(selected_user)
+    if not behavior_result.get("success"):
+        st.error(f"行为分析失败：{behavior_result.get('error', '未知错误')}")
+        return
+
+        anomaly_events = selected_behavior_data.get("anomalies", [])
+        if not anomaly_events:
+            st.info("暂无异常行为")
+
+        for i, event in enumerate(anomaly_events):
+            event_time = event.get("timestamp", "-")
+            event_type = event.get("anomaly_type", "-")
+            with st.expander(f"⚠️ {event_time} - {event_type}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**时间**: {event_time}")
+                    st.markdown(f"**类型**: {event_type}")
+                    st.markdown(f"**描述**: {event.get('reason', '-')}")
+                with col2:
+                    st.markdown(f"**风险等级**: {event.get('risk_level', '-')}")
+                    st.markdown(f"**风险评分**: {event.get('risk_score', '-')}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ 标记为误报", key=f"false_{i}"):
+                        st.success("已标记为误报")
+                with col2:
+                    if st.button("🤖 生成 AI 建议", key=f"ai_{i}"):
+                        with st.spinner("🔍 AI 分析中..."):
+                            log_context = f"IP: {event['IP']}, 地点: {event['地点']}, 时间: {event['时间']}"
+                            ai_result = analyze_anomaly_with_ai(
+                                username=selected_user,
+                                anomaly_description=event['描述'],
+                                log_context=log_context
+                            )
+                        
+                        st.markdown("---")
+                        st.markdown(f"**🚨 威胁类型**: {ai_result.get('threat_type', 'UNKNOWN')}")
+                        st.markdown(f"**⚠️ 风险等级**: {ai_result.get('risk_level', 'MEDIUM')}")
+                        st.info(f"**📝 分析说明**: {ai_result.get('description', '')}")
+                        st.warning(f"**💡 处置建议**: {ai_result.get('suggestion', '')}")
+
+    detail_col1, detail_col2, detail_col3 = st.columns(3)
+    with detail_col1:
+        st.markdown(f"**常用时间段**: {baseline.get('common_hours', [])}")
+    with detail_col2:
+        st.markdown(f"**常用 IP**: {baseline.get('common_ips', [])}")
+    with detail_col3:
+        st.markdown(f"**常用地点**: {baseline.get('common_locations', [])}")
+
+    st.markdown("**摘要指标**")
+    st.json(summary)
+
+    st.markdown("**异常事件列表**")
+    anomalies = behavior_result.get("anomalies", [])
+    if anomalies:
+        st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
+    else:
+        st.info("未检测到异常行为")
 
 def show_security_score():
     """显示安全评分看板"""

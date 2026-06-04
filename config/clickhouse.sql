@@ -1,13 +1,5 @@
--- ClickHouse 数据库初始化脚本
--- 创建日志存储所需的表结构
+USE {CLICKHOUSE_DATABASE};
 
--- 创建数据库
-CREATE DATABASE IF NOT EXISTS log_analysis;
-
--- 使用数据库
-USE log_analysis;
-
--- 原始日志表 (存储从 Kafka 消费的原始日志)
 CREATE TABLE IF NOT EXISTS logs_raw (
     id UInt64,
     timestamp DateTime,
@@ -28,15 +20,11 @@ SETTINGS
     kafka_format = 'JSONEachRow',
     kafka_max_block_size = 1048576;
 
--- 结构化日志表 (存储解析后的日志，支持用户行为分析和风险分析)
-CREATE TABLE IF NOT EXISTS logs_structured (
-    -- 核心标识字段
+CREATE TABLE IF NOT EXISTS {CLICKHOUSE_TABLE} (
     id UInt64,
     timestamp DateTime,
     log_type String,
     source String,
-    
-    -- 5W1H 行为分析字段
     username String,
     user_id Nullable(String),
     dept Nullable(String),
@@ -55,19 +43,13 @@ CREATE TABLE IF NOT EXISTS logs_structured (
     client_software Nullable(String),
     user_agent Nullable(String),
     session_id Nullable(String),
-    
-    -- 用户行为基线字段
     is_off_hours Nullable(Bool),
     is_unusual_ip Nullable(Bool),
     session_duration_sec Nullable(UInt32),
     bytes_sent Nullable(UInt64),
     bytes_recv Nullable(UInt64),
-    
-    -- 风险分析字段
     risk_score Nullable(UInt8),
     risk_tags Nullable(String),
-    
-    -- 通用扩展字段
     uri Nullable(String),
     method Nullable(String),
     status_code Nullable(UInt16),
@@ -77,13 +59,9 @@ CREATE TABLE IF NOT EXISTS logs_structured (
     device_info Nullable(String),
     location Nullable(String),
     request_id Nullable(String),
-    
-    -- 系统时间字段
     collected_at DateTime,
     parsed_at DateTime DEFAULT now(),
     indexed_at DateTime DEFAULT now(),
-    
-    -- 原始数据
     raw_log Nullable(String),
     parser Nullable(String),
     parse_status Nullable(String)
@@ -93,7 +71,6 @@ ORDER BY (log_type, timestamp, username)
 TTL timestamp + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;
 
--- 用户行为统计表
 CREATE TABLE IF NOT EXISTS user_behavior_stats (
     username String,
     date Date,
@@ -116,7 +93,6 @@ ORDER BY (username, date)
 TTL date + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;
 
--- 异常检测结果表
 CREATE TABLE IF NOT EXISTS anomaly_detection (
     id UInt64,
     detection_time DateTime DEFAULT now(),
@@ -131,14 +107,13 @@ CREATE TABLE IF NOT EXISTS anomaly_detection (
     processed_at Nullable(DateTime),
     ai_analysis Nullable(String),
     threat_type Nullable(String),
-    suggestion Nullable(String)
+    `处置建议` Nullable(String)
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(detection_time)
 ORDER BY (detection_time, username)
 TTL detection_time + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;
 
--- AI 分析报告表
 CREATE TABLE IF NOT EXISTS ai_analysis_reports (
     id UInt64,
     report_date Date,
@@ -158,7 +133,6 @@ ORDER BY (report_date, risk_level, risk_score)
 TTL report_date + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192;
 
--- 日报统计表
 CREATE TABLE IF NOT EXISTS daily_reports (
     report_date Date,
     total_logs UInt64,
@@ -176,7 +150,6 @@ ORDER BY report_date
 TTL report_date + INTERVAL 365 DAY
 SETTINGS index_granularity = 8192;
 
--- 创建物化视图 (自动统计用户行为)
 CREATE MATERIALIZED VIEW IF NOT EXISTS user_behavior_mv
 TO user_behavior_stats
 AS SELECT
@@ -186,7 +159,7 @@ AS SELECT
     countIf(action = 'LOGIN') as login_count,
     countIf(action = 'LOGOUT') as logout_count,
     countIf(action LIKE '%API%') as api_call_count,
-    countIf(result IN ('FAILED', 'FAIL') OR event_type = 'LOGIN_FAIL') as failed_login_count,
+    countIf(result = 'FAIL') as failed_login_count,
     uniq(source_ip) as unique_ips,
     0 as unique_locations,
     0.0 as avg_response_time,
@@ -195,27 +168,11 @@ AS SELECT
     groupArray(toHour(timestamp)) as common_time_slots,
     0.0 as risk_score,
     now() as calculated_at
-FROM logs_structured
+FROM {CLICKHOUSE_TABLE}
 WHERE username IS NOT NULL
 GROUP BY username, toDate(timestamp);
 
--- 创建索引
-CREATE INDEX IF NOT EXISTS idx_username ON logs_structured (username) TYPE bloom_filter GRANULARITY 4;
-CREATE INDEX IF NOT EXISTS idx_source_ip ON logs_structured (source_ip) TYPE bloom_filter GRANULARITY 4;
-CREATE INDEX IF NOT EXISTS idx_action ON logs_structured (action) TYPE bloom_filter GRANULARITY 4;
+CREATE INDEX IF NOT EXISTS idx_username ON {CLICKHOUSE_TABLE} (username) TYPE bloom_filter GRANULARITY 4;
+CREATE INDEX IF NOT EXISTS idx_source_ip ON {CLICKHOUSE_TABLE} (source_ip) TYPE bloom_filter GRANULARITY 4;
+CREATE INDEX IF NOT EXISTS idx_action ON {CLICKHOUSE_TABLE} (action) TYPE bloom_filter GRANULARITY 4;
 CREATE INDEX IF NOT EXISTS idx_risk_level ON anomaly_detection (risk_level) TYPE bloom_filter GRANULARITY 4;
-
--- 创建字典 (用于 IP 地理位置查询)
--- 需要 IP 地理位置数据文件
--- CREATE DICTIONARY IF NOT EXISTS ip_location_dict
--- (
---     ip String,
---     country String,
---     city String,
---     latitude Float32,
---     longitude Float32
--- )
--- PRIMARY KEY ip
--- SOURCE(HTTP(URL 'http://ip-geo-api.com/lookup'))
--- LAYOUT(HASHED())
--- LIFETIME(3600);
