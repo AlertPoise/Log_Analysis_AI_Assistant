@@ -1032,9 +1032,9 @@ def test_cleanup_validation_uses_exact_username(monkeypatch):
     client = FakeClient(baseline_count=1, continuous_count=5)
     gen = FakeGenerator()
 
-    captured_user_prefix = []
-    def _track_cleanup(client, config, run_id, start_time, end_time, *, user_prefix="fixture_user_%"):
-        captured_user_prefix.append(user_prefix)
+    captured_username = []
+    def _track_cleanup(client, config, run_id, start_time, end_time, *, username=target.USERNAME):
+        captured_username.append(username)
         return {"success": True, "before_count": 0, "after_count": 0, "error": None}
 
     monkeypatch.setattr(target, "cleanup_validation_results", _track_cleanup)
@@ -1052,9 +1052,8 @@ def test_cleanup_validation_uses_exact_username(monkeypatch):
 
     runner._run_cleanup()
 
-    for prefix in captured_user_prefix:
-        assert prefix == target.USERNAME, f"user_prefix 应为精确 username, 实际 {prefix!r}"
-        assert "%" not in prefix, f"user_prefix 不应包含通配符: {prefix!r}"
+    for name in captured_username:
+        assert name == target.USERNAME, f"username 应为精确值, 实际 {name!r}"
 
 
 def test_cleanup_failure_fails_report(monkeypatch):
@@ -1062,7 +1061,7 @@ def test_cleanup_failure_fails_report(monkeypatch):
     client = FakeClient(baseline_count=1, continuous_count=5)
     gen = FakeGenerator()
 
-    def _failing_cleanup(client, config, run_id, start_time, end_time, *, user_prefix="fixture_user_%"):
+    def _failing_cleanup(client, config, run_id, start_time, end_time, *, username=target.USERNAME):
         return {"success": False, "before_count": 0, "after_count": 0, "error": "cleanup 失败"}
 
     monkeypatch.setattr(target, "cleanup_validation_results", _failing_cleanup)
@@ -1102,7 +1101,7 @@ def test_continuous_log_cleanup_rejects_residue(monkeypatch):
 
     monkeypatch.setattr(target, "cleanup_validation_results",
         lambda client, config, run_id, start_time, end_time, *,
-               user_prefix="fixture_user_%": {"success": True, "before_count": 0, "after_count": 0, "error": None})
+               username=target.USERNAME: {"success": True, "before_count": 0, "after_count": 0, "error": None})
 
     # 注入残留：residue 查询返回 5
     orig_scalar = target._scalar_query
@@ -1130,7 +1129,7 @@ def test_cleanup_uses_dynamic_window(monkeypatch):
 
     captured_start_times = []
     captured_end_times = []
-    def _track_cleanup(client, config, run_id, start_time, end_time, *, user_prefix="fixture_user_%"):
+    def _track_cleanup(client, config, run_id, start_time, end_time, *, username=target.USERNAME):
         captured_start_times.append(start_time)
         captured_end_times.append(end_time)
         return {"success": True, "before_count": 0, "after_count": 0, "error": None}

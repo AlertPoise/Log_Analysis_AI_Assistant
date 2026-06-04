@@ -177,26 +177,27 @@ def test_parse_args_accepts_debug_artifacts_flag():
 def test_build_state_consolidates_intermediate_results(tmp_path):
     """State should retain enough intermediate detail when debug files are not emitted."""
     config = AcceptanceConfig(output_dir=tmp_path)
+    expected = config.expected_user_count
     before = _snapshot(city="北京", gateway="vpn-gw-cn-01", failed_rate=0.03)
-    before.update({"fingerprint": "before_fp", "row_count": 26, "user_count": 26, "total_sample_count": 33065})
+    before.update({"fingerprint": "before_fp", "row_count": expected, "user_count": expected, "total_sample_count": 33065})
     after_update = dict(before)
     after_update["fingerprint"] = "before_fp"
     after_rebuild = _snapshot(city="深圳", gateway="vpn-gw-hk-01", failed_rate=0.08)
-    after_rebuild.update({"fingerprint": "after_fp", "row_count": 26, "user_count": 26, "total_sample_count": 33065})
+    after_rebuild.update({"fingerprint": "after_fp", "row_count": expected, "user_count": expected, "total_sample_count": 33065})
     context = {
         "fixture_load_result": {"success": True},
         "fixture_stats": {"may": {"rows": 33065}, "june": {"rows": 33065}},
         "may_training_update_result": {"success": True, "target_rows": 33065},
-        "may_baseline_build_result": {"success": True, "payload": {"total_user_count": 26}},
+        "may_baseline_build_result": {"success": True, "payload": {"total_user_count": expected}},
         "june_training_update_result": {"success": True, "target_rows": 33065},
-        "june_baseline_build_result": {"success": True, "payload": {"total_user_count": 26}},
+        "june_baseline_build_result": {"success": True, "payload": {"total_user_count": expected}},
         "baseline_before_june_update": before,
         "baseline_after_june_training_update": after_update,
         "baseline_after_june_rebuild": after_rebuild,
         "baseline_unchanged_after_training_update": True,
         "baseline_changed_after_rebuild": True,
         "training_table_replaced_by_june": True,
-        "baseline_change_diff": {"changed_user_count": 26, "checked_user_count": 26},
+        "baseline_change_diff": {"changed_user_count": expected, "checked_user_count": expected},
     }
     report = {"success": True}
 
@@ -206,11 +207,11 @@ def test_build_state_consolidates_intermediate_results(tmp_path):
     assert state["test_windows_note"] == runner.TEST_WINDOWS_NOTE
     assert "production can use any approved training window" in state["test_windows_note"]
     assert state["may_training_update_result"]["target_rows"] == 33065
-    assert state["june_baseline_build_result"]["payload"]["total_user_count"] == 26
+    assert state["june_baseline_build_result"]["payload"]["total_user_count"] == expected
     assert state["baseline_before_june_update"]["fingerprint"] == "before_fp"
     assert state["baseline_after_june_training_update"]["unchanged"] is True
     assert state["baseline_after_june_rebuild"]["changed"] is True
-    assert state["baseline_change_diff"]["changed_user_count"] == 26
+    assert state["baseline_change_diff"]["changed_user_count"] == expected
 
 
 def _snapshot(city, gateway, failed_rate):

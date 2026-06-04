@@ -759,7 +759,7 @@ class ContinuousValidationRunner:
             result = cleanup_validation_results(
                 self.client, self.config, run_id,
                 start_time=window.start_str, end_time=window.end_str,
-                user_prefix=USERNAME,
+                username=USERNAME,
             )
             if not result.get("success"):
                 self.report["success"] = False

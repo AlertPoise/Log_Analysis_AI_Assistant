@@ -118,11 +118,11 @@ def test_demo_shell_contains_required_menu_and_state_paths():
     assert "UEBA 全流程演示工具" in text
     assert "1. 环境检查" in text
     assert "2. 基础准线流程" in text
-    assert "3. 训练表更新流程（暂未开放" in text
+    assert "3. 训练表更新流程" in text
     assert "4. 持续流量与 Validation" in text
     assert "5. 查看整体状态" in text
     assert "6. 一键执行基础准线完整流程" in text
-    assert "7. 一键持续流量联动验收（暂未开放" in text
+    assert "7. 一键持续流量联动验收" in text
     assert "8. 退出" in text
     assert "current_window_start" in text
     assert "current_window_end" in text
@@ -321,13 +321,17 @@ def test_clickhouse_scalar_checks_curl_exit_code():
 # ============================================================================
 
 
-def test_baseline_full_flow_disabled():
-    """Root menu 6 is now disabled — shows a clear message and returns 1."""
+def test_baseline_full_flow_enabled():
+    """Root menu 6 is now enabled via non-interactive runner flags."""
     text = _script_text()
     idx = text.index("run_baseline_full_flow()")
-    block = text[idx:text.index("run_manual_validation_cli", idx)]
-    assert "当前不可用" in block
-    assert "交互 Runner pipe 注入模式已废弃" in block
+    block = text[idx:text.index("_run_continuous_acceptance", idx)]
+    assert "run_baseline_generate_expected" in block
+    assert "run_baseline_load_fixture" in block
+    assert "run_baseline_build_action" in block
+    assert "run_baseline_validate" in block
+    assert "confirm_token \"YES\"" in block
+    assert "printf" not in block  # no pipe injection
 
 
 def test_yes_confirmation_eof_cancels_baseline_flow():
@@ -832,35 +836,45 @@ def test_source_test_no_tmp_usage():
 # ============================================================================
 
 
-def test_menu_3_training_shows_disabled():
-    _prepare_state_dir()
-    completed = _run_script("3\n0\n", timeout=2.0)
-    assert completed.returncode == 0
-
-
-def test_menu_7_continuous_acceptance_shows_disabled():
-    _prepare_state_dir()
-    completed = _run_script("7\n0\n", timeout=2.0)
-    assert completed.returncode == 0
-
-
-def test_continuous_submenu_12_shows_disabled():
-    _prepare_state_dir()
-    completed = _run_script("4\n12\n13\n0\n", timeout=2.0)
-    assert completed.returncode == 0
-
-
-def test_disabled_menu_does_not_call_runner():
+def test_menu_3_training_enabled():
+    """Menu 3 is now enabled — wired to run_training_update."""
     text = _script_text()
-    assert "run_training_all" not in text
-    assert "run_training_interactive" not in text
-    assert "training_menu" not in text
-    assert "run_continuous_acceptance_all" not in text
+    assert "run_training_update" in text
+    assert "3. 训练表更新流程" in text
+    assert "暂未开放" not in text.split("3. 训练表更新流程")[1].split("\n")[0]
+
+
+def test_menu_7_continuous_acceptance_enabled():
+    """Root menu 7 is now enabled — shows available text, not disabled."""
+    text = _script_text()
+    assert "7. 一键持续流量联动验收" in text
+    assert "DELETE 二次确认" in text
+
+
+def test_continuous_submenu_12_enabled():
+    """Submenu 12 is now enabled — calls _run_continuous_acceptance."""
+    text = _script_text()
+    assert "_run_continuous_acceptance" in text
+
+
+def test_menu_3_6_7_12_all_enabled():
+    """Menus 3/6/7/12 are now enabled with proper guards."""
+    text = _script_text()
+    assert "run_training_update" in text
+    assert "run_baseline_full_flow" in text
+    assert "_run_continuous_acceptance" in text
+    # Old disabled text should be gone
+    assert "暂未开放：需单独完成 Python 一键联动验收 cleanup 加固" not in text
+    assert "训练表更新流程（暂未开放" not in text
+    # Menu 9 full process exists
+    assert "run_full_process" in text
+    assert "全流程闭环" in text
+    assert "交互 Runner pipe 注入已废弃" not in text
 
 
 def test_continuous_submenu_12_text():
     text = _script_text()
-    assert "暂未开放：需单独完成 Python 一键联动验收 cleanup 加固" in text
+    assert "DELETE 二次确认 cleanup" in text
 
 
 # ============================================================================
@@ -919,16 +933,17 @@ def test_set_rate_paused_false_not_true():
 # ============================================================================
 
 
-def test_root_menu_6_disabled_message():
+def test_root_menu_6_enabled_message():
     text = _script_text()
-    assert "一键执行基础准线完整流程（已禁用" in text
-    assert "交互 Runner pipe 注入已废弃" in text
+    assert "6. 一键执行基础准线完整流程" in text
+    assert "已禁用" not in text.split("6. 一键执行基础准线完整流程")[1].split("\n")[0]
 
 
-def test_root_menu_6_prints_disabled_and_returns():
-    _prepare_state_dir()
-    completed = _run_script("6\n0\n", timeout=2.0)
-    assert completed.returncode == 0
+def test_root_menu_6_has_yes_gate():
+    text = _script_text()
+    idx = text.index("run_baseline_full_flow()")
+    block = text[idx:text.index("_run_continuous_acceptance", idx)]
+    assert 'confirm_token "YES"' in block
 
 
 def test_baseline_menu_no_printf_injection_to_runner():
@@ -1042,6 +1057,56 @@ def test_baseline_menu_write_items_require_uppercase_yes():
 
 
 # ============================================================================
+# 新增：菜单 6/7/12 启用 + YES/DELETE 门禁 + cleanup LIKE→精确 username
+# ============================================================================
+
+
+def test_continuous_acceptance_has_yes_gate():
+    """_run_continuous_acceptance must require YES before write."""
+    text = _script_text()
+    idx = text.index("_run_continuous_acceptance()")
+    block = text[idx:text.index("continuous_mode_menu", idx)]
+    assert 'confirm_token "YES"' in block
+
+
+def test_continuous_acceptance_has_delete_gate():
+    """_run_continuous_acceptance must offer DELETE secondary confirmation."""
+    text = _script_text()
+    idx = text.index("_run_continuous_acceptance()")
+    block = text[idx:text.index("continuous_mode_menu", idx)]
+    assert 'confirm_token "DELETE"' in block
+    assert "cleanup" in block.lower()
+
+
+def test_continuous_acceptance_uses_timeout():
+    """_run_continuous_acceptance must use CONTINUOUS_ACCEPTANCE_TIMEOUT."""
+    text = _script_text()
+    idx = text.index("_run_continuous_acceptance()")
+    block = text[idx:text.index("continuous_mode_menu", idx)]
+    assert "CONTINUOUS_ACCEPTANCE_TIMEOUT" in block
+    assert "timeout" in block
+
+
+def test_validation_cleanup_uses_exact_username_not_like():
+    """validation_cleanup.py must use username = not LIKE."""
+    text = Path(
+        "tests/behavior/ueba_baseline_acceptance/validation_cleanup.py"
+    ).read_text("utf-8")
+    assert "username LIKE" not in text
+    assert "username_prefix" not in text
+    assert "username = %(username)s" in text or "username = %(username)s" in text.lower() or "WHERE username = %(username)s" in text
+    assert "DELETE WHERE username =" in text
+
+
+def test_full_flow_no_pipe_injection():
+    """run_baseline_full_flow must not contain printf pipe injection."""
+    text = _script_text()
+    idx = text.index("run_baseline_full_flow()")
+    block = text[idx:text.index("_run_continuous_acceptance", idx)]
+    assert "printf" not in block
+
+
+# ============================================================================
 # 新增：LIKE 'menu_%' 精确语义修复
 # ============================================================================
 
@@ -1108,3 +1173,143 @@ def test_runner_action_flag_conflict_does_not_execute():
     assert cp.returncode != 0
     # 错误信息应出现在 stderr
     assert "一次只能指定一个" in cp.stderr
+
+
+# ============================================================================
+# 新增：run_validation_acceptance.py 的 cleanup 调用已改为精确 username
+# ============================================================================
+
+
+def test_run_validation_acceptance_cleanup_uses_exact_username():
+    """run_validation_acceptance.py 调用 cleanup_validation_results 时必须传 username=，不能传 user_prefix。"""
+    text = Path(
+        "tests/behavior/ueba_baseline_acceptance/run_validation_acceptance.py"
+    ).read_text("utf-8")
+    import re
+    calls = re.findall(r'cleanup_validation_results\([^)]+\)', text, re.DOTALL)
+    assert len(calls) >= 1, "应至少有一处 cleanup_validation_results 调用"
+    for call in calls:
+        assert "user_prefix" not in call, f"cleanup_validation_results 调用不应再传 user_prefix: {call[:120]}"
+        assert "username=" in call, f"cleanup_validation_results 调用应传精确 username=: {call[:120]}"
+
+
+# ============================================================================
+# 新增：confirm_token 大小写不敏感 + 菜单 3 启用 + 全流程入口
+# ============================================================================
+
+
+def test_confirm_token_case_insensitive_yes():
+    """confirm_token now normalizes case — yes/YES/Yes all pass."""
+    text = _script_text()
+    idx = text.index("confirm_token()")
+    block = text[idx:text.index("run_training_update", idx)]
+    assert "tr '[:upper:]' '[:lower:]'" in block
+    assert "answer_lower" in block
+    assert "expected_lower" in block
+
+
+def test_confirm_token_accepts_lowercase_yes():
+    """Sourcing the script: confirm_token YES should accept yes."""
+    proc = _source_bash(
+        'confirm_token "YES" "prompt: " <<< "yes" && echo "PASS" || echo "FAIL"'
+    )
+    assert "PASS" in proc.stdout
+
+
+def test_confirm_token_accepts_mixed_case_yes():
+    """confirm_token YES should accept YeS."""
+    proc = _source_bash(
+        'confirm_token "YES" "prompt: " <<< "YeS" && echo "PASS" || echo "FAIL"'
+    )
+    assert "PASS" in proc.stdout
+
+
+def test_confirm_token_accepts_lowercase_delete():
+    """confirm_token DELETE should accept delete."""
+    proc = _source_bash(
+        'confirm_token "DELETE" "prompt: " <<< "delete" && echo "PASS" || echo "FAIL"'
+    )
+    assert "PASS" in proc.stdout
+
+
+def test_confirm_token_rejects_wrong_word():
+    """confirm_token still rejects wrong token regardless of case."""
+    proc = _source_bash(
+        'confirm_token "YES" "prompt: " <<< "no" && echo "PASS" || echo "FAIL"'
+    )
+    assert "FAIL" in proc.stdout
+
+
+def test_confirm_token_eof_still_cancels():
+    """EOF still cancels confirm_token (case-insensitive change doesn't break it)."""
+    proc = _source_bash(
+        'confirm_token "YES" "prompt: " < /dev/null && echo "PASS" || echo "FAIL"'
+    )
+    assert "FAIL" in proc.stdout
+
+
+# ============================================================================
+# 新增：训练 runner non-interactive wiring 回归测试
+# ============================================================================
+
+
+def test_run_training_update_uses_run_all():
+    """run_training_update() must pass --run-all for non-interactive execution."""
+    text = _script_text()
+    idx = text.index("run_training_update()")
+    end = text.index("run_full_process()", idx)
+    block = text[idx:end]
+    assert "--run-all" in block, "run_training_update() 必须包含 --run-all"
+
+
+def test_run_training_update_keeps_timeout():
+    """run_training_update() must still include timeout and TRAINING_UPDATE_TIMEOUT."""
+    text = _script_text()
+    idx = text.index("run_training_update()")
+    end = text.index("run_full_process()", idx)
+    block = text[idx:end]
+    assert "timeout" in block.lower()
+    assert "TRAINING_UPDATE_TIMEOUT" in block
+
+
+def test_run_full_process_chains_3_6_7():
+    """run_full_process() chains run_training_update → run_baseline_full_flow → _run_continuous_acceptance."""
+    text = _script_text()
+    idx = text.index("run_full_process()")
+    end = text.index("run_baseline_full_flow()", idx)
+    block = text[idx:end] if end > idx else text[idx:idx + 800]
+    assert "run_training_update" in block
+    assert "run_baseline_full_flow" in block
+    assert "_run_continuous_acceptance" in block
+
+
+# ============================================================================
+# ClickHouse 前置守卫回归
+# ============================================================================
+
+
+def test_run_training_update_has_clickhouse_ready_guard():
+    """run_training_update() must check ClickHouse reachability before execution."""
+    text = _script_text()
+    idx = text.index("run_training_update()")
+    end = text.index("run_full_process()", idx)
+    block = text[idx:end]
+    assert "ensure_clickhouse_ready_for_write_flow" in block
+
+
+def test_ensure_clickhouse_ready_helper_exists():
+    """Shell must define ensure_clickhouse_ready_for_write_flow helper."""
+    text = _script_text()
+    assert "ensure_clickhouse_ready_for_write_flow()" in text
+
+
+def test_ensure_clickhouse_ready_has_ping_and_error_message():
+    """Helper must ping ClickHouse and print Chinese error on failure."""
+    text = _script_text()
+    idx = text.index("ensure_clickhouse_ready_for_write_flow()")
+    end = text.index("is_non_negative_int()", idx)
+    block = text[idx:end]
+    assert "clickhouse_base_url" in block
+    assert "ping" in block
+    assert "ClickHouse 不可达" in block
+    assert "菜单 1 环境检查" in block

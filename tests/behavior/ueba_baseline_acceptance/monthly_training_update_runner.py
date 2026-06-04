@@ -231,7 +231,7 @@ def run_monthly_training_update(
         client = client_factory(config)
         cleanup_acceptance_baselines(client, config)
         context["fixture_stats"] = fetch_fixture_stats(client, config)
-        _validate_fixture_stats(context, failed_checks)
+        _validate_fixture_stats(context, failed_checks, config.expected_user_count)
 
         may_update = replace_training_table_from_fixture_logs(
             client,
@@ -246,7 +246,7 @@ def run_monthly_training_update(
         context["may_training_update_result"] = may_update
         _check(may_update.get("success") is True, "may_training_update_success", failed_checks)
         context["may_training_stats"] = fetch_training_table_stats(client, config, MAY_START, MAY_END)
-        _validate_training_stats(context["may_training_stats"], MAY_START, MAY_END, "may_training", failed_checks)
+        _validate_training_stats(context["may_training_stats"], MAY_START, MAY_END, "may_training", failed_checks, config.expected_user_count)
 
         may_build = command_runner(
             build_training_baseline_command(
@@ -263,7 +263,7 @@ def run_monthly_training_update(
         before = fetch_baseline_snapshot(client, config, MAY_MODEL_VERSION)
         _write_debug_artifact(output_dir, BASELINE_BEFORE_FILE, before, debug_artifacts)
         context["baseline_before_june_update"] = before
-        _validate_baseline_snapshot(before, MAY_MODEL_VERSION, "may_baseline", failed_checks)
+        _validate_baseline_snapshot(before, MAY_MODEL_VERSION, "may_baseline", failed_checks, config.expected_user_count)
 
         june_update = replace_training_table_from_fixture_logs(
             client,
@@ -288,7 +288,7 @@ def run_monthly_training_update(
         _check(june_prebuild["row_count"] == 0, "no_june_baseline_before_rebuild", failed_checks)
 
         context["june_training_stats"] = fetch_training_table_stats(client, config, JUNE_START, JUNE_END)
-        _validate_training_stats(context["june_training_stats"], JUNE_START, JUNE_END, "june_training", failed_checks)
+        _validate_training_stats(context["june_training_stats"], JUNE_START, JUNE_END, "june_training", failed_checks, config.expected_user_count)
         replaced = bool(context["june_training_stats"].get("replaced_by_window"))
         context["training_table_replaced_by_june"] = replaced
         _check(replaced, "training_table_replaced_by_june", failed_checks)
@@ -308,7 +308,7 @@ def run_monthly_training_update(
         after_rebuild = fetch_baseline_snapshot(client, config, JUNE_MODEL_VERSION)
         _write_debug_artifact(output_dir, BASELINE_AFTER_REBUILD_FILE, after_rebuild, debug_artifacts)
         context["baseline_after_june_rebuild"] = after_rebuild
-        _validate_baseline_snapshot(after_rebuild, JUNE_MODEL_VERSION, "june_baseline", failed_checks)
+        _validate_baseline_snapshot(after_rebuild, JUNE_MODEL_VERSION, "june_baseline", failed_checks, config.expected_user_count)
 
         diff = diff_baseline_snapshots(before, after_rebuild)
         write_json(output_dir / BASELINE_DIFF_FILE, diff)
@@ -847,19 +847,19 @@ def _state_snapshot_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_fixture_stats(context: dict[str, Any], failed_checks: list[str]) -> None:
+def _validate_fixture_stats(context: dict[str, Any], failed_checks: list[str], expected_user_count: int) -> None:
     stats = context.get("fixture_stats", {})
     _check(int(stats.get("may", {}).get("rows") or 0) >= 30000, "may_fixture_rows_ge_30000", failed_checks)
     _check(int(stats.get("june", {}).get("rows") or 0) >= 30000, "june_fixture_rows_ge_30000", failed_checks)
     _check(int(stats.get("total", {}).get("rows") or 0) >= 60000, "total_fixture_rows_ge_60000", failed_checks)
-    _check(int(stats.get("may", {}).get("users") or 0) == 26, "may_fixture_users_26", failed_checks)
-    _check(int(stats.get("june", {}).get("users") or 0) == 26, "june_fixture_users_26", failed_checks)
-    _check(int(stats.get("total", {}).get("users") or 0) == 26, "total_fixture_users_26", failed_checks)
+    _check(int(stats.get("may", {}).get("users") or 0) == expected_user_count, "may_fixture_users_expected", failed_checks)
+    _check(int(stats.get("june", {}).get("users") or 0) == expected_user_count, "june_fixture_users_expected", failed_checks)
+    _check(int(stats.get("total", {}).get("users") or 0) == expected_user_count, "total_fixture_users_expected", failed_checks)
 
 
-def _validate_training_stats(stats: dict[str, Any], start_time: str, end_time: str, label: str, failed_checks: list[str]) -> None:
+def _validate_training_stats(stats: dict[str, Any], start_time: str, end_time: str, label: str, failed_checks: list[str], expected_user_count: int) -> None:
     _check(int(stats.get("rows") or 0) >= 30000, f"{label}_rows_ge_30000", failed_checks)
-    _check(int(stats.get("users") or 0) == 26, f"{label}_users_26", failed_checks)
+    _check(int(stats.get("users") or 0) == expected_user_count, f"{label}_users_expected", failed_checks)
     _check(int(stats.get("rows_before_window") or 0) == 0, f"{label}_no_rows_before_window", failed_checks)
     _check(int(stats.get("rows_after_window") or 0) == 0, f"{label}_no_rows_after_window", failed_checks)
     min_timestamp = stats.get("min_timestamp")
@@ -868,10 +868,10 @@ def _validate_training_stats(stats: dict[str, Any], start_time: str, end_time: s
     _check(bool(max_timestamp) and str(max_timestamp) < end_time, f"{label}_max_timestamp_in_window", failed_checks)
 
 
-def _validate_baseline_snapshot(snapshot: dict[str, Any], model_version: str, label: str, failed_checks: list[str]) -> None:
+def _validate_baseline_snapshot(snapshot: dict[str, Any], model_version: str, label: str, failed_checks: list[str], expected_user_count: int) -> None:
     _check(snapshot.get("model_version") == model_version, f"{label}_model_version", failed_checks)
-    _check(int(snapshot.get("row_count") or 0) == 26, f"{label}_rows_26", failed_checks)
-    _check(int(snapshot.get("user_count") or 0) == 26, f"{label}_users_26", failed_checks)
+    _check(int(snapshot.get("row_count") or 0) == expected_user_count, f"{label}_rows_expected", failed_checks)
+    _check(int(snapshot.get("user_count") or 0) == expected_user_count, f"{label}_users_expected", failed_checks)
     _check(int(snapshot.get("total_sample_count") or 0) >= 30000, f"{label}_samples_ge_30000", failed_checks)
 
 

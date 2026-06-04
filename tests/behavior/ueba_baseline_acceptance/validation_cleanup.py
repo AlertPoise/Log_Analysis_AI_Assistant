@@ -16,7 +16,7 @@ CLEANUP_TABLE = "ueba_validation_results"
 def _count_validation_results(
     client: Any,
     database: str,
-    user_prefix: str,
+    username: str,
     validation_run_id: str,
     model_version: str,
     start_time: str,
@@ -27,7 +27,7 @@ def _count_validation_results(
     sql = f"""
     SELECT count() AS cnt
     FROM {database}.{CLEANUP_TABLE}
-    WHERE username LIKE %(username_prefix)s
+    WHERE username = %(username)s
         AND validation_run_id = %(validation_run_id)s
         AND baseline_model_version = %(model_version)s
         AND timestamp >= %(start_time)s
@@ -35,7 +35,7 @@ def _count_validation_results(
         AND log_type = %(log_type)s
     """
     params = {
-        "username_prefix": user_prefix,
+        "username": username,
         "validation_run_id": validation_run_id,
         "model_version": model_version,
         "start_time": start_time,
@@ -55,9 +55,12 @@ def cleanup_validation_results(
     start_time: str,
     end_time: str,
     *,
-    user_prefix: str = "fixture_user_%",
+    username: str,
 ) -> dict[str, Any]:
-    """安全清理本轮 validation 验收结果。
+    """安全清理本轮 validation 验收结果（精确用户名）。
+
+    username 参数为精确匹配，不是 LIKE 前缀。
+    只清理指定用户 + validation_run_id + 时间窗口内的数据。
 
     Returns:
         dict 包含 success / before_count / after_count / error
@@ -74,7 +77,7 @@ def cleanup_validation_results(
         result["before_count"] = _count_validation_results(
             client=client,
             database=config.clickhouse_database,
-            user_prefix=user_prefix,
+            username=username,
             validation_run_id=validation_run_id,
             model_version=config.model_version,
             start_time=start_time,
@@ -90,10 +93,10 @@ def cleanup_validation_results(
         result["after_count"] = 0
         return result
 
-    # 执行 DELETE（参数化）
+    # 执行 DELETE（参数化，精确 username =）
     delete_sql = f"""
     ALTER TABLE {config.clickhouse_database}.{CLEANUP_TABLE}
-    DELETE WHERE username LIKE %(username_prefix)s
+    DELETE WHERE username = %(username)s
         AND validation_run_id = %(validation_run_id)s
         AND baseline_model_version = %(model_version)s
         AND timestamp >= %(start_time)s
@@ -102,7 +105,7 @@ def cleanup_validation_results(
     SETTINGS mutations_sync = 1
     """
     delete_params = {
-        "username_prefix": user_prefix,
+        "username": username,
         "validation_run_id": validation_run_id,
         "model_version": config.model_version,
         "start_time": start_time,
@@ -121,7 +124,7 @@ def cleanup_validation_results(
         result["after_count"] = _count_validation_results(
             client=client,
             database=config.clickhouse_database,
-            user_prefix=user_prefix,
+            username=username,
             validation_run_id=validation_run_id,
             model_version=config.model_version,
             start_time=start_time,

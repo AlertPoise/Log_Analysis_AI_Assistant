@@ -113,8 +113,9 @@ class ManualTrainingUpdateRunner:
     def clear_test_samples(self) -> dict[str, Any]:
         """Clear only fixture users, the acceptance dataset, and test model versions."""
         cleanup_manual_artifacts(ensure_output_dir(self.config))
-        client = self.client_factory(self.config)
+        client = None
         try:
+            client = self.client_factory(self.config)
             result = clear_test_samples(self.config, client)
             state = _default_state(self.config)
             state["last_action"] = "clear_test_samples"
@@ -197,8 +198,9 @@ class ManualTrainingUpdateRunner:
     def check_baseline_unchanged(self) -> dict[str, Any]:
         """Verify that replacing the training table did not mutate the May baseline."""
         failed_checks: list[str] = []
-        client = self.client_factory(self.config)
+        client = None
         try:
+            client = self.client_factory(self.config)
             state = _read_state(self.config)
             snapshot = fetch_baseline_snapshot(client, self.config, MAY_MODEL_VERSION)
             previous_fingerprint = state.get("may_baseline_fingerprint")
@@ -231,13 +233,14 @@ class ManualTrainingUpdateRunner:
     def compare_baseline_changes(self) -> dict[str, Any]:
         """Compare May and June baselines and write baseline_change_diff.json."""
         failed_checks: list[str] = []
-        client = self.client_factory(self.config)
+        client = None
         try:
+            client = self.client_factory(self.config)
             state = _read_state(self.config)
             may = fetch_baseline_snapshot(client, self.config, MAY_MODEL_VERSION)
             june = fetch_baseline_snapshot(client, self.config, JUNE_MODEL_VERSION)
-            _require_baseline_snapshot(may, MAY_MODEL_VERSION, "may_baseline", failed_checks)
-            _require_baseline_snapshot(june, JUNE_MODEL_VERSION, "june_baseline", failed_checks)
+            _require_baseline_snapshot(may, MAY_MODEL_VERSION, "may_baseline", failed_checks, self.config.expected_user_count)
+            _require_baseline_snapshot(june, JUNE_MODEL_VERSION, "june_baseline", failed_checks, self.config.expected_user_count)
             diff = diff_baseline_snapshots(may, june)
             write_json(ensure_output_dir(self.config) / BASELINE_DIFF_FILE, diff)
             changed = int(diff.get("changed_user_count") or 0) > 0
@@ -265,14 +268,19 @@ class ManualTrainingUpdateRunner:
 
     def print_current_status(self) -> dict[str, Any]:
         """Refresh state from ClickHouse and print a compact status summary."""
-        client = self.client_factory(self.config)
+        client = None
         try:
+            client = self.client_factory(self.config)
             state = _read_state(self.config)
             state["last_action"] = "print_current_status"
             _refresh_state_counts(state, self.config, client)
             report = _finish(self.config, state, [], final=False)
             _print_status(state, self.config)
             return report
+        except Exception as exc:
+            state = _read_state(self.config)
+            state["last_action"] = "print_current_status"
+            return _finish(self.config, state, [f"print_current_status:{type(exc).__name__}:{exc}"], final=False)
         finally:
             _close_client(client)
 
@@ -297,8 +305,9 @@ class ManualTrainingUpdateRunner:
         debug_filename: str,
     ) -> dict[str, Any]:
         failed_checks: list[str] = []
-        client = self.client_factory(self.config)
+        client = None
         try:
+            client = self.client_factory(self.config)
             result = load_fixture_window(self.config, client, start_time=start_time, end_time=end_time, stage=stage)
             if result.get("success") is not True:
                 failed_checks.append(f"{stage}_success")
@@ -327,8 +336,9 @@ class ManualTrainingUpdateRunner:
         debug_filename: str,
     ) -> dict[str, Any]:
         failed_checks: list[str] = []
-        client = self.client_factory(self.config)
+        client = None
         try:
+            client = self.client_factory(self.config)
             result = replace_training_table_from_fixture_logs(
                 client,
                 self.config,
@@ -370,8 +380,9 @@ class ManualTrainingUpdateRunner:
         debug_filename: str,
     ) -> dict[str, Any]:
         failed_checks: list[str] = []
-        client = self.client_factory(self.config)
+        client = None
         try:
+            client = self.client_factory(self.config)
             command = build_training_baseline_command(
                 self.config,
                 start_time=start_time,
@@ -382,7 +393,7 @@ class ManualTrainingUpdateRunner:
             if result.get("success") is not True:
                 failed_checks.append(f"{stage}_success")
             snapshot = fetch_baseline_snapshot(client, self.config, model_version)
-            _require_baseline_snapshot(snapshot, model_version, stage, failed_checks)
+            _require_baseline_snapshot(snapshot, model_version, stage, failed_checks, self.config.expected_user_count)
             state = _read_state(self.config)
             state["last_action"] = stage
             state[state_key] = not failed_checks
@@ -728,13 +739,14 @@ def _require_baseline_snapshot(
     model_version: str,
     label: str,
     failed_checks: list[str],
+    expected_user_count: int,
 ) -> None:
     if snapshot.get("model_version") != model_version:
         failed_checks.append(f"{label}_model_version")
-    if int(snapshot.get("row_count") or 0) != 26:
-        failed_checks.append(f"{label}_rows_26")
-    if int(snapshot.get("user_count") or 0) != 26:
-        failed_checks.append(f"{label}_users_26")
+    if int(snapshot.get("row_count") or 0) != expected_user_count:
+        failed_checks.append(f"{label}_rows_expected")
+    if int(snapshot.get("user_count") or 0) != expected_user_count:
+        failed_checks.append(f"{label}_users_expected")
     if int(snapshot.get("total_sample_count") or 0) < 30000:
         failed_checks.append(f"{label}_samples_ge_30000")
 

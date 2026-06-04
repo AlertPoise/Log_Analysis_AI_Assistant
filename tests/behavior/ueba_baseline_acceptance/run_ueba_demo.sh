@@ -98,7 +98,11 @@ confirm_token() {
     if ! read_input answer "${prompt}" "检测到输入结束，已取消当前操作。"; then
         return 1
     fi
-    if [ "${answer}" != "${expected}" ]; then
+    local answer_lower=""
+    local expected_lower=""
+    answer_lower="$(printf '%s' "${answer}" | tr '[:upper:]' '[:lower:]')"
+    expected_lower="$(printf '%s' "${expected}" | tr '[:upper:]' '[:lower:]')"
+    if [ "${answer_lower}" != "${expected_lower}" ]; then
         echo "已取消当前操作。"
         return 1
     fi
@@ -171,6 +175,16 @@ clickhouse_scalar() {
         return 1
     fi
     printf '%s\n' "${raw}" | tr -d '\r' | head -n 1
+}
+
+ensure_clickhouse_ready_for_write_flow() {
+    local ping_url=""
+    ping_url="$(clickhouse_base_url)/ping"
+    if clickhouse_curl "${ping_url}" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "错误：ClickHouse 不可达（${ping_url} 失败），请先执行菜单 1 环境检查并确认 ClickHouse 已启动。" >&2
+    return 1
 }
 
 is_non_negative_int() {
@@ -909,6 +923,8 @@ WHERE log_type = '${CONTINUOUS_LOG_TYPE}'
 
 BASELINE_RUNNER_TIMEOUT=300
 VALIDATION_CLI_TIMEOUT=300
+CONTINUOUS_ACCEPTANCE_TIMEOUT=600
+TRAINING_UPDATE_TIMEOUT=600
 
 _run_runner_noninteractive() {
     local flag="$1"
@@ -940,11 +956,135 @@ run_baseline_validate() {
     _run_runner_noninteractive "--validate-baselines" "validate-baselines"
 }
 
+run_training_update() {
+    echo "即将执行月度训练表更新闭环验收。"
+    echo "该流程包含：5月初始化训练表、5月 baseline 构建、6月训练表替换、"
+    echo "baseline 不变校验、6月 baseline 重建、差异验证。"
+    echo "数据将写入共享 ClickHouse 表，不会自动 cleanup。"
+    if ! ensure_clickhouse_ready_for_write_flow; then
+        return 1
+    fi
+    if ! confirm_token "YES" "请输入 YES 确认执行："; then
+        return 1
+    fi
+    echo "开始执行训练表更新闭环（timeout=${TRAINING_UPDATE_TIMEOUT}s）..."
+    (
+        cd "${PROJECT_ROOT}" || exit 1
+        timeout "${TRAINING_UPDATE_TIMEOUT}" "${PYTHON_BIN}" -m "${TRAINING_RUNNER_MODULE}" \
+            --run-all --output-dir "${TRAINING_OUTPUT_DIR}" 2>&1
+    )
+    local rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        echo "训练表更新闭环完成。"
+        record_summary "训练表更新闭环成功"
+    else
+        echo "训练表更新闭环失败（退出码=${rc}）。"
+        record_summary "训练表更新闭环失败 rc=${rc}"
+    fi
+    return "${rc}"
+}
+
+run_full_process() {
+    echo "==== UEBA 全流程闭环 ===="
+    echo "顺序：训练表更新(3) → 基础准线一键流程(6) → 持续流量联动验收(7)"
+    echo ""
+    echo "==== 第 1/3 步：训练表更新 ===="
+    run_training_update || { echo "全流程中止：训练表更新失败。"; return 1; }
+    echo ""
+    echo "==== 第 2/3 步：基础准线一键流程 ===="
+    run_baseline_full_flow || { echo "全流程中止：基础准线流程失败。"; return 1; }
+    echo ""
+    echo "==== 第 3/3 步：持续流量联动验收 ===="
+    _run_continuous_acceptance || { echo "全流程中止：持续流量联动验收失败。"; return 1; }
+    echo ""
+    echo "UEBA 全流程闭环完成。"
+    record_summary "UEBA 全流程闭环成功"
+    return 0
+}
+
 run_baseline_full_flow() {
-    echo "基础准线一键流程当前不可用。"
-    echo "原因：交互 Runner pipe 注入模式已废弃；当前共享表现场未恢复。"
-    echo "请使用菜单 2 基础准线流程中的分步入口。"
-    return 1
+    echo "将按顺序执行基础准线完整流程："
+    echo "  1. 生成理论准线文件"
+    echo "  2. 生成 fixture 模拟数据并写入 ClickHouse logs_structured"
+    echo "  3. 执行正式 baseline 构建（写入 user_behavior_baselines）"
+    echo "  4. 对比理论准线与实际 baseline"
+    echo ""
+    echo "警告：数据将写入共享 ClickHouse 表，不会自动 cleanup。"
+    if ! confirm_token "YES" "请输入 YES 确认执行："; then
+        return 1
+    fi
+
+    local step_rc=0
+    echo ""
+    echo "==== 步骤 1/4：生成理论准线文件 ===="
+    run_baseline_generate_expected || { echo "步骤 1 失败，流程中止。"; return 1; }
+
+    echo ""
+    echo "==== 步骤 2/4：生成模拟数据并写入 ClickHouse ===="
+    run_baseline_load_fixture || { echo "步骤 2 失败，流程中止。"; return 1; }
+
+    echo ""
+    echo "==== 步骤 3/4：执行正式 baseline 构建 ===="
+    run_baseline_build_action || { echo "步骤 3 失败，流程中止。"; return 1; }
+
+    echo ""
+    echo "==== 步骤 4/4：对比理论准线与实际 baseline ===="
+    run_baseline_validate || { echo "步骤 4 失败。"; return 1; }
+
+    echo ""
+    echo "基础准线一键流程全部完成。"
+    record_summary "基础准线一键流程成功完成"
+    return 0
+}
+
+_run_continuous_acceptance() {
+    local write_flag=""
+    local cleanup_flag=""
+    local cleanup_confirm=""
+
+    if ! require_venv_python; then
+        return 1
+    fi
+
+    echo "即将执行持续流量联动验收。"
+    echo "该流程会启动持续流量 Server、生成日志、执行 Validation 评分。"
+    echo "需要使用 --confirm-write 才允许真实写库。"
+    if ! confirm_token "YES" "请输入 YES 确认允许写库验收："; then
+        return 1
+    fi
+    write_flag="--confirm-write"
+
+    echo ""
+    echo "是否在验收成功后自动 cleanup 本轮数据？"
+    if confirm_token "DELETE" "请输入 DELETE 确认允许自动 cleanup（其他输入或 EOF 表示跳过 cleanup）："; then
+        cleanup_flag="--confirm-cleanup --cleanup-after --keep-data-on-failure"
+        echo "已确认：成功后自动 cleanup，失败则保留数据。"
+    else
+        cleanup_flag="--keep-data-on-failure"
+        echo "已跳过自动 cleanup。"
+    fi
+
+    echo ""
+    echo "开始执行持续流量联动验收（timeout=${CONTINUOUS_ACCEPTANCE_TIMEOUT}s）..."
+    (
+        cd "${PROJECT_ROOT}" || exit 1
+        timeout "${CONTINUOUS_ACCEPTANCE_TIMEOUT}" "${PYTHON_BIN}" -m "${CONTINUOUS_ACCEPTANCE_MODULE}" \
+            ${write_flag} \
+            ${cleanup_flag} \
+            --report-path "${CONTINUOUS_ACCEPTANCE_REPORT}" 2>&1
+    )
+    local rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        echo "持续流量联动验收完成。"
+        if [ -f "${CONTINUOUS_ACCEPTANCE_REPORT}" ]; then
+            pretty_print_json_file "${CONTINUOUS_ACCEPTANCE_REPORT}"
+        fi
+        record_summary "持续流量联动验收成功"
+    else
+        echo "持续流量联动验收失败（退出码=${rc}）。"
+        record_summary "持续流量联动验收失败 rc=${rc}"
+    fi
+    return "${rc}"
 }
 
 run_manual_validation_cli() {
@@ -1406,7 +1546,7 @@ continuous_menu() {
         echo "9. 使用正式 Validation CLI 评分当前持续流量"
         echo "10. 查看持续流量状态、日志与结果"
         echo "11. 精确清理本轮持续流量验收数据"
-        echo "12. 暂未开放：需单独完成 Python 一键联动验收 cleanup 加固"
+        echo "12. 一键持续流量联动验收（需 YES 确认写库 + DELETE 二次确认 cleanup）"
         echo "13. 返回上一级"
         echo "0. 返回上一级"
         if ! read_input choice "请选择操作：" "检测到输入结束，返回主菜单。"; then
@@ -1429,9 +1569,7 @@ continuous_menu() {
             9) run_manual_validation_cli ;;
             10) show_continuous_logs_and_status ;;
             11) cleanup_current_round_data ;;
-            12)
-                echo "一键持续流量联动验收暂未开放：Python cleanup 精确用户名语义待独立加固。"
-                ;;
+            12) _run_continuous_acceptance ;;
             13|0) return 0 ;;
             *) echo "无效输入，请重新选择。" ;;
         esac
@@ -1446,12 +1584,13 @@ main_menu() {
         echo
         echo "1. 环境检查"
         echo "2. 基础准线流程"
-        echo "3. 训练表更新流程（暂未开放：下游 Runner timeout 待独立加固）"
+        echo "3. 训练表更新流程"
         echo "4. 持续流量与 Validation"
         echo "5. 查看整体状态"
-        echo "6. 一键执行基础准线完整流程（已禁用：交互 Runner pipe 注入已废弃，共享表现场未恢复）"
-        echo "7. 一键持续流量联动验收（暂未开放：Python cleanup 精确用户名语义待独立加固）"
+        echo "6. 一键执行基础准线完整流程"
+        echo "7. 一键持续流量联动验收（需 YES 确认写库 + DELETE 二次确认 cleanup）"
         echo "8. 退出"
+        echo "9. 全流程闭环（3→6→7 按序执行，YES 确认）"
         echo
         if ! read_input choice "请选择操作：" "检测到输入结束，主菜单安全退出。"; then
             echo "未自动停止 Server，未自动清理数据库。"
@@ -1460,18 +1599,12 @@ main_menu() {
         case "${choice}" in
             1) environment_check ;;
             2) baseline_menu ;;
-            3)
-                echo "训练表更新流程暂未开放：下游 Runner timeout 待独立加固。"
-                ;;
+            3) run_training_update ;;
             4) continuous_menu ;;
             5) show_overall_status ;;
-            6)
-                echo "基础准线一键流程已禁用：交互 Runner pipe 注入已废弃，共享表现场未恢复。"
-                echo "请使用菜单 2 基础准线流程中的分步入口。"
-                ;;
-            7)
-                echo "一键持续流量联动验收暂未开放：Python cleanup 精确用户名语义待独立加固。"
-                ;;
+	            6) run_baseline_full_flow ;;
+	            7) _run_continuous_acceptance ;;
+            9) run_full_process ;;
             8|0)
                 echo "安全退出。"
                 return 0

@@ -250,13 +250,28 @@ def run_full_validation_acceptance(config: AcceptanceConfig | None = None) -> di
     report["validation_run_id"] = validation_run_id
 
     report["stage"] = "cleanup"
-    cleanup_result = cleanup_validation_results(
-        client, config, validation_run_id, VALIDATION_START, VALIDATION_END,
-        user_prefix="fixture_user_%",
-    )
-    report["cleanup"] = cleanup_result
-    if not cleanup_result["success"]:
-        report["report_path"] = _fail(f"清理失败: {cleanup_result.get('error')}")
+    validation_fixture_users = [
+        "fixture_user_validation_normal",
+        "fixture_user_validation_combo",
+        "fixture_user_validation_nobase",
+    ]
+    cleanup_success = True
+    cleanup_errors = []
+    for vu in validation_fixture_users:
+        cr = cleanup_validation_results(
+            client, config, validation_run_id, VALIDATION_START, VALIDATION_END,
+            username=vu,
+        )
+        if not cr["success"]:
+            cleanup_success = False
+            cleanup_errors.append(f"{vu}: {cr.get('error', 'unknown')}")
+    report["cleanup"] = {
+        "success": cleanup_success,
+        "users_cleaned": validation_fixture_users,
+        "errors": cleanup_errors if cleanup_errors else None,
+    }
+    if not cleanup_success:
+        report["report_path"] = _fail(f"清理失败: {'; '.join(cleanup_errors)}")
         return report
 
     # Step 6: run CLI

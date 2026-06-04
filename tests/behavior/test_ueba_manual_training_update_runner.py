@@ -177,6 +177,66 @@ def test_src_behavior_and_scripts_do_not_reference_tox():
     assert matches == []
 
 
+# ============================================================================
+# client_factory 异常收口回归
+# ============================================================================
+
+
+def _failing_client_factory(_config):
+    raise RuntimeError("clickhouse down")
+
+
+def test_client_factory_failure_returns_structured_report(tmp_path):
+    """When client_factory raises, clear_test_samples returns structured failure, no traceback."""
+    config = AcceptanceConfig(output_dir=tmp_path)
+    runner_instance = runner.ManualTrainingUpdateRunner(
+        config, client_factory=_failing_client_factory
+    )
+    report = runner_instance.clear_test_samples()
+    assert report["success"] is False
+    assert "clear_test_samples" in str(report.get("failed_checks", []))
+    assert "RuntimeError" in str(report.get("failed_checks", []))
+
+
+def test_client_factory_failure_in_run_all_returns_failure_report(tmp_path):
+    """run_all() returns failure report when first step (clear_test_samples) fails, no exception leaks."""
+    config = AcceptanceConfig(output_dir=tmp_path)
+    runner_instance = runner.ManualTrainingUpdateRunner(
+        config, client_factory=_failing_client_factory
+    )
+    report = runner_instance.run_all()
+    assert report["success"] is False
+
+
+def test_client_factory_failure_in_main_returns_nonzero(tmp_path, monkeypatch):
+    """main --run-all returns nonzero exit on client_factory failure, no traceback to stdout."""
+    import io
+    import json
+    config = AcceptanceConfig(output_dir=tmp_path)
+    runner_instance = runner.ManualTrainingUpdateRunner(
+        config, client_factory=_failing_client_factory
+    )
+    monkeypatch.setattr(
+        runner,
+        "ManualTrainingUpdateRunner",
+        lambda *a, **kw: runner_instance,
+    )
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            rc = runner.main(["--run-all", "--output-dir", str(tmp_path)])
+    except SystemExit as exc:
+        rc = exc.code
+    assert rc != 0
+    output = buf.getvalue()
+    # main() prints step label then JSON on last non-empty line
+    json_line = [ln for ln in output.strip().split("\n") if ln.strip()][-1]
+    data = json.loads(json_line)
+    assert data["success"] is False
+    assert "Traceback" not in output
+
+
 class RecordingClient:
     """Small ClickHouse test double that records commands."""
 
