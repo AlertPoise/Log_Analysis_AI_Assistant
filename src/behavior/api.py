@@ -46,7 +46,9 @@ def _build_repository(client: Any, database: str) -> UebaValidationRepository:
                 "缺少 clickhouse_connect 依赖，请确认 requirements.txt 已安装 clickhouse-connect。"
             ) from exc
         client = clickhouse_connect.get_client(database=database)
-    return UebaValidationRepository(client=client, database=database)
+    repo = UebaValidationRepository(client=client, database=database)
+    repo.ensure_table()
+    return repo
 
 
 def _build_baseline_store(client: Any, database: str) -> BaselineStore:
@@ -59,7 +61,9 @@ def _build_baseline_store(client: Any, database: str) -> BaselineStore:
                 "缺少 clickhouse_connect 依赖，请确认 requirements.txt 已安装 clickhouse-connect。"
             ) from exc
         client = clickhouse_connect.get_client(database=database)
-    return BaselineStore(client=client, database=database)
+    store = BaselineStore(client=client, database=database)
+    store.ensure_table()
+    return store
 
 
 def _error(code: str, message: str, filters: dict[str, Any]) -> dict[str, Any]:

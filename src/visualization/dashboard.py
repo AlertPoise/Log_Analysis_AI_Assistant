@@ -1357,60 +1357,26 @@ def show_ueba_ranking():
         st.error(f"行为分析失败：{behavior_result.get('error', '未知错误')}")
         return
 
-        anomaly_events = selected_behavior_data.get("anomalies", [])
-        if not anomaly_events:
-            st.info("暂无异常行为")
+    events = behavior_result.get("events", [])
+    if not events:
+        st.info("暂无行为分析数据（UEBA 验证尚未运行）")
+        return
 
-        for i, event in enumerate(anomaly_events):
-            event_time = event.get("timestamp", "-")
-            event_type = event.get("anomaly_type", "-")
-            with st.expander(f"⚠️ {event_time} - {event_type}"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"**时间**: {event_time}")
-                    st.markdown(f"**类型**: {event_type}")
-                    st.markdown(f"**描述**: {event.get('reason', '-')}")
-                with col2:
-                    st.markdown(f"**风险等级**: {event.get('risk_level', '-')}")
-                    st.markdown(f"**风险评分**: {event.get('risk_score', '-')}")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("✅ 标记为误报", key=f"false_{i}"):
-                        st.success("已标记为误报")
-                with col2:
-                    if st.button("🤖 生成 AI 建议", key=f"ai_{i}"):
-                        with st.spinner("🔍 AI 分析中..."):
-                            log_context = f"IP: {event['IP']}, 地点: {event['地点']}, 时间: {event['时间']}"
-                            ai_result = analyze_anomaly_with_ai(
-                                username=selected_user,
-                                anomaly_description=event['描述'],
-                                log_context=log_context
-                            )
-                        
-                        st.markdown("---")
-                        st.markdown(f"**🚨 威胁类型**: {ai_result.get('threat_type', 'UNKNOWN')}")
-                        st.markdown(f"**⚠️ 风险等级**: {ai_result.get('risk_level', 'MEDIUM')}")
-                        st.info(f"**📝 分析说明**: {ai_result.get('description', '')}")
-                        st.warning(f"**💡 处置建议**: {ai_result.get('suggestion', '')}")
-
-    detail_col1, detail_col2, detail_col3 = st.columns(3)
-    with detail_col1:
-        st.markdown(f"**常用时间段**: {baseline.get('common_hours', [])}")
-    with detail_col2:
-        st.markdown(f"**常用 IP**: {baseline.get('common_ips', [])}")
-    with detail_col3:
-        st.markdown(f"**常用地点**: {baseline.get('common_locations', [])}")
-
-    st.markdown("**摘要指标**")
-    st.json(summary)
-
-    st.markdown("**异常事件列表**")
-    anomalies = behavior_result.get("anomalies", [])
-    if anomalies:
-        st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
-    else:
-        st.info("未检测到异常行为")
+    for i, event in enumerate(events):
+        event_time = event.get("timestamp", "-")
+        risk_level = event.get("ueba_risk_level", "-")
+        with st.expander(f"⚠️ {event_time} - {risk_level}"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**时间**: {event_time}")
+                st.markdown(f"**用户**: {event.get('username', '-')}")
+                st.markdown(f"**风险等级**: {risk_level}")
+            with col2:
+                st.markdown(f"**风险评分**: {event.get('ueba_score', '-')}")
+                st.markdown(f"**验证状态**: {event.get('validation_status', '-')}")
+                reasons = event.get("ueba_anomaly_reasons", [])
+                if reasons:
+                    st.markdown(f"**异常原因**: {', '.join(str(r) for r in reasons)}")
 
 def show_security_score():
     """显示安全评分看板"""
