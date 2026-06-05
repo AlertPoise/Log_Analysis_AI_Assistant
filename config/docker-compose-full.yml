@@ -93,6 +93,7 @@ services:
       - kafka
     environment:
       - KAFKA_HOST=kafka:9092
+    command: ["--strict.perms=false"]
     restart: unless-stopped
     networks:
       - default
