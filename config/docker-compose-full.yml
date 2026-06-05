@@ -18,11 +18,11 @@ services:
     ports:
       - "9092:9092"
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
-      interval: 5s
-      timeout: 10s
+      test: ["CMD", "kafka-topics.sh", "--list", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 30s
       retries: 20
-      start_period: 30s
+      start_period: 45s
 
   # ClickHouse 服务
   clickhouse:
@@ -46,7 +46,7 @@ services:
         reservations:
           memory: 1G
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:8123/ping | grep -q OK"]
+      test: ["CMD-SHELL", "curl -s http://localhost:8123/ping | grep -q OK && curl -s http://localhost:8123/query?query=SELECT%201 | grep -q 1"]
       interval: 10s
       timeout: 30s
       retries: 20
