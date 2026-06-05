@@ -85,7 +85,7 @@ services:
     container_name: filebeat
     user: root
     volumes:
-      - /var/log:/var/log:ro
+      - /var/log:/user/share/filebeat/logs
       - ./sample_logs:/logs/sample:ro
       - ./filebeat-docker.yml:/usr/share/filebeat/filebeat.yml:ro
       - ./../../logs/filebeat:/var/log/filebeat

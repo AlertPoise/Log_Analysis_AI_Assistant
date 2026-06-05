@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS {CLICKHOUSE_TABLE} (
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(timestamp)
 ORDER BY (log_type, timestamp, username)
-TTL timestamp + INTERVAL 90 DAY
+TTL timestamp + INTERVAL 180 DAY
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS user_behavior_stats (
