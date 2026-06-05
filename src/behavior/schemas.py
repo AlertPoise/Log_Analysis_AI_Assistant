@@ -1,118 +1,115 @@
-"""行为模块共享 schema。"""
+"""UEBA 内部稳定 Schema 定义。
 
-from typing import Any, Dict, List, TypedDict
+本模块定义第一版离线 Baseline 构建在各内部模块之间传递的数据结构。
+Repository 负责屏蔽数据库字段变化，后续 AggregateMerger、Builder、Store、
+Service 应依赖这里的稳定结构。此模块不访问数据库、不写 SQL、
+不保存完整原始日志列表。
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
 
 
-class NormalizedBehaviorLog(TypedDict, total=False):
-    """标准化后的行为日志结构。"""
+@dataclass
+class CountRatioItem:
+    """Top-N 统计项及其占比。"""
 
-    id: int
-    timestamp: str
+    value: str | int
+    count: int
+    ratio: float
+
+
+@dataclass
+class UserAggregateFeature:
+    """Repository 与 AggregateMerger 产出的用户级聚合特征。"""
+
     username: str
-    log_type: str
-    action: str
-    status: str
-    source_ip: str
-    location: str
-    endpoint: str
-    method: str
-    response_time: float
-    user_agent: str
-    dept: str
-    role: str
-    protocol: str
-    auth_method: str
-    vpn_gateway: str
-    session_id: str
-    fail_reason: str
-    raw_log: str
-    parser: str
-    parse_status: str
+    sample_count: int = 0
+    failed_count: int = 0
+    off_hours_count: int = 0
+    unusual_ip_count: int = 0
+    active_days: int = 0
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+
+    hour_counts: dict[int, int] = field(default_factory=dict)
+    source_ip_counts: dict[str, int] = field(default_factory=dict)
+    destination_ip_counts: dict[str, int] = field(default_factory=dict)
+    source_country_counts: dict[str, int] = field(default_factory=dict)
+    source_city_counts: dict[str, int] = field(default_factory=dict)
+    vpn_gateway_counts: dict[str, int] = field(default_factory=dict)
+    action_counts: dict[str, int] = field(default_factory=dict)
+    event_type_counts: dict[str, int] = field(default_factory=dict)
+    result_counts: dict[str, int] = field(default_factory=dict)
+    fail_reason_counts: dict[str, int] = field(default_factory=dict)
+    auth_method_counts: dict[str, int] = field(default_factory=dict)
+    client_software_counts: dict[str, int] = field(default_factory=dict)
+    protocol_counts: dict[str, int] = field(default_factory=dict)
+    daily_counts: dict[str, int] = field(default_factory=dict)
+    session_metric_summary: dict[str, float] = field(default_factory=dict)
+    traffic_metric_summary: dict[str, float] = field(default_factory=dict)
 
 
-class BehaviorBaselineResult(TypedDict):
-    """行为基线输出结构。"""
+@dataclass(kw_only=True)
+class UserBaseline:
+    """由用户聚合特征构建出的用户行为 Baseline。"""
 
     username: str
     sample_count: int
     is_reliable: bool
-    activity_hours: Dict[int, int]
-    common_hours: List[int]
-    ip_frequency: Dict[str, int]
-    common_ips: List[str]
-    location_frequency: Dict[str, int]
-    common_locations: List[str]
-    action_frequency: Dict[str, int]
-    api_frequency: Dict[str, int]
-    api_call_avg_per_hour: float
-    failed_login_count: int
-    failed_login_rate: float
-    calculated_at: str
+
+    common_active_hours: list[CountRatioItem] = field(default_factory=list)
+    common_source_ips: list[CountRatioItem] = field(default_factory=list)
+    common_destination_ips: list[CountRatioItem] = field(default_factory=list)
+    common_source_countries: list[CountRatioItem] = field(default_factory=list)
+    common_source_cities: list[CountRatioItem] = field(default_factory=list)
+    common_vpn_gateways: list[CountRatioItem] = field(default_factory=list)
+
+    action_distribution: dict[str, float] = field(default_factory=dict)
+    event_type_distribution: dict[str, float] = field(default_factory=dict)
+    result_distribution: dict[str, float] = field(default_factory=dict)
+    fail_reason_distribution: dict[str, float] = field(default_factory=dict)
+    auth_method_distribution: dict[str, float] = field(default_factory=dict)
+    client_software_distribution: dict[str, float] = field(default_factory=dict)
+    protocol_distribution: dict[str, float] = field(default_factory=dict)
+
+    failed_rate: float = 0.0
+    off_hours_rate: float = 0.0
+    unusual_ip_rate: float = 0.0
+    avg_daily_events: float = 0.0
+    session_duration_avg: float = 0.0
+    session_duration_p50: float = 0.0
+    session_duration_p95: float = 0.0
+    bytes_sent_avg: float = 0.0
+    bytes_recv_avg: float = 0.0
+    active_day_avg_events: float = 0.0
+    max_daily_events: int = 0
+
+    baseline_start_time: datetime
+    baseline_end_time: datetime
+    model_version: str
 
 
-class UserProfileResult(TypedDict):
-    """用户画像输出结构。"""
+@dataclass
+class BaselineBuildResult:
+    """一次离线 Baseline 构建任务的汇总结果。"""
 
-    username: str
-    created_at: str
-    updated_at: str
-    login_times: List[str]
-    common_ips: List[str]
-    common_locations: List[str]
-    user_agents: List[str]
-    api_call_frequency: float
-    activity_hours: Dict[int, int]
-    failed_login_count: int
-    total_actions: int
-    baseline: BehaviorBaselineResult
-
-
-class AnomalyContext(TypedDict, total=False):
-    """异常上下文结构。"""
-
-    matched_rules: List[str]
-    baseline_common_hours: List[int]
-    baseline_common_ips: List[str]
-    baseline_common_locations: List[str]
-    meets_threshold: bool
-    source_ips: List[str]
-    window_minutes: int
-    current_count: int
-    baseline_avg: float
-    current_failed: int
-    baseline_failed: float
+    success: bool
+    baseline_start_time: datetime
+    baseline_end_time: datetime
+    total_user_count: int
+    reliable_user_count: int
+    unreliable_user_count: int
+    total_log_count: int
+    model_version: str
+    duration_seconds: float
+    message: str = ""
 
 
-class AnomalyResult(TypedDict):
-    """异常检测输出结构。"""
+__all__ = [
+    "CountRatioItem",
+    "UserAggregateFeature",
+    "UserBaseline",
+    "BaselineBuildResult",
+]
 
-    anomaly_id: str
-    username: str
-    timestamp: str
-    anomaly_type: str
-    anomaly_score: float
-    risk_level: str
-    is_alert: bool
-    description: str
-    source_ip: str
-    location: str
-    context: AnomalyContext
-    related_logs: List[int]
-
-
-class BehaviorAnalysisSummary(TypedDict):
-    """行为分析摘要。"""
-
-    anomaly_count: int
-    alert_count: int
-    highest_risk_level: str
-
-
-class BehaviorAnalysisResult(TypedDict):
-    """统一行为分析服务输出结构。"""
-
-    username: str
-    baseline: BehaviorBaselineResult
-    profile: UserProfileResult
-    anomalies: List[AnomalyResult]
-    summary: BehaviorAnalysisSummary

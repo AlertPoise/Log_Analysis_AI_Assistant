@@ -1,302 +1,385 @@
-"""行为模块与存储层的协议定义。"""
+"""UEBA Repository 模块，用于读取数据库侧聚合结果。
 
-import os
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Protocol
+本模块只封装面向受控数据源表的参数化 GROUP BY 查询。
+它不创建数据库连接、不生成 Baseline、不写入数据库，也不把
+ClickHouse 原始返回对象暴露给上层模块。
+"""
 
-from src.behavior.normalizer import normalize_behavior_log, parse_timestamp_value
-from src.storage.clickhouse import ClickHouseClient
-from src.utils.helpers import format_datetime
-
-from src.behavior.schemas import (
-    AnomalyResult,
-    BehaviorBaselineResult,
-    NormalizedBehaviorLog,
-    UserProfileResult,
-)
-
-try:
-    from src.utils.logger import get_logger
-except Exception:  # pragma: no cover - 兼容最小测试环境
-    import logging
-
-    def get_logger(name: str):
-        return logging.getLogger(name)
+from collections.abc import Iterable
+import re
+from typing import Any
 
 
-logger = get_logger(__name__)
+class UebaRepository:
+    """UEBA 第一版离线 Baseline 构建的聚合读取层。"""
 
+    ALLOWED_SOURCE_TABLES = {"logs_structured", "ueba_baseline_training_logs"}
 
-class BehaviorLogRepository(Protocol):
-    """定义 behavior 对历史/实时日志的读取需求。
-
-    真实实现应由 storage 模块或其适配层提供。
-    """
-
-    def fetch_user_history(
+    def __init__(
         self,
-        username: str,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-        limit: Optional[int] = None,
-    ) -> List[NormalizedBehaviorLog]:
-        """读取用户历史日志。"""
+        client: Any,
+        database: str = "log_analysis",
+        source_table: str = "logs_structured",
+        dataset_id: str | None = None,
+        active_only: bool = False,
+        usernames: list[str] | None = None,
+    ) -> None:
+        """初始化 Repository。
 
-    def fetch_recent_user_events(
-        self,
-        username: str,
-        window_minutes: int = 60,
-        limit: Optional[int] = None,
-    ) -> List[NormalizedBehaviorLog]:
-        """读取用户近期窗口日志。"""
-
-
-class BehaviorResultRepository(Protocol):
-    """定义 behavior 对分析结果的写入需求。
-
-    真实实现应由 storage 模块或其适配层提供。
-    """
-
-    def save_baseline(self, result: BehaviorBaselineResult) -> None:
-        """保存行为基线。"""
-
-    def save_profile(self, result: UserProfileResult) -> None:
-        """保存用户画像。"""
-
-    def save_anomalies(self, results: List[AnomalyResult]) -> None:
-        """保存异常检测结果。"""
-
-
-class InMemoryBehaviorRepository:
-    """轻量内存仓储，便于本地演示和测试。"""
-
-    def __init__(self, logs: Optional[List[NormalizedBehaviorLog]] = None) -> None:
-        """初始化内存仓储。"""
-        self._logs: List[NormalizedBehaviorLog] = []
-        self.baselines: Dict[str, BehaviorBaselineResult] = {}
-        self.profiles: Dict[str, UserProfileResult] = {}
-        self.anomalies: List[AnomalyResult] = []
-        if logs:
-            self.add_logs(logs)
-
-    def add_logs(self, logs: List[NormalizedBehaviorLog]) -> None:
-        """批量写入内存日志。"""
-        for log in logs:
-            normalized = normalize_behavior_log(log)
-            if normalized is not None:
-                self._logs.append(normalized)
-            else:
-                logger.debug("内存仓储跳过无法标准化的日志")
-
-    def fetch_user_history(
-        self,
-        username: str,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-        limit: Optional[int] = None,
-    ) -> List[NormalizedBehaviorLog]:
-        """读取用户历史日志。"""
-        results: List[NormalizedBehaviorLog] = []
-        for log in self._logs:
-            if log.get("username") != username:
-                continue
-
-            timestamp = parse_timestamp_value(log.get("timestamp"))
-            if timestamp is None:
-                continue
-            if start_time is not None and timestamp < start_time:
-                continue
-            if end_time is not None and timestamp > end_time:
-                continue
-            results.append(dict(log))
-
-        results.sort(key=lambda item: parse_timestamp_value(item.get("timestamp")) or datetime.max)
-        if limit is not None:
-            return results[:limit]
-        return results
-
-    def fetch_recent_user_events(
-        self,
-        username: str,
-        window_minutes: int = 60,
-        limit: Optional[int] = None,
-    ) -> List[NormalizedBehaviorLog]:
-        """读取用户近期窗口日志。"""
-        history = self.fetch_user_history(username)
-        if not history:
-            return []
-
-        latest_timestamp = max(
-            parse_timestamp_value(log.get("timestamp")) or datetime.min
-            for log in history
-        )
-        start_time = latest_timestamp - timedelta(minutes=window_minutes)
-        recent = [
-            log
-            for log in history
-            if (parse_timestamp_value(log.get("timestamp")) or datetime.min) >= start_time
-        ]
-        if limit is not None:
-            return recent[-limit:]
-        return recent
-
-    def save_baseline(self, result: BehaviorBaselineResult) -> None:
-        """保存行为基线。"""
-        self.baselines[result["username"]] = dict(result)
-
-    def save_profile(self, result: UserProfileResult) -> None:
-        """保存用户画像。"""
-        self.profiles[result["username"]] = dict(result)
-
-    def save_anomalies(self, results: List[AnomalyResult]) -> None:
-        """保存异常检测结果。"""
-        self.anomalies.extend(dict(result) for result in results)
-
-
-class ClickHouseBehaviorDataError(Exception):
-    """ClickHouse 行为分析数据源错误。"""
-
-
-def structured_log_row_to_behavior_log(row: Dict[str, Any]) -> Dict[str, Any]:
-    """将 ``logs_structured`` 行转换为 behavior 可消费的日志结构。"""
-    if not isinstance(row, dict):
-        raise ClickHouseBehaviorDataError("logs_structured 行数据必须是 dict")
-
-    timestamp = row.get("timestamp")
-    if isinstance(timestamp, datetime):
-        timestamp = format_datetime(timestamp)
-
-    location = row.get("src_city") or row.get("location")
-    behavior_log: Dict[str, Any] = {
-        "timestamp": timestamp,
-        "username": row.get("username"),
-        "source_ip": row.get("source_ip"),
-        "location": location,
-        "action": row.get("action"),
-        "event_type": row.get("event_type"),
-        "status": row.get("result"),
-        "endpoint": row.get("uri"),
-        "method": row.get("method"),
-        "risk_score": row.get("risk_score"),
-        "risk_tags": row.get("risk_tags"),
-        "raw_log": row.get("raw_log"),
-    }
-    return {key: value for key, value in behavior_log.items() if value not in (None, "")}
-
-
-def build_behavior_payload_from_clickhouse(
-    target_user: str,
-    client_config: Optional[Dict[str, Any]] = None,
-    history_days: int = 30,
-    detection_hours: int = 24,
-    limit: int = 1000,
-) -> Dict[str, Any]:
-    """从 ClickHouse 读取用户日志并组装 behavior payload。"""
-    if not str(target_user).strip():
-        raise ClickHouseBehaviorDataError("target_user 不能为空")
-
-    config = client_config or _default_clickhouse_config()
-    client = ClickHouseClient(config)
-    database = str(config.get("database") or "log_analysis")
-
-    try:
-        client.connect()
-        if client.client is None:
-            raise ClickHouseBehaviorDataError("ClickHouse 连接未初始化")
-        if not _table_exists(client, database, "logs_structured"):
-            raise ClickHouseBehaviorDataError(f"{database}.logs_structured 不存在")
-
-        now = datetime.now()
-        history_start = now - timedelta(days=history_days)
-        detection_start = now - timedelta(hours=detection_hours)
-        history_rows = _query_structured_logs(
-            client,
-            database=database,
-            target_user=target_user,
-            start_time=history_start,
-            end_time=detection_start,
-            limit=limit,
-        )
-        detection_rows = _query_structured_logs(
-            client,
-            database=database,
-            target_user=target_user,
-            start_time=detection_start,
-            end_time=now,
-            limit=limit,
-        )
-
-        if not history_rows:
-            raise ClickHouseBehaviorDataError("目标用户无历史日志")
-        if not detection_rows:
-            raise ClickHouseBehaviorDataError("目标用户无检测日志")
-
-        return {
-            "target_user": str(target_user).strip(),
-            "history_logs": [structured_log_row_to_behavior_log(row) for row in history_rows],
-            "detection_logs": [structured_log_row_to_behavior_log(row) for row in detection_rows],
-        }
-    except ClickHouseBehaviorDataError:
-        raise
-    except Exception as exc:
-        raise ClickHouseBehaviorDataError(f"ClickHouse 查询失败: {exc}") from exc
-    finally:
-        client.close()
-
-
-def _default_clickhouse_config() -> Dict[str, Any]:
-    """读取环境变量生成 ClickHouse 客户端配置。"""
-    return {
-        "host": os.getenv("CLICKHOUSE_HOST", "localhost"),
-        "port": int(os.getenv("CLICKHOUSE_PORT", "8123")),
-        "username": os.getenv("CLICKHOUSE_USER", "default"),
-        "password": os.getenv("CLICKHOUSE_PASSWORD", ""),
-        "database": os.getenv("CLICKHOUSE_DATABASE", "log_analysis"),
-    }
-
-
-def _table_exists(client: ClickHouseClient, database: str, table: str) -> bool:
-    """检查指定 ClickHouse 表是否存在。"""
-    if client.client is None:
-        return False
-    result = client.client.query(
+        client 由外部传入，应提供 query(...) 或 execute(...) 方法。
+        source_table 只允许在实时结构化日志表和手动训练表之间切换。
         """
-        SELECT count()
-        FROM system.tables
-        WHERE database = %(database)s AND name = %(table)s
-        """,
-        parameters={"database": database, "table": table},
-    )
-    return bool(result.result_rows and int(result.result_rows[0][0]) > 0)
+        self.client = client
+        self.database = self._validate_identifier(database)
+        self.source_table = self._validate_source_table(source_table)
+        self.dataset_id = dataset_id
+        self.active_only = active_only
+        self.usernames = self._normalize_usernames(usernames)
 
+        if self.source_table == "ueba_baseline_training_logs" and not self.dataset_id:
+            raise ValueError("dataset_id is required when source_table is ueba_baseline_training_logs")
 
-def _query_structured_logs(
-    client: ClickHouseClient,
-    database: str,
-    target_user: str,
-    start_time: datetime,
-    end_time: datetime,
-    limit: int,
-) -> List[Dict[str, Any]]:
-    """按时间窗口读取用户结构化日志。"""
-    if client.client is None:
-        raise ClickHouseBehaviorDataError("ClickHouse 连接未初始化")
-    query = f"""
-        SELECT *
-        FROM {database}.logs_structured
-        WHERE username = %(username)s
-          AND timestamp >= %(start_time)s
-          AND timestamp <= %(end_time)s
-        ORDER BY timestamp ASC
-        LIMIT %(limit)s
-    """
-    result = client.client.query(
-        query,
-        parameters={
-            "username": target_user,
+    def fetch_user_summary(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
+        """读取每个用户的总览聚合统计。"""
+        sql = f"""
+        SELECT
+            username,
+            count() AS sample_count,
+            min(timestamp) AS first_seen,
+            max(timestamp) AS last_seen,
+            countIf(result IN ('FAILED', 'FAIL') OR event_type = 'LOGIN_FAIL') AS failed_count,
+            uniqExact(toDate(timestamp)) AS active_days,
+            countIf(is_off_hours) AS off_hours_count,
+            countIf(is_unusual_ip) AS unusual_ip_count
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
+        WHERE username != ''
+        GROUP BY username
+        """
+        return self._execute_query(sql, self._base_parameters(start_time, end_time, log_type))
+
+    def fetch_hour_distribution(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
+        """读取用户小时分布聚合。"""
+        sql = f"""
+        SELECT
+            username,
+            toHour(timestamp) AS active_hour,
+            count() AS cnt
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
+        WHERE username != ''
+        GROUP BY username, active_hour
+        ORDER BY username ASC, active_hour ASC
+        """
+        return self._execute_query(sql, self._base_parameters(start_time, end_time, log_type))
+
+    def fetch_top_source_ips(self, start_time: Any, end_time: Any, limit: int, log_type: str = "vpn") -> list[dict]:
+        """读取每个用户常用来源 IP Top-N。"""
+        return self._fetch_top_value_counts(
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            log_type=log_type,
+            column_name="source_ip",
+            output_name="source_ip",
+        )
+
+    def fetch_top_destination_ips(self, start_time: Any, end_time: Any, limit: int, log_type: str = "vpn") -> list[dict]:
+        """读取每个用户常用目标 IP Top-N。"""
+        return self._fetch_top_value_counts(
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            log_type=log_type,
+            column_name="destination_ip",
+            output_name="destination_ip",
+        )
+
+    def fetch_top_source_countries(self, start_time: Any, end_time: Any, limit: int, log_type: str = "vpn") -> list[dict]:
+        """读取每个用户常用来源国家 Top-N。"""
+        return self._fetch_top_value_counts(
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            log_type=log_type,
+            column_name="src_country",
+            output_name="source_country",
+        )
+
+    def fetch_top_source_cities(self, start_time: Any, end_time: Any, limit: int, log_type: str = "vpn") -> list[dict]:
+        """读取每个用户常用来源城市 Top-N。"""
+        return self._fetch_top_value_counts(
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            log_type=log_type,
+            column_name="src_city",
+            output_name="source_city",
+        )
+
+    def fetch_top_vpn_gateways(self, start_time: Any, end_time: Any, limit: int, log_type: str = "vpn") -> list[dict]:
+        """读取每个用户常用 VPN 网关 Top-N。"""
+        return self._fetch_top_value_counts(
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            log_type=log_type,
+            column_name="vpn_gateway",
+            output_name="vpn_gateway",
+        )
+
+    def fetch_action_distribution(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
+        """读取用户 action 分布。"""
+        return self._fetch_distribution(start_time, end_time, log_type, "action", "action")
+
+    def fetch_event_type_distribution(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
+        """读取用户 event_type 分布。"""
+        return self._fetch_distribution(start_time, end_time, log_type, "event_type", "event_type")
+
+    def fetch_result_distribution(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
+        """读取用户 result 分布。"""
+        return self._fetch_distribution(start_time, end_time, log_type, "result", "result")
+
+    def fetch_fail_reason_distribution(self, start_time: Any, end_time: Any, limit: int, log_type: str = "vpn") -> list[dict]:
+        """读取每个用户失败原因 Top-N。"""
+        return self._fetch_top_value_counts(
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            log_type=log_type,
+            column_name="fail_reason",
+            output_name="fail_reason",
+        )
+
+    def fetch_auth_method_distribution(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
+        """读取用户 auth_method 分布。"""
+        return self._fetch_distribution(start_time, end_time, log_type, "auth_method", "auth_method")
+
+    def fetch_client_software_distribution(self, start_time: Any, end_time: Any, limit: int, log_type: str = "vpn") -> list[dict]:
+        """读取每个用户客户端软件 Top-N。"""
+        return self._fetch_top_value_counts(
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            log_type=log_type,
+            column_name="client_software",
+            output_name="client_software",
+        )
+
+    def fetch_protocol_distribution(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
+        """读取用户 protocol 分布。"""
+        return self._fetch_distribution(start_time, end_time, log_type, "protocol", "protocol")
+
+    def fetch_daily_event_counts(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
+        """读取用户每日事件数聚合。"""
+        sql = f"""
+        SELECT
+            username,
+            toDate(timestamp) AS event_date,
+            count() AS cnt
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
+        WHERE username != ''
+        GROUP BY username, event_date
+        ORDER BY username ASC, event_date ASC
+        """
+        return self._execute_query(sql, self._base_parameters(start_time, end_time, log_type))
+
+    def fetch_session_metric_summary(self, start_time: Any, end_time: Any, log_type: str = "vpn") -> list[dict]:
+        """读取用户会话时长与流量聚合摘要。"""
+        sql = f"""
+        SELECT
+            username,
+            avg(session_duration_sec) AS session_duration_avg,
+            max(session_duration_sec) AS session_duration_max,
+            quantileExact(0.5)(session_duration_sec) AS session_duration_p50,
+            quantileExact(0.95)(session_duration_sec) AS session_duration_p95,
+            avg(bytes_sent) AS bytes_sent_avg,
+            avg(bytes_recv) AS bytes_recv_avg,
+            max(bytes_sent) AS bytes_sent_max,
+            max(bytes_recv) AS bytes_recv_max
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
+        WHERE username != ''
+        GROUP BY username
+        """
+        return self._execute_query(sql, self._base_parameters(start_time, end_time, log_type))
+
+    def _fetch_distribution(
+        self,
+        start_time: Any,
+        end_time: Any,
+        log_type: str,
+        column_name: str,
+        output_name: str,
+    ) -> list[dict]:
+        """读取不需要 Top-N 截断的用户维度分布。"""
+        self._validate_known_column(column_name)
+        sql = f"""
+        SELECT
+            username,
+            {column_name} AS {output_name},
+            count() AS cnt
+        FROM {self._qualified_source_table()}
+        PREWHERE {self._prewhere_clause()}
+        WHERE username != ''
+            AND {column_name} != ''
+        GROUP BY username, {output_name}
+        ORDER BY username ASC, cnt DESC
+        """
+        return self._execute_query(sql, self._base_parameters(start_time, end_time, log_type))
+
+    def _fetch_top_value_counts(
+        self,
+        start_time: Any,
+        end_time: Any,
+        limit: int,
+        log_type: str,
+        column_name: str,
+        output_name: str,
+    ) -> list[dict]:
+        """读取每个用户的 Top-N 计数分布。"""
+        self._validate_known_column(column_name)
+        parameters = self._base_parameters(start_time, end_time, log_type)
+        parameters["limit"] = self._validate_limit(limit)
+        sql = f"""
+        SELECT
+            username,
+            {output_name},
+            cnt
+        FROM
+        (
+            SELECT
+                username,
+                {column_name} AS {output_name},
+                count() AS cnt
+            FROM {self._qualified_source_table()}
+            PREWHERE {self._prewhere_clause()}
+            WHERE username != ''
+                AND {column_name} != ''
+            GROUP BY username, {output_name}
+            ORDER BY username ASC, cnt DESC
+        )
+        LIMIT %(limit)s BY username
+        """
+        return self._execute_query(sql, parameters)
+
+    @staticmethod
+    def _normalize_usernames(usernames: list[str] | None) -> list[str] | None:
+        """Normalize and validate usernames. Empty list is rejected."""
+        if usernames is None:
+            return None
+        if not isinstance(usernames, list):
+            raise ValueError("usernames must be None or a non-empty list")
+        cleaned = sorted({u.strip() for u in usernames if u and u.strip()})
+        if not cleaned:
+            raise ValueError("usernames must be None or a non-empty list")
+        return cleaned
+
+    def _execute_query(self, sql: str, parameters: dict[str, Any]) -> list[dict]:
+        """执行查询并统一转换为 list[dict]。"""
+        if hasattr(self.client, "query"):
+            result = self.client.query(sql, parameters=parameters)
+        elif hasattr(self.client, "execute"):
+            result = self.client.execute(sql, parameters)
+        else:
+            raise TypeError("client must provide query(...) or execute(...)")
+
+        return self._rows_to_dicts(result)
+
+    def _rows_to_dicts(self, result: Any) -> list[dict]:
+        """兼容常见 ClickHouse 客户端返回结构。"""
+        if hasattr(result, "named_results"):
+            named_results = result.named_results
+            rows = named_results() if callable(named_results) else named_results
+            return [dict(row) for row in rows]
+
+        if hasattr(result, "result_rows") and hasattr(result, "column_names"):
+            return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
+        if isinstance(result, list):
+            if not result:
+                return []
+            if all(isinstance(row, dict) for row in result):
+                return [dict(row) for row in result]
+
+        if isinstance(result, Iterable) and not isinstance(result, (str, bytes, dict)):
+            rows = list(result)
+            if all(isinstance(row, dict) for row in rows):
+                return [dict(row) for row in rows]
+
+        raise TypeError("unsupported query result format")
+
+    def _base_parameters(self, start_time: Any, end_time: Any, log_type: str) -> dict[str, Any]:
+        """构造所有查询共用的参数。"""
+        parameters: dict[str, Any] = {
             "start_time": start_time,
             "end_time": end_time,
-            "limit": limit,
-        },
-    )
-    return [dict(zip(result.column_names, row)) for row in result.result_rows]
+            "log_type": log_type,
+        }
+        if self.source_table == "ueba_baseline_training_logs":
+            parameters["dataset_id"] = self.dataset_id
+        if self.usernames:
+            for i, u in enumerate(self.usernames):
+                parameters[f"uname_{i}"] = u
+        return parameters
+
+    def _qualified_source_table(self) -> str:
+        """返回受控 database 与 source_table 组成的 ClickHouse 表名。"""
+        return f"{self.database}.{self.source_table}"
+
+    def _prewhere_clause(self) -> str:
+        """返回所有聚合 SQL 共用的受控 PREWHERE 条件。"""
+        conditions = [
+            "log_type = %(log_type)s",
+            "timestamp >= %(start_time)s",
+            "timestamp < %(end_time)s",
+        ]
+        if self.source_table == "ueba_baseline_training_logs":
+            conditions.append("dataset_id = %(dataset_id)s")
+            if self.active_only:
+                conditions.append("is_active = 1")
+        if self.usernames:
+            placeholders = ", ".join(f"%(uname_{i})s" for i in range(len(self.usernames)))
+            conditions.append(f"username IN ({placeholders})")
+        return "\n            AND ".join(conditions)
+
+    def _validate_limit(self, limit: int) -> int:
+        """限制 Top-N 参数，避免无效数量进入 SQL 参数。"""
+        if not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        return limit
+
+    def _validate_known_column(self, column_name: str) -> None:
+        """只允许内部白名单字段进入固定 SQL 模板。"""
+        allowed_columns = {
+            "source_ip",
+            "destination_ip",
+            "src_country",
+            "src_city",
+            "vpn_gateway",
+            "action",
+            "event_type",
+            "result",
+            "fail_reason",
+            "auth_method",
+            "client_software",
+            "protocol",
+        }
+        if column_name not in allowed_columns:
+            raise ValueError(f"unsupported aggregation column: {column_name}")
+
+    def _validate_source_table(self, source_table: str) -> str:
+        """限制 source_table，避免任意表名进入 SQL。"""
+        if source_table not in self.ALLOWED_SOURCE_TABLES:
+            raise ValueError(f"unsupported source_table: {source_table}")
+        return source_table
+
+    def _validate_identifier(self, identifier: str) -> str:
+        """限制 database 标识符，避免任意 SQL 片段进入表名。"""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier):
+            raise ValueError(f"invalid ClickHouse identifier: {identifier}")
+        return identifier
+
+
+__all__ = ["UebaRepository"]

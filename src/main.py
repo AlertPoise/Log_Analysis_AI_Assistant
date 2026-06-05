@@ -66,7 +66,7 @@ class LogAnalysisService:
                 'password': settings.clickhouse_password,
                 'database': settings.clickhouse_database
             }
-            self.clickhouse_client = ClickHouseClient(clickhouse_config)
+            self.clickhouse_client = ClickHouseClient(config=clickhouse_config)
             self.clickhouse_client.connect()
             logger.info("✓ ClickHouse 连接成功")
         except Exception as e:
