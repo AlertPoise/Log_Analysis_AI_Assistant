@@ -6,6 +6,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+    env_file:
+      - ../.env
     environment:
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=8123
@@ -26,6 +28,8 @@ services:
   kafka:
     image: apache/kafka:3.7.0
     container_name: kafka-kraft
+    env_file:
+      - ../.env
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -52,6 +56,8 @@ services:
     image: clickhouse/clickhouse-server:latest
     user: "101:101"
     container_name: clickhouse-server
+    env_file:
+      - ../.env
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
