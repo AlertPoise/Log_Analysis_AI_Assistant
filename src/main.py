@@ -126,13 +126,22 @@ class LogAnalysisService:
         try:
             # 获取项目根目录
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            app_path = os.path.join(project_root, "src", "web", "app.py")
+            # 正确的 Dashboard 路径（参考 dashboard_continuous.py）
+            app_path = os.path.join(project_root, "src", "visualization", "dashboard.py")
             
-            # 启动 Streamlit 进程
+            # 检查文件是否存在
+            if not os.path.exists(app_path):
+                logger.error(f"✗ Dashboard 文件不存在: {app_path}")
+                return
+            
+            # 启动 Streamlit 进程（使用 sys.executable 确保使用正确的 Python 解释器）
+            import sys
             self.streamlit_process = subprocess.Popen([
-                "streamlit", "run", app_path,
+                sys.executable, "-m", "streamlit", "run",
+                str(app_path),
                 "--server.port", str(settings.streamlit_server_port),
-                "--server.address", settings.streamlit_server_address
+                "--server.address", settings.streamlit_server_address,
+                "--browser.serverAddress", settings.streamlit_server_address
             ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             
             logger.info(f"✓ Streamlit Dashboard 已启动: http://{settings.streamlit_server_address}:{settings.streamlit_server_port}")
