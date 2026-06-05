@@ -1198,6 +1198,120 @@ def get_ai_suggestions(status_filter="全部", risk_filter="全部"):
         return get_sample_ai_suggestions(status_filter, risk_filter)
 
 
+def get_ueba_ai_suggestions(
+    time_range: str = "最近 7 天",
+    risk_filter: str = "全部",
+    status_filter: str = "全部",
+) -> List[Dict[str, Any]]:
+    """从 UEBA 用户基线分析结果获取异常事件，调用 AI 分析后返回处置建议。
+
+    流程：
+    1. 通过 behavior api 获取异常事件列表
+    2. 对每条异常事件调用 AI analyzer（使用 prompt_templates.py 模板）分析
+    3. 将分析结果格式化为前端展示结构
+    """
+    time_map = {
+        "最近 24 小时": 24,
+        "最近 7 天": 24 * 7,
+        "最近 30 天": 24 * 30,
+    }
+    hours = time_map.get(time_range, 24 * 7)
+    start_time = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 1. 从 behavior api 获取异常事件
+    try:
+        behavior_result = analyze_behavior_from_clickhouse(
+            start_time=start_time,
+            end_time=end_time,
+        )
+    except Exception as e:
+        logger.error(f"从 behavior api 获取异常事件失败: {e}")
+        return []
+
+    if not behavior_result.get("success"):
+        logger.warning(f"behavior 分析失败: {behavior_result.get('error', '未知错误')}")
+        return []
+
+    events = behavior_result.get("events", [])
+    if not events:
+        logger.info("UEBA 分析无异常事件")
+        return []
+
+    # 2. 对每条异常事件调用 AI 分析
+    ai_analyzer = get_ai_analyzer()
+    suggestions = []
+
+    for idx, event in enumerate(events):
+        username = event.get("username", "未知")
+        risk_level = event.get("ueba_risk_level", "LOW")
+        score = event.get("ueba_score", 0)
+        reasons = event.get("ueba_anomaly_reasons", [])
+        event_time = event.get("timestamp", "")
+        source_ip = event.get("source_ip", "-")
+        location = event.get("location", "-")
+
+        # 构造异常描述
+        reason_str = ", ".join(str(r) for r in reasons) if reasons else "行为偏离基线"
+        anomaly_description = (
+            f"用户 {username} 在 {event_time} 触发异常：{reason_str}。"
+            f"来源IP: {source_ip}，地点: {location}，风险评分: {score}，风险等级: {risk_level}。"
+        )
+
+        # 调用 AI 分析（使用 ANOMALY_ANALYSIS_PROMPT 模板）
+        ai_result = None
+        if ai_analyzer is not None:
+            try:
+                ai_result = ai_analyzer.analyze_anomaly(
+                    username=username,
+                    anomaly_description=anomaly_description,
+                )
+            except Exception as e:
+                logger.error(f"AI 分析失败 (user={username}): {e}")
+                ai_result = None
+
+        # 风险等级映射
+        risk_icon = _risk_level_to_icon(risk_level)
+
+        # 处置状态映射
+        validation_status = event.get("validation_status", "")
+        if validation_status == "VALIDATED":
+            dispose_status = "待处置"
+        elif validation_status == "NO_BASELINE":
+            dispose_status = "无基线"
+        elif validation_status == "UNRELIABLE_BASELINE":
+            dispose_status = "基线不可靠"
+        else:
+            dispose_status = "待处置"
+
+        suggestion = {
+            "id": idx + 1,
+            "用户": username,
+            "威胁类型": ai_result.get("threat_type", "UNKNOWN") if ai_result else "待分析",
+            "风险等级": risk_icon,
+            "异常描述": anomaly_description,
+            "AI 分析": ai_result.get("description", "暂无 AI 分析") if ai_result else "暂无 AI 分析",
+            "处置建议": ai_result.get("suggestion", "请人工审查") if ai_result else "请人工审查",
+            "置信度": f"{min(int(score), 100)}%" if score else "-",
+            "处置状态": dispose_status,
+            "生成时间": event_time.strftime("%Y-%m-%d %H:%M") if hasattr(event_time, "strftime") else str(event_time),
+            # 保留原始事件数据供后续使用
+            "_raw_event": event,
+        }
+        suggestions.append(suggestion)
+
+    # 3. 前端过滤
+    filtered = []
+    for s in suggestions:
+        if risk_filter != "全部" and s["风险等级"] != risk_filter:
+            continue
+        if status_filter != "全部" and s["处置状态"] != status_filter:
+            continue
+        filtered.append(s)
+
+    return filtered
+
+
 def search_history_logs(start_time=None, end_time=None, username=None, source_ip=None, 
                         log_type="全部", status="全部"):
     """搜索历史日志（统一入口）"""
@@ -1458,39 +1572,56 @@ def show_security_score():
 
 def show_ai_suggestions():
     st.header("🤖 AI 处置建议")
-    st.markdown("AI 智能分析异常行为，提供处置建议")
-    
-    col1, col2 = st.columns(2)
+    st.markdown("基于用户行为基线分析，AI 智能分析异常行为并提供处置建议")
+
+    # 筛选条件
+    col1, col2, col3 = st.columns(3)
     with col1:
-        status_filter = st.selectbox("处置状态", ["全部", "待处置", "处置中", "已处置", "误报"])
+        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"], index=1)
     with col2:
         risk_filter = st.selectbox("风险等级", ["全部", "🔴 高危", "🟠 中危", "🟡 低危"])
-    
+    with col3:
+        status_filter = st.selectbox("处置状态", ["全部", "待处置", "无基线", "基线不可靠"])
+
     st.divider()
-    
-    # 获取数据（使用真实或模拟）
-    suggestions = get_ai_suggestions(status_filter, risk_filter)
-    
-    # 过滤
-    filtered_suggestions = []
-    for s in suggestions:
-        if status_filter != "全部" and s["处置状态"] != status_filter:
-            continue
-        if risk_filter != "全部" and s["风险等级"] != risk_filter:
-            continue
-        filtered_suggestions.append(s)
-    
-    status_order = ["待处置", "处置中", "已处置", "误报"]
+
+    # 从 UEBA 基线分析获取异常事件，并调用 AI 分析
+    with st.spinner("正在从用户基线分析获取异常事件并调用 AI 分析..."):
+        suggestions = get_ueba_ai_suggestions(
+            time_range=time_range,
+            risk_filter=risk_filter,
+            status_filter=status_filter,
+        )
+
+    if not suggestions:
+        st.info("当前时间范围内没有基于用户基线的异常事件，或 UEBA 验证尚未运行")
+        # 处置统计
+        st.divider()
+        st.subheader("📊 处置统计")
+        stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+        with stat_col1:
+            st.metric("待处置", "0")
+        with stat_col2:
+            st.metric("无基线", "0")
+        with stat_col3:
+            st.metric("基线不可靠", "0")
+        with stat_col4:
+            st.metric("总计", "0")
+        return
+
+    # 按处置状态分组展示
+    status_order = ["待处置", "无基线", "基线不可靠"]
+    risk_order = {"🔴 高危": 0, "🟠 中危": 1, "🟡 低危": 2}
+
     for status in status_order:
-        status_suggestions = [s for s in filtered_suggestions if s["处置状态"] == status]
+        status_suggestions = [s for s in suggestions if s["处置状态"] == status]
         if status_suggestions:
-            risk_order = {"🔴 高危": 0, "🟠 中危": 1, "🟡 低危": 2}
-            status_suggestions.sort(key=lambda x: risk_order[x["风险等级"]])
+            status_suggestions.sort(key=lambda x: risk_order.get(x["风险等级"], 3))
             st.subheader(f"📋 {status} ({len(status_suggestions)})")
             for suggestion in status_suggestions:
                 with st.expander(
                     f"{suggestion['风险等级']} {suggestion['威胁类型']} - {suggestion['用户']} ({suggestion['生成时间']})",
-                    expanded=False
+                    expanded=False,
                 ):
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -1503,65 +1634,74 @@ def show_ai_suggestions():
                     st.markdown(f"**📝 异常描述：**\n{suggestion['异常描述']}")
                     st.info(f"**🤖 AI 分析：**\n{suggestion['AI 分析']}")
                     st.warning(f"**💡 处置建议：**\n{suggestion['处置建议']}")
+
+                    # 显示原始事件详情
+                    raw_event = suggestion.get("_raw_event", {})
+                    if raw_event:
+                        st.divider()
+                        with st.expander("📋 查看原始事件详情"):
+                            detail_col1, detail_col2 = st.columns(2)
+                            with detail_col1:
+                                st.markdown(f"**来源IP**: {raw_event.get('source_ip', '-')}")
+                                st.markdown(f"**地点**: {raw_event.get('location', '-')}")
+                                st.markdown(f"**目标IP**: {raw_event.get('destination_ip', '-')}")
+                            with detail_col2:
+                                st.markdown(f"**UEBA评分**: {raw_event.get('ueba_score', '-')}")
+                                st.markdown(f"**验证状态**: {raw_event.get('validation_status', '-')}")
+                                reasons = raw_event.get("ueba_anomaly_reasons", [])
+                                if reasons:
+                                    st.markdown(f"**异常原因**: {', '.join(str(r) for r in reasons)}")
+
+                    # 操作按钮
                     st.divider()
-                    
-                    # 按钮行：增加手动 AI 分析按钮
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        if st.button("🔍 查看详细日志", key=f"detail_{suggestion['id']}"):
-                            st.session_state[f"show_logs_{suggestion['id']}"] = True
-                    with col2:
-                        # 手动 AI 分析按钮（仅对未处理或 AI 分析为空的情况显示）
-                        if suggestion.get('AI 分析') == "暂无 AI 分析" or suggestion.get('威胁类型') == "未知":
+                    btn_col1, btn_col2 = st.columns(2)
+                    with btn_col1:
+                        if suggestion.get("AI 分析") == "暂无 AI 分析" or suggestion.get("威胁类型") == "待分析":
                             if st.button("🤖 手动 AI 分析", key=f"manual_ai_{suggestion['id']}"):
-                                # 调用 AI 分析
-                                result_msg = manual_ai_analyze(
-                                    anomaly_id=suggestion['id'],
-                                    username=suggestion['用户'],
-                                    description=suggestion['异常描述'],
-                                    related_log_ids=[]  # 可根据需要从原数据中获取
-                                )
-                                st.session_state[f"manual_ai_result_{suggestion['id']}"] = result_msg
-                                st.rerun()
-                    with col3:
-                        if st.button("⚠️ 标记为误报", key=f"false_{suggestion['id']}"):
-                            # 这里可以添加更新数据库的逻辑
-                            pass
-                    with col4:
+                                analyzer = get_ai_analyzer()
+                                if analyzer:
+                                    try:
+                                        ai_result = analyzer.analyze_anomaly(
+                                            username=suggestion["用户"],
+                                            anomaly_description=suggestion["异常描述"],
+                                        )
+                                        st.session_state[f"manual_ai_result_{suggestion['id']}"] = (
+                                            f"**威胁类型**: {ai_result.get('threat_type', 'UNKNOWN')}\n\n"
+                                            f"**AI 分析**: {ai_result.get('description', '')}\n\n"
+                                            f"**处置建议**: {ai_result.get('suggestion', '')}"
+                                        )
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"AI 分析失败: {e}")
+                                else:
+                                    st.warning("AI 服务不可用，请检查配置")
+                    with btn_col2:
                         if st.button("✅ 标记为已处置", key=f"resolve_{suggestion['id']}"):
-                            # 这里可以添加更新数据库的逻辑
-                            pass
-                    
+                            st.info("标记功能待实现")
+
                     # 显示手动 AI 分析结果
                     result_key = f"manual_ai_result_{suggestion['id']}"
                     if result_key in st.session_state:
-                        st.info(st.session_state[result_key])
+                        st.success(st.session_state[result_key])
                         del st.session_state[result_key]
-                    
-                    # 显示详细日志
-                    if st.session_state.get(f"show_logs_{suggestion['id']}", False):
-                        logs = [
-                            "2024-01-21 03:15:00 LOGIN user=zhangsan ip=10.0.0.100 status=SUCCESS",
-                            "2024-01-21 03:16:00 API_CALL user=zhangsan endpoint=/api/sensitive/data count=1",
-                        ]
-                        st.markdown("**相关日志：**")
-                        for log in logs:
-                            st.code(log)
-    if not filtered_suggestions:
-        st.info("没有符合条件的处置建议")
-    
-    # 处置统计（保持不变）
+
+    # 处置统计
     st.divider()
     st.subheader("📊 处置统计")
+    stat_counts = {"待处置": 0, "无基线": 0, "基线不可靠": 0}
+    for s in suggestions:
+        status = s.get("处置状态", "")
+        if status in stat_counts:
+            stat_counts[status] += 1
     stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
     with stat_col1:
-        st.metric("待处置", "12")
+        st.metric("待处置", str(stat_counts["待处置"]))
     with stat_col2:
-        st.metric("处置中", "5")
+        st.metric("无基线", str(stat_counts["无基线"]))
     with stat_col3:
-        st.metric("已处置", "45")
+        st.metric("基线不可靠", str(stat_counts["基线不可靠"]))
     with stat_col4:
-        st.metric("误报", "8")
+        st.metric("总计", str(len(suggestions)))
 
 
 def show_history_search():
