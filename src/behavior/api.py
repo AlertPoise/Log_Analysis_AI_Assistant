@@ -865,6 +865,145 @@ def _empty_summary(model_version: str | None) -> dict[str, Any]:
     }
 
 
+def analyze_behavior_for_frontend(
+    *,
+    start_time: str,
+    end_time: str,
+    client: Any = None,
+    database: str = "log_analysis",
+    model_version: str | None = None,
+    log_type: str = "vpn",
+    validation_run_id: str | None = None,
+    username: str | None = None,
+    risk_level: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """为前端提供统一的行为分析结果。
+    
+    组合多个查询，返回用户排行和详情数据。
+    """
+    filters: dict[str, Any] = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "model_version": model_version,
+        "log_type": log_type,
+        "validation_run_id": validation_run_id,
+        "username": username,
+        "risk_level": risk_level,
+        "limit": limit,
+    }
+    
+    try:
+        # 获取排行数据
+        ranking_result = get_validation_ranking(
+            client=client,
+            database=database,
+            start_time=start_time,
+            end_time=end_time,
+            model_version=model_version,
+            log_type=log_type,
+            validation_run_id=validation_run_id,
+            risk_level=risk_level,
+            limit=limit,
+        )
+        
+        if not ranking_result.get("success"):
+            return ranking_result
+        
+        # 获取摘要数据
+        summary_result = get_validation_summary(
+            client=client,
+            database=database,
+            start_time=start_time,
+            end_time=end_time,
+            model_version=model_version,
+            log_type=log_type,
+            validation_run_id=validation_run_id,
+        )
+        
+        return {
+            "success": True,
+            "error": None,
+            "filters": filters,
+            "ranking": ranking_result.get("ranking", []),
+            "summary": summary_result.get("summary", {}),
+        }
+    
+    except Exception as exc:
+        logger.exception("analyze_behavior_for_frontend 失败")
+        return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
+
+
+def analyze_behavior_from_clickhouse(
+    *,
+    start_time: str,
+    end_time: str,
+    client: Any = None,
+    database: str = "log_analysis",
+    model_version: str | None = None,
+    log_type: str = "vpn",
+    validation_run_id: str | None = None,
+    username: str | None = None,
+    risk_level: str | None = None,
+    validation_status: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """从 ClickHouse 读取并分析行为数据。
+    
+    返回验证事件列表，支持多种筛选条件。
+    """
+    filters: dict[str, Any] = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "model_version": model_version,
+        "log_type": log_type,
+        "validation_run_id": validation_run_id,
+        "username": username,
+        "risk_level": risk_level,
+        "validation_status": validation_status,
+        "limit": limit,
+    }
+    
+    try:
+        # 使用通用查询函数获取事件
+        events_result = query_validation_events(
+            client=client,
+            database=database,
+            start_time=start_time,
+            end_time=end_time,
+            model_version=model_version,
+            log_type=log_type,
+            validation_run_id=validation_run_id,
+            username=username,
+            risk_level=risk_level,
+            validation_status=validation_status,
+            limit=limit,
+        )
+        
+        if not events_result.get("success"):
+            return events_result
+        
+        # 统计分析
+        events = events_result.get("events", [])
+        risk_distribution = {}
+        for event in events:
+            level = event.get("ueba_risk_level", "UNKNOWN")
+            risk_distribution[level] = risk_distribution.get(level, 0) + 1
+        
+        return {
+            "success": True,
+            "error": None,
+            "filters": filters,
+            "events": events,
+            "count": len(events),
+            "risk_distribution": risk_distribution,
+        }
+    
+    except Exception as exc:
+        logger.exception("analyze_behavior_from_clickhouse 失败")
+        return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
+
+
 __all__ = [
     "get_validation_summary",
     "get_validation_ranking",
@@ -874,4 +1013,6 @@ __all__ = [
     "get_baseline_detail",
     "get_recent_risk_events",
     "query_validation_events",
+    "analyze_behavior_for_frontend",
+    "analyze_behavior_from_clickhouse",
 ]
