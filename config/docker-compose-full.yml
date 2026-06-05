@@ -1,4 +1,27 @@
 services:
+  # ClickHouse 初始化容器
+  clickhouse-init:
+    image: clickhouse/clickhouse-client:latest
+    container_name: clickhouse-init
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DATABASE=log_analysis
+    volumes:
+      - ../config/clickhouse.sql:/docker-entrypoint-initdb.d/init.sql
+    command: >
+      /bin/sh -c "
+      clickhouse-client --host $CLICKHOUSE_HOST --port $CLICKHOUSE_PORT --user $CLICKHOUSE_USER --password '$CLICKHOUSE_PASSWORD' --database $CLICKHOUSE_DATABASE --multiquery < /docker-entrypoint-initdb.d/init.sql
+      echo 'ClickHouse tables initialized'
+      "
+    networks:
+      - default
+
   # Kafka 服务
   kafka:
     image: apache/kafka:3.7.0
@@ -75,7 +98,7 @@ services:
     volumes:
       - /var/log:/var/log:ro
       - ./sample_logs:/logs/sample:ro
-      - ./filebeat-config.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ./filebeat-docker.yml:/usr/share/filebeat/filebeat.yml:ro
       - ./../../logs/filebeat:/var/log/filebeat
     depends_on:
       kafka:
