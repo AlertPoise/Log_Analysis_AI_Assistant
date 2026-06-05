@@ -125,8 +125,15 @@ class LogAnalysisService:
                 try:
                     # 跳过用户管理语句（CREATE USER / GRANT / FLUSH PRIVILEGES）
                     # 这些应由 Docker 初始化或管理员手动执行
-                    stmt_upper = stmt.upper().strip()
-                    if any(stmt_upper.startswith(kw) for kw in (
+                    # 先去掉开头的注释行，再判断是否为用户管理语句
+                    stmt_lines = stmt.split('\n')
+                    first_sql_line = ''
+                    for line in stmt_lines:
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith('--'):
+                            first_sql_line = stripped.upper()
+                            break
+                    if any(first_sql_line.startswith(kw) for kw in (
                         'CREATE USER', 'GRANT ALL', 'FLUSH PRIVILEGES'
                     )):
                         logger.info(f"  [{idx}] 跳过用户管理语句（应由 Docker 初始化执行）")
