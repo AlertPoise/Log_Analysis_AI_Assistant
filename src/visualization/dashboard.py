@@ -514,7 +514,7 @@ def convert_behavior_result_for_dashboard(result: Dict[str, Any]) -> Dict[str, A
 def get_behavior_analysis_for_dashboard(target_user: str = "zhangsan") -> Dict[str, Any]:
     """优先读取 ClickHouse behavior，失败时回退到演示分析结果。"""
     try:
-        clickhouse_result = analyze_behavior_from_clickhouse(target_user)
+        clickhouse_result = analyze_behavior_from_clickhouse(username=target_user)
     except Exception as exc:
         logger.exception("获取 ClickHouse behavior 分析失败")
         clickhouse_result = {
@@ -1351,7 +1351,7 @@ def show_ueba_ranking():
 
     selected_user = st.selectbox("选择用户查看行为分析", real_usernames)
     # 直接调用行为分析接口（不再有 demo 回退）
-    behavior_result = analyze_behavior_from_clickhouse(selected_user)
+    behavior_result = analyze_behavior_from_clickhouse(username=selected_user)
     if not behavior_result.get("success"):
         st.error(f"行为分析失败：{behavior_result.get('error', '未知错误')}")
         return

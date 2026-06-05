@@ -123,6 +123,16 @@ class LogAnalysisService:
             success_count = 0
             for idx, stmt in enumerate(statements, 1):
                 try:
+                    # 跳过用户管理语句（CREATE USER / GRANT / FLUSH PRIVILEGES）
+                    # 这些应由 Docker 初始化或管理员手动执行
+                    stmt_upper = stmt.upper().strip()
+                    if any(stmt_upper.startswith(kw) for kw in (
+                        'CREATE USER', 'GRANT ALL', 'FLUSH PRIVILEGES'
+                    )):
+                        logger.info(f"  [{idx}] 跳过用户管理语句（应由 Docker 初始化执行）")
+                        success_count += 1
+                        continue
+
                     self.clickhouse_client.client.command(stmt)
                     success_count += 1
                 except Exception as e:
