@@ -4,8 +4,7 @@ services:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse-init
     depends_on:
-      clickhouse:
-        condition: service_healthy
+      - clickhouse
     environment:
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=8123
@@ -16,7 +15,8 @@ services:
       - ../config/clickhouse.sql:/docker-entrypoint-initdb.d/init.sql
     command: >
       /bin/sh -c "
-      clickhouse-client --host $CLICKHOUSE_HOST --port $CLICKHOUSE_PORT --user $CLICKHOUSE_USER --password '$CLICKHOUSE_PASSWORD' --database $CLICKHOUSE_DATABASE --multiquery < /docker-entrypoint-initdb.d/init.sql
+      sleep 30 && \
+      clickhouse-client --host $CLICKHOUSE_HOST --port $CLICKHOUSE_PORT --user $CLICKHOUSE_USER --password '$CLICKHOUSE_PASSWORD' --database $CLICKHOUSE_DATABASE --multiquery < /docker-entrypoint-initdb.d/init.sql && \
       echo 'ClickHouse tables initialized'
       "
     networks:
@@ -40,12 +40,8 @@ services:
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
     ports:
       - "9092:9092"
-    healthcheck:
-      test: ["CMD", "kafka-topics.sh", "--list", "--bootstrap-server", "localhost:9092"]
-      interval: 10s
-      timeout: 30s
-      retries: 20
-      start_period: 45s
+    networks:
+      - default
 
   # ClickHouse 服务
   clickhouse:
@@ -68,12 +64,8 @@ services:
           memory: 2G
         reservations:
           memory: 1G
-    healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:8123/ping | grep -q OK && curl -s http://localhost:8123/query?query=SELECT%201 | grep -q 1"]
-      interval: 10s
-      timeout: 30s
-      retries: 20
-      start_period: 30s
+    networks:
+      - default
 
   # ZooKeeper (可选，用于某些 Kafka 配置)
   zookeeper:
@@ -84,11 +76,8 @@ services:
     environment:
       ZOO_MY_ID: 1
       ZOO_SERVERS: server.1=0.0.0.0:2888:3888
-    healthcheck:
-      test: ["CMD", "zkServer.sh", "status"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    networks:
+      - default
 
   # Filebeat 服务
   filebeat:
@@ -101,8 +90,7 @@ services:
       - ./filebeat-docker.yml:/usr/share/filebeat/filebeat.yml:ro
       - ./../../logs/filebeat:/var/log/filebeat
     depends_on:
-      kafka:
-        condition: service_healthy
+      - kafka
     environment:
       - KAFKA_HOST=kafka:9092
     restart: unless-stopped
