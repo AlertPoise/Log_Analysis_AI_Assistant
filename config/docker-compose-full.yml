@@ -1,7 +1,7 @@
 services:
-  # ClickHouse 初始化容器
+  # ClickHouse 初始化容器（使用 server 镜像，已包含 clickhouse-client）
   clickhouse-init:
-    image: clickhouse/clickhouse-client:latest
+    image: clickhouse/clickhouse-server:latest
     container_name: clickhouse-init
     depends_on:
       clickhouse:
