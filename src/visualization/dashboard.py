@@ -742,13 +742,13 @@ def fetch_security_metrics():
     """从 ClickHouse 获取真实安全指标数据"""
     client = get_clickhouse_client()
     
-    # 获取整体安全评分
-    score_query = "SELECT AVG(security_score) FROM daily_security_scores WHERE date = TODAY()"
+    # 获取整体安全评分（从 daily_reports 表）
+    score_query = f"SELECT AVG(overall_score) FROM daily_reports WHERE report_date = today()"
     score_result = client.query(score_query)
-    security_score = int(score_result[0][0]) if score_result else 75
+    security_score = int(score_result.result_rows[0][0]) if score_result.result_rows and score_result.result_rows[0][0] else 75
     
-    # 获取今日异常事件数
-    anomaly_query = "SELECT COUNT(*) FROM anomaly_events WHERE event_time >= TODAY()"
+    # 获取今日异常事件数（从 anomaly_detection 表）
+    anomaly_query = "SELECT COUNT(*) FROM anomaly_detection WHERE detection_time >= today()"
     anomaly_result = client.query(anomaly_query)
     anomaly_count = anomaly_result.result_rows[0][0] if anomaly_result.result_rows else 0
 
@@ -786,24 +786,22 @@ def fetch_security_metrics():
 def fetch_security_trend(days=7):
     """从 ClickHouse 获取真实安全评分趋势"""
     client = get_clickhouse_client()
-    query = """
-        SELECT date, security_score, anomaly_count
-        FROM daily_security_scores
-        WHERE date >= TODAY() - INTERVAL %s DAY
-        ORDER BY date
+    query = f"""
+        SELECT report_date, overall_score, total_anomalies
+        FROM daily_reports
+        WHERE report_date >= today() - INTERVAL {days} DAY
+        ORDER BY report_date
     """
     result = client.query(query)
     data = {"日期": [], "安全评分": [], "异常事件数": []}
     # 补全缺失的日期
     date_list = [(datetime.now() - timedelta(days=i)).date() for i in range(days-1, -1, -1)]
-    row_dict = {row[0]: row[1] for row in result.result_rows}
+    row_dict = {row[0]: (row[1], row[2]) for row in result.result_rows}
     for d in date_list:
         data["日期"].append(d.strftime("%Y-%m-%d"))
-        anomaly_cnt = row_dict.get(d, 0)
-        data["异常事件数"].append(anomaly_cnt)
-        # 安全评分简单模拟：100 - 异常事件数 * 5 (限制范围)
-        score = max(0, 100 - anomaly_cnt * 5)
-        data["安全评分"].append(score)
+        score, anomaly_cnt = row_dict.get(d, (75, 0))
+        data["异常事件数"].append(anomaly_cnt or 0)
+        data["安全评分"].append(int(score) if score else max(0, 100 - (anomaly_cnt or 0) * 5))
     client.close()
     return pd.DataFrame(data)
 
@@ -811,7 +809,7 @@ def fetch_security_trend(days=7):
 def fetch_risk_distribution():
     """从 ClickHouse 获取真实风险等级分布"""
     client = get_clickhouse_client()
-    query = "SELECT risk_level, COUNT(*) FROM anomaly_events WHERE event_time >= TODAY() GROUP BY risk_level"
+    query = "SELECT risk_level, COUNT(*) FROM anomaly_detection WHERE detection_time >= today() GROUP BY risk_level"
     result = client.query(query)
     data = {"风险等级": [], "事件数": []}
     # 映射等级显示
@@ -826,7 +824,7 @@ def fetch_risk_distribution():
 def fetch_threat_stats():
     """从 ClickHouse 获取真实威胁类型统计"""
     client = get_clickhouse_client()
-    query = "SELECT threat_type, COUNT(*) FROM anomaly_events WHERE event_time >= TODAY() GROUP BY threat_type"
+    query = "SELECT threat_type, COUNT(*) FROM anomaly_detection WHERE detection_time >= today() GROUP BY threat_type"
     result = client.query(query)
     data = {"威胁类型": [], "数量": []}
     for row in result.result_rows:
@@ -837,12 +835,12 @@ def fetch_threat_stats():
 
 
 def fetch_ai_suggestions(status_filter="全部", risk_filter="全部"):
-    """从 ClickHouse 获取真实 AI 处置建议"""
+    """从 ClickHouse 获取真实 AI 处置建议（从 anomaly_detection 表读取）"""
     client = get_clickhouse_client()
     query = """
-        SELECT id, username, threat_type, risk_level, anomaly_description, 
-               ai_analysis, suggestion, confidence, status, create_time
-        FROM ai_suggestions
+        SELECT id, username, threat_type, risk_level, description,
+               ai_analysis, `处置建议`, anomaly_score, is_processed, detection_time
+        FROM anomaly_detection
         WHERE 1=1
     """
     params = {}
@@ -901,26 +899,26 @@ def fetch_history_logs(start_time=None, end_time=None, username=None, source_ip=
                        log_type="全部", status="全部"):
     """从 ClickHouse 搜索真实历史日志"""
     client = get_clickhouse_client()
-    query = """
-        SELECT timestamp, username, log_type, source_ip, status, location, risk_level
-        FROM security_logs
+    query = f"""
+        SELECT timestamp, username, log_type, source_ip, result, src_city, risk_score
+        FROM {settings.clickhouse_table}
         WHERE 1=1
     """
     params = []
     if start_time:
-        query += " AND toDate(timestamp) >= %s"
+        query += " AND toDate(timestamp) >= %(start_time)s"
         params.append(start_time)
     if end_time:
-        query += " AND toDate(timestamp) <= %s"
+        query += " AND toDate(timestamp) <= %(end_time)s"
         params.append(end_time)
     if username:
-        query += " AND username = %s"
+        query += " AND username = %(username)s"
         params.append(username)
     if source_ip:
-        query += " AND source_ip = %s"
+        query += " AND source_ip = %(source_ip)s"
         params.append(source_ip)
     if log_type != "全部":
-        query += " AND log_type = %s"
+        query += " AND log_type = %(log_type)s"
         params.append(log_type)
     if status != "全部":
         # 状态映射
@@ -1184,13 +1182,12 @@ def get_ai_suggestions(status_filter="全部", risk_filter="全部"):
     # 直接调用 ClickHouse 查询，不使用 STORAGE_AVAILABLE 标志
     try:
         data = fetch_ai_suggestions(status_filter, risk_filter)
-        # 如果返回的是 demo 数据（通过检查是否包含特定 id 或用户），则视为失败
-        if data and len(data) > 0 and data[0].get("id") and data[0]["id"] in [1,2,3,4,5]:
-            # 这是模拟数据的特征 id，说明查询失败返回了 demo
-            logger.info("🤖 当前显示: 模拟数据 - AI 处置建议 (查询返回 demo)")
+        if data:
+            logger.info(f"🤖 当前显示: 实时数据 - 从 ClickHouse 获取 {len(data)} 条 AI 建议")
             return data
-        logger.info(f"🤖 当前显示: 实时数据 - 从 ClickHouse 获取 {len(data)} 条 AI 建议")
-        return data
+        # ClickHouse 无数据时降级到模拟数据
+        logger.info("🤖 当前显示: 模拟数据 - AI 处置建议 (ClickHouse 无数据)")
+        return get_sample_ai_suggestions(status_filter, risk_filter)
     except Exception as e:
         logger.error(f"❌ 获取 AI 建议失败: {e}")
         # 对于无法映射的状态（处置中、误报），直接返回空列表，不显示 demo
@@ -1351,7 +1348,11 @@ def show_ueba_ranking():
 
     selected_user = st.selectbox("选择用户查看行为分析", real_usernames)
     # 直接调用行为分析接口（不再有 demo 回退）
-    behavior_result = analyze_behavior_from_clickhouse(username=selected_user)
+    behavior_result = analyze_behavior_from_clickhouse(
+        username=selected_user,
+        start_time=(datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),
+        end_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
     if not behavior_result.get("success"):
         st.error(f"行为分析失败：{behavior_result.get('error', '未知错误')}")
         return
