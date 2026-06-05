@@ -1,9 +1,5 @@
 version: '3.8'
 
-# 全局环境变量配置（所有服务共享）
-env_file:
-  - ../.env
-
 services:
   # ClickHouse 初始化容器
   clickhouse-init:
