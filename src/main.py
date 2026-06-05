@@ -8,9 +8,11 @@
 3. 启动日志解析
 4. 启动异常检测
 5. 启动定时报告任务
-6. 启动 Web 服务
+6. 启动 Web 服务（Streamlit Dashboard）
 """
 import asyncio
+import subprocess
+import os
 from typing import Optional, Dict, Any
 from .utils.config import settings
 from .utils.logger import get_logger
@@ -38,10 +40,11 @@ class LogAnalysisService:
         self.filebeat_collector: Optional[FilebeatCollector] = None
         self.flume_collector: Optional[FlumeCollector] = None
         self.ai_analyzer: Optional[AIAnalyzer] = None
+        self.streamlit_process: Optional[subprocess.Popen] = None
     
     def init_storage(self):
         """初始化存储模块"""
-        logger.info("[1/3] 初始化存储模块...")
+        logger.info("[1/4] 初始化存储模块...")
         
         # 初始化 Kafka 客户端
         kafka_config = {
@@ -76,7 +79,7 @@ class LogAnalysisService:
     
     def init_collectors(self):
         """初始化采集器模块"""
-        logger.info("[2/3] 初始化采集器模块...")
+        logger.info("[2/4] 初始化采集器模块...")
         
         # 初始化 Filebeat 采集器
         try:
@@ -104,7 +107,7 @@ class LogAnalysisService:
     
     def init_ai(self):
         """初始化 AI 分析模块"""
-        logger.info("[3/3] 初始化 AI 分析模块...")
+        logger.info("[3/4] 初始化 AI 分析模块...")
         try:
             config = settings.current_ai_config
             self.ai_analyzer = AIAnalyzer(
@@ -116,6 +119,25 @@ class LogAnalysisService:
             logger.info(f"✓ AI 分析器初始化成功: platform={config['platform']}, model={config.get('model')}")
         except Exception as e:
             logger.warning(f"⚠️  AI 分析器初始化失败: {e}")
+    
+    def start_dashboard(self):
+        """启动 Streamlit Dashboard"""
+        logger.info("[4/4] 启动 Streamlit Dashboard...")
+        try:
+            # 获取项目根目录
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            app_path = os.path.join(project_root, "src", "web", "app.py")
+            
+            # 启动 Streamlit 进程
+            self.streamlit_process = subprocess.Popen([
+                "streamlit", "run", app_path,
+                "--server.port", str(settings.streamlit_server_port),
+                "--server.address", settings.streamlit_server_address
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            
+            logger.info(f"✓ Streamlit Dashboard 已启动: http://{settings.streamlit_server_address}:{settings.streamlit_server_port}")
+        except Exception as e:
+            logger.error(f"✗ Streamlit Dashboard 启动失败: {e}")
     
     async def run(self):
         """运行主服务"""
@@ -132,8 +154,12 @@ class LogAnalysisService:
         # 3. 初始化 AI 分析模块
         self.init_ai()
         
+        # 4. 启动 Streamlit Dashboard
+        self.start_dashboard()
+        
         logger.info("========================================")
         logger.info("  🚀 服务已启动")
+        logger.info(f"  🌐 Dashboard: http://{settings.streamlit_server_address}:{settings.streamlit_server_port}")
         logger.info("========================================")
         
         # 保持运行
@@ -144,6 +170,12 @@ class LogAnalysisService:
             logger.info("========================================")
             logger.info("  🛑 系统关闭中...")
             logger.info("========================================")
+            
+            # 停止 Streamlit
+            if self.streamlit_process:
+                self.streamlit_process.terminate()
+                self.streamlit_process.wait()
+                logger.info("✓ Streamlit Dashboard 已停止")
             
             # 清理资源
             if self.kafka_client:
