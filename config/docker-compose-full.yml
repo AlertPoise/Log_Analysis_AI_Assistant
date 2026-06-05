@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ClickHouse 初始化容器
   clickhouse-init:
