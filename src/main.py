@@ -8,9 +8,11 @@
 3. 启动日志解析
 4. 启动异常检测
 5. 启动定时报告任务
-6. 启动 Web 服务
+6. 启动 Web 服务（Streamlit Dashboard）
 """
 import asyncio
+import subprocess
+import os
 from typing import Optional, Dict, Any
 from .utils.config import settings
 from .utils.logger import get_logger
@@ -38,43 +40,46 @@ class LogAnalysisService:
         self.filebeat_collector: Optional[FilebeatCollector] = None
         self.flume_collector: Optional[FlumeCollector] = None
         self.ai_analyzer: Optional[AIAnalyzer] = None
+        self.streamlit_process: Optional[subprocess.Popen] = None
     
     def init_storage(self):
         """初始化存储模块"""
-        logger.info("[1/6] 初始化存储模块...")
+        logger.info("[1/4] 初始化存储模块...")
         
         # 初始化 Kafka 客户端
+        kafka_config = {
+            'bootstrap_servers': settings.kafka_bootstrap_servers,
+            'producer_acks': 'all',
+            'producer_retries': 3,
+            'consumer_group_id': settings.kafka_consumer_group
+        }
+        self.kafka_client = KafkaClient(kafka_config)
+        
         try:
-            kafka_config = {
-                'bootstrap_servers': settings.kafka_bootstrap_servers,
-                'producer_acks': 'all',
-                'producer_retries': 3,
-                'consumer_group_id': settings.kafka_consumer_group
-            }
-            self.kafka_client = KafkaClient(kafka_config)
             self.kafka_client.connect_producer()
-            logger.info("✓ Kafka 生产者初始化成功")
+            logger.info("✓ Kafka 连接成功")
         except Exception as e:
-            logger.warning(f"⚠️  Kafka 连接失败 (可能未启动): {e}")
+            logger.warning(f"⚠️  Kafka 连接失败: {e}")
         
         # 初始化 ClickHouse 客户端
+        clickhouse_config = {
+            'host': settings.clickhouse_host,
+            'port': settings.clickhouse_port,
+            'username': settings.clickhouse_user,
+            'password': settings.clickhouse_password,
+            'database': settings.clickhouse_database
+        }
+        self.clickhouse_client = ClickHouseClient(config=clickhouse_config)
+        
         try:
-            clickhouse_config = {
-                'host': settings.clickhouse_host,
-                'port': settings.clickhouse_port,
-                'username': settings.clickhouse_user,
-                'password': settings.clickhouse_password,
-                'database': settings.clickhouse_database
-            }
-            self.clickhouse_client = ClickHouseClient(config=clickhouse_config)
             self.clickhouse_client.connect()
             logger.info("✓ ClickHouse 连接成功")
         except Exception as e:
-            logger.warning(f"⚠️  ClickHouse 连接失败 (可能未启动): {e}")
+            logger.warning(f"⚠️  ClickHouse 连接失败: {e}")
     
     def init_collectors(self):
         """初始化采集器模块"""
-        logger.info("[2/6] 初始化采集器模块...")
+        logger.info("[2/4] 初始化采集器模块...")
         
         # 初始化 Filebeat 采集器
         try:
@@ -91,7 +96,7 @@ class LogAnalysisService:
         # 初始化 Flume 采集器
         try:
             flume_config = {
-                'host': settings.clickhouse_host,  # Flume 通常写入 ClickHouse
+                'host': settings.clickhouse_host,
                 'port': 8123,
                 'batch_size': 1000
             }
@@ -100,87 +105,9 @@ class LogAnalysisService:
         except Exception as e:
             logger.error(f"✗ Flume 采集器初始化失败: {e}")
     
-    def test_storage(self):
-        """测试存储模块功能"""
-        logger.info("[3/6] 测试存储模块...")
-        
-        # 测试 Kafka 发送消息
-        if self.kafka_client:
-            test_message = {
-                'timestamp': '2024-01-01T12:00:00Z',
-                'log_type': 'test',
-                'source': 'main.py',
-                'message': 'Test message from main.py',
-                'host': 'localhost'
-            }
-            try:
-                success = self.kafka_client.send_message(
-                    topic=settings.kafka_logs_topic,
-                    message=test_message
-                )
-                if success:
-                    logger.info("✓ Kafka 消息发送测试成功")
-                else:
-                    logger.warning("⚠️  Kafka 消息发送测试失败")
-            except Exception as e:
-                logger.warning(f"⚠️  Kafka 测试跳过 (可能未启动): {e}")
-        
-        # 测试 ClickHouse 查询
-        if self.clickhouse_client:
-            try:
-                # 查询系统表验证连接
-                result = self.clickhouse_client.client.query("SELECT 1")
-                logger.info("✓ ClickHouse 查询测试成功")
-            except Exception as e:
-                logger.warning(f"⚠️  ClickHouse 查询测试失败: {e}")
-    
-    def test_collectors(self):
-        """测试采集器模块功能"""
-        logger.info("[4/6] 测试采集器模块...")
-        
-        # 测试 Filebeat 采集器启动
-        if self.filebeat_collector:
-            try:
-                # 启动采集器（如果 Kafka 可用）
-                if self.kafka_client:
-                    self.filebeat_collector.start()
-                    logger.info("✓ Filebeat 采集器启动成功")
-                    
-                    # 停止采集器
-                    self.filebeat_collector.stop()
-                    logger.info("✓ Filebeat 采集器停止成功")
-                else:
-                    logger.info("⚠️  Filebeat 采集器测试跳过 (Kafka 未连接)")
-            except Exception as e:
-                logger.warning(f"⚠️  Filebeat 采集器测试失败: {e}")
-        
-        # 测试 Flume 采集器
-        if self.flume_collector:
-            try:
-                # 启动 Flume 采集器
-                self.flume_collector.start()
-                logger.info("✓ Flume 采集器启动成功")
-                
-                # 停止采集器
-                self.flume_collector.stop()
-                logger.info("✓ Flume 采集器停止成功")
-            except Exception as e:
-                logger.warning(f"⚠️  Flume 采集器测试失败: {e}")
-    
-    def show_status(self):
-        """显示系统状态"""
-        logger.info("[5/7] 系统状态检查...")
-        logger.info(f"  - 配置文件: .env (已加载)")
-        logger.info(f"  - 日志级别: {settings.log_level}")
-        logger.info(f"  - Kafka Broker: {settings.kafka_bootstrap_servers}")
-        logger.info(f"  - ClickHouse: {settings.clickhouse_host}:{settings.clickhouse_port}")
-        logger.info(f"  - AI 平台: {settings.ai_platform}")
-        logger.info(f"  - 数据保留天数: {settings.data_retention_days}")
-        logger.info(f"  - 异常检测阈值: {settings.anomaly_threshold}")
-    
     def init_ai(self):
         """初始化 AI 分析模块"""
-        logger.info("[6/7] 初始化 AI 分析模块...")
+        logger.info("[3/4] 初始化 AI 分析模块...")
         try:
             config = settings.current_ai_config
             self.ai_analyzer = AIAnalyzer(
@@ -192,6 +119,34 @@ class LogAnalysisService:
             logger.info(f"✓ AI 分析器初始化成功: platform={config['platform']}, model={config.get('model')}")
         except Exception as e:
             logger.warning(f"⚠️  AI 分析器初始化失败: {e}")
+    
+    def start_dashboard(self):
+        """启动 Streamlit Dashboard"""
+        logger.info("[4/4] 启动 Streamlit Dashboard...")
+        try:
+            # 获取项目根目录
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            # 正确的 Dashboard 路径（参考 dashboard_continuous.py）
+            app_path = os.path.join(project_root, "src", "visualization", "dashboard.py")
+            
+            # 检查文件是否存在
+            if not os.path.exists(app_path):
+                logger.error(f"✗ Dashboard 文件不存在: {app_path}")
+                return
+            
+            # 启动 Streamlit 进程（使用 sys.executable 确保使用正确的 Python 解释器）
+            import sys
+            self.streamlit_process = subprocess.Popen([
+                sys.executable, "-m", "streamlit", "run",
+                str(app_path),
+                "--server.port", str(settings.streamlit_server_port),
+                "--server.address", settings.streamlit_server_address,
+                "--browser.serverAddress", settings.streamlit_server_address
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            
+            logger.info(f"✓ Streamlit Dashboard 已启动: http://{settings.streamlit_server_address}:{settings.streamlit_server_port}")
+        except Exception as e:
+            logger.error(f"✗ Streamlit Dashboard 启动失败: {e}")
     
     async def run(self):
         """运行主服务"""
@@ -205,23 +160,15 @@ class LogAnalysisService:
         # 2. 初始化采集器模块
         self.init_collectors()
         
-        # 3. 测试存储模块
-        self.test_storage()
-        
-        # 4. 测试采集器模块
-        self.test_collectors()
-        
-        # 5. 显示系统状态
-        self.show_status()
-        
-        # 6. 初始化 AI 分析模块
+        # 3. 初始化 AI 分析模块
         self.init_ai()
         
+        # 4. 启动 Streamlit Dashboard
+        self.start_dashboard()
+        
         logger.info("========================================")
-        logger.info("  ✅ 系统初始化完成！")
-        logger.info("  📊 各模块接口测试通过")
-        logger.info("  🤖 AI 分析模块已就绪")
-        logger.info("  🚀 服务已就绪")
+        logger.info("  🚀 服务已启动")
+        logger.info(f"  🌐 Dashboard: http://{settings.streamlit_server_address}:{settings.streamlit_server_port}")
         logger.info("========================================")
         
         # 保持运行
@@ -232,6 +179,12 @@ class LogAnalysisService:
             logger.info("========================================")
             logger.info("  🛑 系统关闭中...")
             logger.info("========================================")
+            
+            # 停止 Streamlit
+            if self.streamlit_process:
+                self.streamlit_process.terminate()
+                self.streamlit_process.wait()
+                logger.info("✓ Streamlit Dashboard 已停止")
             
             # 清理资源
             if self.kafka_client:
