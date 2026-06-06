@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from .config import UebaBaselineConfig
@@ -25,6 +26,27 @@ DEFAULT_RECENT_RISK_LIMIT = 20
 DEFAULT_RANKING_LIMIT = 20
 DEFAULT_USER_DETAIL_LIMIT = 50
 MAX_QUERY_LIMIT = 1000
+DEFAULT_FRONTEND_WINDOW_DAYS = 7
+
+
+def _default_time_window() -> tuple[str, str]:
+    """返回前端查询默认时间窗口，避免调用方缺少时间参数时直接崩溃。"""
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=DEFAULT_FRONTEND_WINDOW_DAYS)
+    return (
+        start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
+def _normalize_time_window(
+    start_time: str | None,
+    end_time: str | None,
+) -> tuple[str, str]:
+    """归一化前端时间窗口；两个参数必须同时显式传入，否则使用默认窗口。"""
+    if start_time and end_time:
+        return start_time, end_time
+    return _default_time_window()
 
 
 def _clamp_limit(limit: int, default: int = 20) -> int:
@@ -122,6 +144,7 @@ def _resolve_validation_context(
     model_version: str | None,
     validation_run_id: str | None,
     log_type: str,
+    bind_latest_validation_run: bool = True,
 ) -> dict[str, Any]:
     """根据优先规则解析 model_version 和 validation_run_id。
 
@@ -155,8 +178,11 @@ def _resolve_validation_context(
             ctx = repo.get_latest_validation_context(log_type=log_type)
             if ctx is not None:
                 resolved["model_version"] = ctx["baseline_model_version"]
-                resolved["validation_run_id"] = ctx["validation_run_id"]
-                resolved["resolved_from"] = "latest_validation"
+                if bind_latest_validation_run:
+                    resolved["validation_run_id"] = ctx["validation_run_id"]
+                    resolved["resolved_from"] = "latest_validation"
+                else:
+                    resolved["resolved_from"] = "latest_validation_model"
 
         if resolved["model_version"] is None:
             store = _build_baseline_store(client, database)
@@ -259,6 +285,7 @@ def get_validation_summary(
     model_version: str | None = None,
     log_type: str = "vpn",
     validation_run_id: str | None = None,
+    bind_latest_validation_run: bool = True,
 ) -> dict[str, Any]:
     """返回指定窗口内 validation 结果的聚合摘要（数据库侧聚合，不截断）。"""
     filters: dict[str, Any] = {
@@ -267,10 +294,11 @@ def get_validation_summary(
         "model_version": model_version,
         "log_type": log_type,
         "validation_run_id": validation_run_id,
+        "bind_latest_validation_run": bind_latest_validation_run,
     }
 
     resolved = _resolve_validation_context(
-        client, database, model_version, validation_run_id, log_type,
+        client, database, model_version, validation_run_id, log_type, bind_latest_validation_run,
     )
     if resolved.get("_error") is not None:
         return resolved["_error"]
@@ -384,6 +412,7 @@ def get_validation_ranking(
     validation_status: str | None = None,
     username: str | None = None,
     limit: int = DEFAULT_RANKING_LIMIT,
+    bind_latest_validation_run: bool = True,
 ) -> dict[str, Any]:
     """返回按 max_score 降序的用户 UEBA validation 排行。
 
@@ -401,10 +430,11 @@ def get_validation_ranking(
         "validation_status": validation_status,
         "username": username,
         "limit": safe_limit,
+        "bind_latest_validation_run": bind_latest_validation_run,
     }
 
     resolved = _resolve_validation_context(
-        client, database, model_version, validation_run_id, log_type,
+        client, database, model_version, validation_run_id, log_type, bind_latest_validation_run,
     )
     if resolved.get("_error") is not None:
         return resolved["_error"]
@@ -697,6 +727,7 @@ def get_recent_risk_events(
     risk_level: str | None = None,
     validation_status: str | None = None,
     limit: int = DEFAULT_RECENT_RISK_LIMIT,
+    bind_latest_validation_run: bool = True,
 ) -> dict[str, Any]:
     """返回近期风险事件（默认排除 NO_BASELINE 和完全正常事件）。"""
     safe_limit = _clamp_limit(limit, default=DEFAULT_RECENT_RISK_LIMIT)
@@ -710,10 +741,11 @@ def get_recent_risk_events(
         "risk_level": risk_level,
         "validation_status": validation_status,
         "limit": safe_limit,
+        "bind_latest_validation_run": bind_latest_validation_run,
     }
 
     resolved = _resolve_validation_context(
-        client, database, model_version, validation_run_id, log_type,
+        client, database, model_version, validation_run_id, log_type, bind_latest_validation_run,
     )
     if resolved.get("_error") is not None:
         return resolved["_error"]
@@ -782,6 +814,7 @@ def query_validation_events(
     risk_level: str | None = None,
     validation_status: str | None = None,
     limit: int = DEFAULT_USER_DETAIL_LIMIT,
+    bind_latest_validation_run: bool = True,
 ) -> dict[str, Any]:
     """通用 validation 事件查询（不自动排除 NO_BASELINE 或 normal）。"""
     safe_limit = _clamp_limit(limit, default=DEFAULT_USER_DETAIL_LIMIT)
@@ -795,10 +828,11 @@ def query_validation_events(
         "risk_level": risk_level,
         "validation_status": validation_status,
         "limit": safe_limit,
+        "bind_latest_validation_run": bind_latest_validation_run,
     }
 
     resolved = _resolve_validation_context(
-        client, database, model_version, validation_run_id, log_type,
+        client, database, model_version, validation_run_id, log_type, bind_latest_validation_run,
     )
     if resolved.get("_error") is not None:
         return resolved["_error"]
@@ -869,10 +903,21 @@ def _empty_summary(model_version: str | None) -> dict[str, Any]:
     }
 
 
-def analyze_behavior_for_frontend(
+def _risk_distribution_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
+    """基于事件列表生成稳定风险分布。"""
+    distribution = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0, "UNKNOWN": 0}
+    for event in events:
+        level = str(event.get("ueba_risk_level") or "UNKNOWN")
+        if level not in distribution:
+            level = "UNKNOWN"
+        distribution[level] += 1
+    return distribution
+
+
+def get_behavior_dashboard_data(
     *,
-    start_time: str,
-    end_time: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
     client: Any = None,
     database: str = "log_analysis",
     model_version: str | None = None,
@@ -880,68 +925,144 @@ def analyze_behavior_for_frontend(
     validation_run_id: str | None = None,
     username: str | None = None,
     risk_level: str | None = None,
+    validation_status: str | None = None,
     limit: int = 50,
+    bind_latest_validation_run: bool = True,
 ) -> dict[str, Any]:
-    """为前端提供统一的行为分析结果。
-    
-    组合多个查询，返回用户排行和详情数据。
-    """
+    """前端统一只读接口：返回摘要、排行和事件详情。"""
+    effective_start, effective_end = _normalize_time_window(start_time, end_time)
+    safe_limit = _clamp_limit(limit, default=DEFAULT_USER_DETAIL_LIMIT)
     filters: dict[str, Any] = {
-        "start_time": start_time,
-        "end_time": end_time,
+        "start_time": effective_start,
+        "end_time": effective_end,
         "model_version": model_version,
         "log_type": log_type,
         "validation_run_id": validation_run_id,
         "username": username,
         "risk_level": risk_level,
-        "limit": limit,
+        "validation_status": validation_status,
+        "limit": safe_limit,
+        "bind_latest_validation_run": bind_latest_validation_run,
     }
-    
+
     try:
-        # 获取排行数据
         ranking_result = get_validation_ranking(
             client=client,
             database=database,
-            start_time=start_time,
-            end_time=end_time,
+            start_time=effective_start,
+            end_time=effective_end,
             model_version=model_version,
             log_type=log_type,
             validation_run_id=validation_run_id,
             risk_level=risk_level,
-            limit=limit,
+            validation_status=validation_status,
+            username=username,
+            limit=safe_limit,
+            bind_latest_validation_run=bind_latest_validation_run,
         )
-        
         if not ranking_result.get("success"):
             return ranking_result
-        
-        # 获取摘要数据
+
         summary_result = get_validation_summary(
             client=client,
             database=database,
-            start_time=start_time,
-            end_time=end_time,
+            start_time=effective_start,
+            end_time=effective_end,
             model_version=model_version,
             log_type=log_type,
             validation_run_id=validation_run_id,
+            bind_latest_validation_run=bind_latest_validation_run,
         )
-        
+        if not summary_result.get("success"):
+            return summary_result
+
+        events_result = query_validation_events(
+            client=client,
+            database=database,
+            start_time=effective_start,
+            end_time=effective_end,
+            model_version=model_version,
+            log_type=log_type,
+            validation_run_id=validation_run_id,
+            username=username,
+            risk_level=risk_level,
+            validation_status=validation_status,
+            limit=safe_limit,
+            bind_latest_validation_run=bind_latest_validation_run,
+        )
+        if not events_result.get("success"):
+            return events_result
+
+        events = events_result.get("events", [])
+        ranking = ranking_result.get("ranking", [])
+        summary = summary_result.get("summary", {})
+        empty_reason = None
+        if not ranking and int(summary.get("total", 0) or 0) == 0:
+            empty_reason = "NO_VALIDATION_RESULTS_IN_WINDOW"
+
         return {
             "success": True,
             "error": None,
             "filters": filters,
-            "ranking": ranking_result.get("ranking", []),
-            "summary": summary_result.get("summary", {}),
+            "summary": summary,
+            "ranking": ranking,
+            "events": events,
+            "count": len(events),
+            "risk_distribution": _risk_distribution_from_events(events),
+            "meta": {
+                "source": "ueba_validation_results",
+                "score_unit": "0-100",
+                "empty_reason": empty_reason,
+            },
         }
-    
+
     except Exception as exc:
-        logger.exception("analyze_behavior_for_frontend 失败")
+        logger.exception("get_behavior_dashboard_data 失败")
         return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
+
+
+def analyze_behavior_for_frontend(
+    payload: dict[str, Any] | None = None,
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    client: Any = None,
+    database: str = "log_analysis",
+    model_version: str | None = None,
+    log_type: str = "vpn",
+    validation_run_id: str | None = None,
+    username: str | None = None,
+    risk_level: str | None = None,
+    validation_status: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """兼容旧名称的前端行为分析入口。
+
+    当前实现只提供 ClickHouse 只读查询；payload 仅用于兼容旧前端调用，
+    不触发内存 demo 分析。
+    """
+    if payload and username is None:
+        username = payload.get("target_user")
+
+    return get_behavior_dashboard_data(
+        start_time=start_time,
+        end_time=end_time,
+        client=client,
+        database=database,
+        model_version=model_version,
+        log_type=log_type,
+        validation_run_id=validation_run_id,
+        username=username,
+        risk_level=risk_level,
+        validation_status=validation_status,
+        limit=limit,
+    )
 
 
 def analyze_behavior_from_clickhouse(
     *,
-    start_time: str,
-    end_time: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
     client: Any = None,
     database: str = "log_analysis",
     model_version: str | None = None,
@@ -952,13 +1073,11 @@ def analyze_behavior_from_clickhouse(
     validation_status: str | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
-    """从 ClickHouse 读取并分析行为数据。
-    
-    返回验证事件列表，支持多种筛选条件。
-    """
+    """从 ClickHouse 读取行为验证事件，支持缺省前端时间窗口。"""
+    effective_start, effective_end = _normalize_time_window(start_time, end_time)
     filters: dict[str, Any] = {
-        "start_time": start_time,
-        "end_time": end_time,
+        "start_time": effective_start,
+        "end_time": effective_end,
         "model_version": model_version,
         "log_type": log_type,
         "validation_run_id": validation_run_id,
@@ -967,14 +1086,13 @@ def analyze_behavior_from_clickhouse(
         "validation_status": validation_status,
         "limit": limit,
     }
-    
+
     try:
-        # 使用通用查询函数获取事件
         events_result = query_validation_events(
             client=client,
             database=database,
-            start_time=start_time,
-            end_time=end_time,
+            start_time=effective_start,
+            end_time=effective_end,
             model_version=model_version,
             log_type=log_type,
             validation_run_id=validation_run_id,
@@ -983,26 +1101,24 @@ def analyze_behavior_from_clickhouse(
             validation_status=validation_status,
             limit=limit,
         )
-        
+
         if not events_result.get("success"):
             return events_result
-        
-        # 统计分析
+
         events = events_result.get("events", [])
-        risk_distribution = {}
-        for event in events:
-            level = event.get("ueba_risk_level", "UNKNOWN")
-            risk_distribution[level] = risk_distribution.get(level, 0) + 1
-        
         return {
             "success": True,
             "error": None,
             "filters": filters,
             "events": events,
             "count": len(events),
-            "risk_distribution": risk_distribution,
+            "risk_distribution": _risk_distribution_from_events(events),
+            "meta": {
+                "source": "ueba_validation_results",
+                "score_unit": "0-100",
+            },
         }
-    
+
     except Exception as exc:
         logger.exception("analyze_behavior_from_clickhouse 失败")
         return _fail("UEBA_DASHBOARD_QUERY_ERROR", filters, exc)
@@ -1017,6 +1133,7 @@ __all__ = [
     "get_baseline_detail",
     "get_recent_risk_events",
     "query_validation_events",
+    "get_behavior_dashboard_data",
     "analyze_behavior_for_frontend",
     "analyze_behavior_from_clickhouse",
 ]

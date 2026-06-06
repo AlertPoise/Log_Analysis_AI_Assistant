@@ -73,6 +73,7 @@ from fpdf import FPDF
 from src.behavior.api import (
     analyze_behavior_for_frontend,
     analyze_behavior_from_clickhouse,
+    get_behavior_dashboard_data,
 )
 
 # ClickHouse 客户端辅助函数
@@ -513,8 +514,14 @@ def convert_behavior_result_for_dashboard(result: Dict[str, Any]) -> Dict[str, A
 
 def get_behavior_analysis_for_dashboard(target_user: str = "zhangsan") -> Dict[str, Any]:
     """优先读取 ClickHouse behavior，失败时回退到演示分析结果。"""
+    client = None
     try:
-        clickhouse_result = analyze_behavior_from_clickhouse(username=target_user)
+        client = _get_behavior_clickhouse_client()
+        clickhouse_result = analyze_behavior_from_clickhouse(
+            client=client,
+            database=settings.clickhouse_database,
+            username=target_user,
+        )
     except Exception as exc:
         logger.exception("获取 ClickHouse behavior 分析失败")
         clickhouse_result = {
@@ -522,6 +529,9 @@ def get_behavior_analysis_for_dashboard(target_user: str = "zhangsan") -> Dict[s
             "source": "clickhouse",
             "error": str(exc),
         }
+    finally:
+        if client is not None:
+            client.close()
 
     if clickhouse_result.get("success"):
         dashboard_data = convert_behavior_result_for_dashboard(clickhouse_result)
@@ -594,9 +604,104 @@ def show_behavior_analysis_demo(
 
 # ==================== 真实接口层 ====================
 
+REALTIME_LOG_TYPE_FILTERS = {
+    "全部": None,
+    "VPN 登录": "vpn",
+    "API 调用": "api",
+    "系统日志": "system",
+    "安全设备": "security",
+}
+
+REALTIME_LOG_TYPE_LABELS = {
+    "vpn": "VPN 登录",
+    "api": "API 调用",
+    "system": "系统日志",
+    "security": "安全设备",
+}
+
+REALTIME_REFRESH_SECONDS = {
+    "1 秒": 1,
+    "5 秒": 5,
+    "10 秒": 10,
+    "30 秒": 30,
+}
+
+
+def _normalize_realtime_log_type_filter(log_type: str) -> str | None:
+    """把页面展示文案转换为 logs_structured.log_type 的真实取值。"""
+    if log_type in REALTIME_LOG_TYPE_FILTERS:
+        return REALTIME_LOG_TYPE_FILTERS[log_type]
+    if log_type and log_type != "全部":
+        return log_type
+    return None
+
+
+def _format_realtime_log_type(log_type: Any) -> str:
+    """把数据库 log_type 转为页面展示文案，未知值保留原样。"""
+    raw_type = str(log_type or "未知")
+    return REALTIME_LOG_TYPE_LABELS.get(raw_type, raw_type)
+
+
+def _risk_label_from_score(score: Any, risk_level: Any = None) -> str:
+    """把 UEBA/日志风险分映射为页面展示风险。"""
+    level = str(risk_level or "").upper()
+    if level in {"CRITICAL", "HIGH"}:
+        return "🔴 高危"
+    if level == "MEDIUM":
+        return "🟠 中危"
+    if level == "LOW":
+        return "🟡 低危"
+    try:
+        numeric_score = int(score or 0)
+    except (TypeError, ValueError):
+        numeric_score = 0
+    if numeric_score >= 75:
+        return "🔴 高危"
+    if numeric_score >= 50:
+        return "🔴 高危"
+    if numeric_score >= 25:
+        return "🟠 中危"
+    if numeric_score > 0:
+        return "🟡 低危"
+    return "🟢 正常"
+
+
+def _fallback_realtime_risk_score(raw_log: Any, event_type: Any, result: Any, is_unusual_ip: Any) -> int:
+    """validation 尚未写入时，根据持续生成器 marker 给实时日志即时风险兜底。"""
+    raw = str(raw_log or "")
+    if "mode=critical_combo" in raw or "mode=combo_anomaly" in raw:
+        return 100
+    if "mode=high_country_failed" in raw:
+        return 60
+    if "mode=medium_country" in raw or "mode=new_country" in raw:
+        return 38
+    if "mode=new_ip" in raw:
+        return 32
+    if "mode=failed_login" in raw:
+        return 20
+    if "mode=off_hours" in raw:
+        return 10
+    event = str(event_type or "").upper()
+    res = str(result or "").upper()
+    if event == "LOGIN_FAIL" or res in {"FAILED", "FAIL"}:
+        return 20
+    if bool(is_unusual_ip):
+        return 20
+    return 0
+
+
+def _refresh_interval_seconds(refresh_rate: str) -> int:
+    """返回实时页面刷新间隔秒数。"""
+    return REALTIME_REFRESH_SECONDS.get(refresh_rate, 5)
+
+
 def fetch_realtime_logs(log_type="全部", limit=100):
-    """从 ClickHouse logs_structured 表获取真实日志，使用 settings 配置"""
+    """从 ClickHouse logs_structured 表获取真实日志，使用 settings 配置。"""
     import clickhouse_connect
+
+    safe_limit = min(max(int(limit), 1), 1000)
+    log_type_filter = _normalize_realtime_log_type_filter(log_type)
+    client = None
     try:
         client = clickhouse_connect.get_client(
             host=settings.clickhouse_host,
@@ -610,32 +715,59 @@ def fetch_realtime_logs(log_type="全部", limit=100):
         logger.warning(f"ClickHouse 连接失败: {e}")
         return get_sample_logs(log_type)
 
+    filters = []
+    parameters = {}
+    if log_type_filter is not None:
+        filters.append("l.log_type = %(log_type)s")
+        parameters["log_type"] = log_type_filter
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
     query = f"""
     SELECT
-        toTimezone(timestamp, 'Asia/Shanghai') AS local_timestamp,
-        log_type,
-        username,
-        source_ip,
-        action,
-        src_city,
-        risk_score,
-        event_type
-    FROM {settings.clickhouse_table}
-    ORDER BY timestamp DESC
-    LIMIT {limit}
+        toTimezone(l.timestamp, 'Asia/Shanghai') AS local_timestamp,
+        l.log_type,
+        l.username,
+        l.source_ip,
+        l.action,
+        l.src_city,
+        l.risk_score,
+        l.event_type,
+        l.raw_log,
+        l.result,
+        l.is_unusual_ip,
+        v.ueba_score,
+        v.ueba_risk_level
+    FROM {settings.clickhouse_table} AS l
+    LEFT JOIN (
+        SELECT
+            source_log_id,
+            argMax(ueba_score, validated_at) AS ueba_score,
+            argMax(ueba_risk_level, validated_at) AS ueba_risk_level
+        FROM ueba_validation_results
+        WHERE source_log_id > 0
+        GROUP BY source_log_id
+    ) AS v ON v.source_log_id = l.id
+    {where_clause}
+    ORDER BY l.indexed_at DESC, l.timestamp DESC, l.id DESC
+    LIMIT {safe_limit}
     """
     try:
-        result = client.query(query)
+        result = client.query(query, parameters=parameters)
         logs = []
         for row in result.result_rows:
             local_time = row[0]
-            log_type_val = row[1] or "未知"
+            log_type_val = _format_realtime_log_type(row[1])
             username = row[2] or "未知"
             source_ip = row[3] or "未知"
             action = row[4] or ""
             city = row[5] if len(row) > 5 and row[5] else "未知"
-            risk_score = row[6] if row[6] is not None else 0
+            risk_score = row[6] if row[6] is not None else None
             event_type = row[7] if len(row) > 7 else ""
+            raw_log = row[8] if len(row) > 8 else ""
+            result_value = row[9] if len(row) > 9 else ""
+            is_unusual_ip = row[10] if len(row) > 10 else False
+            ueba_score = row[11] if len(row) > 11 else None
+            ueba_risk_level = row[12] if len(row) > 12 else None
 
             # 状态判断
             if event_type == "LOGIN_SUCCESS":
@@ -647,19 +779,13 @@ def fetch_realtime_logs(log_type="全部", limit=100):
             else:
                 status = "❓ 未知"
 
-            # 风险等级映射
-            try:
-                score = int(risk_score)
-                if score >= 80:
-                    risk = "🔴 高危"
-                elif score >= 50:
-                    risk = "🟠 中危"
-                elif score >= 20:
-                    risk = "🟡 低危"
-                else:
-                    risk = "🟢 正常"
-            except:
-                risk = "🟢 正常"
+            effective_score = ueba_score
+            effective_level = ueba_risk_level
+            if effective_score is None and not effective_level:
+                effective_score = risk_score
+            if effective_score is None and not effective_level:
+                effective_score = _fallback_realtime_risk_score(raw_log, event_type, result_value, is_unusual_ip)
+            risk = _risk_label_from_score(effective_score, effective_level)
 
             logs.append({
                 "时间": local_time.strftime("%Y-%m-%d %H:%M:%S") if local_time else "",
@@ -670,11 +796,8 @@ def fetch_realtime_logs(log_type="全部", limit=100):
                 "地点": city,
                 "风险": risk
             })
-        client.close()
         if logs:
             logger.info(f"从 ClickHouse 获取 {len(logs)} 条真实日志")
-            if log_type != "全部":
-                logs = [log for log in logs if log["类型"] == log_type]
             return logs
         else:
             logger.info("ClickHouse 中无数据，使用模拟数据")
@@ -682,6 +805,9 @@ def fetch_realtime_logs(log_type="全部", limit=100):
     except Exception as e:
         logger.error(f"查询 {settings.clickhouse_table} 失败: {e}")
         return get_sample_logs(log_type)
+    finally:
+        if client is not None:
+            client.close()
 
 
 def fetch_anomaly_users(time_range="最近 24 小时", limit=10):
@@ -1018,72 +1144,138 @@ def get_anomaly_users(time_range="最近 24 小时", limit=10):
     return get_sample_anomaly_users()
 
 
-def get_ueba_ranking_from_clickhouse(time_range: str = "最近 24 小时", limit: int = 10) -> Dict[str, Any]:
-    """从 logs_structured 表聚合用户风险排行"""
-    import clickhouse_connect
+def _resolve_ueba_time_window(time_range: str) -> tuple[str, str]:
+    """将页面已有时间范围选项转换为 behavior API 时间窗口。"""
     time_map = {
         "最近 24 小时": 24,
         "最近 7 天": 24 * 7,
         "最近 30 天": 24 * 30,
     }
-    hours = time_map.get(time_range, 24)
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(hours=time_map.get(time_range, 24))
+    return (
+        start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
+def _format_behavior_error(error: Any) -> str:
+    """把 behavior API 的错误结构转为页面可展示文本。"""
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("code") or "未知错误")
+    if error:
+        return str(error)
+    return "未知错误"
+
+
+UEBA_RISK_OPTION_CODES = {
+    "🔴 高危": {"HIGH", "CRITICAL"},
+    "🟠 中危": {"MEDIUM"},
+    "🟡 低危": {"LOW"},
+}
+
+
+def _selected_ueba_risk_codes(risk_filter: list[str] | tuple[str, ...] | None) -> set[str]:
+    """把 UEBA 页面风险多选映射为内部风险等级集合。"""
+    if not risk_filter:
+        return {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+    selected: set[str] = set()
+    for option in risk_filter:
+        selected.update(UEBA_RISK_OPTION_CODES.get(option, set()))
+    return selected or {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+
+
+def _ueba_event_matches_risk(event: Dict[str, Any], selected_codes: set[str]) -> bool:
+    """判断单条 UEBA 事件是否符合页面风险筛选。"""
+    return str(event.get("ueba_risk_level") or "").upper() in selected_codes
+
+
+def _get_behavior_clickhouse_client():
+    """复用 dashboard 现有 ClickHouse 配置创建 behavior API client。"""
+    return clickhouse_connect.get_client(
+        host=settings.clickhouse_host,
+        port=settings.clickhouse_port,
+        username=settings.clickhouse_user,
+        password=settings.clickhouse_password,
+        database=settings.clickhouse_database,
+        connect_timeout=10,
+    )
+
+
+def get_ueba_ranking_from_clickhouse(
+    time_range: str = "最近 24 小时",
+    limit: int = 10,
+    risk_filter: list[str] | tuple[str, ...] | None = None,
+) -> Dict[str, Any]:
+    """通过 behavior API 获取 UEBA 用户排行，保持页面原有返回结构。"""
+    start_time, end_time = _resolve_ueba_time_window(time_range)
+    selected_codes = _selected_ueba_risk_codes(risk_filter)
+    query_limit = max(limit * 5, 50)
+    client = None
     try:
-        client = clickhouse_connect.get_client(
-            host=settings.clickhouse_host,
-            port=settings.clickhouse_port,
-            username=settings.clickhouse_user,
-            password=settings.clickhouse_password,
+        client = _get_behavior_clickhouse_client()
+        result = get_behavior_dashboard_data(
+            client=client,
             database=settings.clickhouse_database,
-            connect_timeout=10
+            start_time=start_time,
+            end_time=end_time,
+            limit=query_limit,
+            validation_status="VALIDATED",
+            bind_latest_validation_run=False,
         )
-    except Exception as e:
-        logger.error(f"ClickHouse 连接失败: {e}")
-        return {"success": False, "ranking": []}
+    except Exception as exc:
+        logger.error(f"查询 UEBA 排行失败: {exc}", exc_info=True)
+        return {"success": False, "ranking": [], "error": str(exc)}
+    finally:
+        if client is not None:
+            client.close()
 
-    query = f"""
-    SELECT
-        username,
-        max(ifNull(risk_score, 0)) / 100.0 AS score,
-        count(*) AS event_count,
-        max(toTimezone(timestamp, 'Asia/Shanghai')) AS last_event_time
-    FROM {settings.clickhouse_table}
-    WHERE timestamp >= now() - INTERVAL {hours} HOUR
-      AND username != ''
-    GROUP BY username
-    ORDER BY score DESC, event_count DESC, last_event_time DESC
-    LIMIT {limit}
-    """
-    try:
-        result = client.query(query)
-        ranking = []
-        for idx, row in enumerate(result.result_rows, start=1):
-            username = row[0]
-            score = float(row[1]) if row[1] is not None else 0.0
-            event_count = int(row[2]) if row[2] is not None else 0
-            last_time = row[3]
-            last_time_str = last_time.strftime("%Y-%m-%d %H:%M") if last_time else ""
-            ranking.append({
-                "rank": idx,
-                "username": username,
-                "score": score,
-                "risk_level": _format_ueba_risk_level(score),
-                "event_count": event_count,
-                "last_event_time": last_time_str,
-            })
-        client.close()
-        return {"success": True, "ranking": ranking}
-    except Exception as e:
-        logger.error(f"查询排行失败: {e}", exc_info=True)
-        client.close()
-        return {"success": False, "ranking": []}
+    if not result.get("success"):
+        logger.error(f"查询 UEBA 排行失败: {_format_behavior_error(result.get('error'))}")
+        return {"success": False, "ranking": [], "error": result.get("error")}
+
+    ranking = []
+    for row in result.get("ranking", []):
+        risk_code = str(row.get("risk_level") or "LOW").upper()
+        if risk_code not in selected_codes:
+            continue
+        score_100 = float(row.get("max_score") or 0)
+        last_time = row.get("latest_validated_at")
+        if hasattr(last_time, "strftime"):
+            last_time_str = last_time.strftime("%Y-%m-%d %H:%M")
+        else:
+            last_time_str = str(last_time or "")[:16]
+        ranking.append({
+            "rank": len(ranking) + 1,
+            "username": row.get("username", ""),
+            "score": max(0.0, min(score_100 / 100.0, 1.0)),
+            "risk_code": risk_code,
+            "risk_level": _format_ueba_risk_level(risk_code, score_100),
+            "event_count": int(row.get("event_count") or 0),
+            "last_event_time": last_time_str,
+        })
+        if len(ranking) >= limit:
+            break
+    return {
+        "success": True,
+        "ranking": ranking,
+        "filters": result.get("filters", {}),
+        "empty_reason": result.get("meta", {}).get("empty_reason"),
+    }
 
 
-def _format_ueba_risk_level(score: float) -> str:
-    """将 0~1 风险分映射为页面展示等级。"""
-    if score >= 0.8:
+def _format_ueba_risk_level(risk_level: Any, score_100: float | None = None) -> str:
+    """将 behavior 风险等级映射为页面原有展示文案。"""
+    level = str(risk_level or "").upper()
+    if level in {"CRITICAL", "HIGH"}:
         return "🔴 高危"
-    if score >= 0.5:
+    if level == "MEDIUM":
         return "🟠 中危"
+    if score_100 is not None:
+        if score_100 >= 80:
+            return "🔴 高危"
+        if score_100 >= 50:
+            return "🟠 中危"
     return "🟡 低危"
 
 
@@ -1361,11 +1553,25 @@ def create_sidebar():
         st.caption("© 日志分析 AI 助手")
 
 
+def _render_realtime_log_list(log_type: str, is_running: bool) -> None:
+    """渲染实时日志列表；供 fragment 周期重跑。"""
+    st.subheader("📋 日志列表")
+
+    logs_data = get_realtime_logs(log_type)
+    df_logs = pd.DataFrame(logs_data)
+    st.dataframe(df_logs, use_container_width=True, height=400)
+
+    if is_running:
+        st.success("🔄 实时刷新中... 上次更新: " + datetime.now().strftime("%H:%M:%S"))
+    else:
+        st.warning("⏸️ 已暂停刷新")
+
+
 def show_realtime_logs():
     """显示实时日志流"""
     st.header("📡 实时日志流")
     st.markdown("实时展示日志数据，支持筛选和自动刷新")
-    
+
     # 控制面板
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -1377,29 +1583,23 @@ def show_realtime_logs():
         )
     with col3:
         refresh_rate = st.selectbox("刷新频率", ["1 秒", "5 秒", "10 秒", "30 秒"])
-    
+
     st.divider()
-    
-    # 实时日志列表
-    st.subheader("📋 日志列表")
-    
-    # 从接口获取日志数据
-    logs_data = get_realtime_logs(log_type)
-    
-    # 展示日志表格
-    df_logs = pd.DataFrame(logs_data)
-    st.dataframe(df_logs, use_container_width=True, height=400)
-    
-    # 刷新状态提示
-    if is_running:
-        st.success("🔄 实时刷新中... 上次更新: " + datetime.now().strftime("%H:%M:%S"))
+
+    refresh_seconds = _refresh_interval_seconds(refresh_rate)
+    if is_running and hasattr(st, "fragment"):
+        @st.fragment(run_every=timedelta(seconds=refresh_seconds))
+        def realtime_log_fragment(selected_log_type: str) -> None:
+            _render_realtime_log_list(selected_log_type, is_running=True)
+
+        realtime_log_fragment(log_type)
     else:
-        st.warning("⏸️ 已暂停刷新")
-    
+        _render_realtime_log_list(log_type, is_running=is_running)
+
     # 统计信息
     st.divider()
     st.subheader("📊 实时统计")
-    
+
     # 从接口获取统计数据
     stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
     with stat_col1:
@@ -1412,24 +1612,54 @@ def show_realtime_logs():
         st.metric("高危事件数", "15", "+2")
 
 
-def show_ueba_ranking():
-    """显示 UEBA 异常用户排行（仅从 ClickHouse 读取）"""
-    st.header("👥 UEBA 异常用户排行")
-    st.markdown("基于用户行为基线，识别异常用户并排序")
+def _fetch_ueba_user_events(
+    *,
+    time_range: str,
+    username: str,
+    risk_filter: list[str] | tuple[str, ...] | None,
+    limit: int = 100,
+) -> Dict[str, Any]:
+    """读取单用户 UEBA 事件并在前端应用多选风险过滤。"""
+    start_time, end_time = _resolve_ueba_time_window(time_range)
+    selected_codes = _selected_ueba_risk_codes(risk_filter)
+    client = None
+    try:
+        client = _get_behavior_clickhouse_client()
+        result = get_behavior_dashboard_data(
+            client=client,
+            database=settings.clickhouse_database,
+            username=username,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            validation_status="VALIDATED",
+            bind_latest_validation_run=False,
+        )
+    except Exception as exc:
+        logger.error(f"行为分析失败: {exc}", exc_info=True)
+        return {"success": False, "events": [], "error": str(exc)}
+    finally:
+        if client is not None:
+            client.close()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"])
-    with col2:
-        risk_filter = st.multiselect("风险等级", ["🔴 高危", "🟠 中危", "🟡 低危"], default=["🔴 高危", "🟠 中危", "🟡 低危"])
-        # 注意：risk_filter 目前仅用于前端展示，实际排行未过滤，您可以后续实现
+    if not result.get("success"):
+        return result
 
+    events = [event for event in result.get("events", []) if _ueba_event_matches_risk(event, selected_codes)]
+    return {**result, "events": events, "count": len(events)}
+
+
+def _render_ueba_risk_list(time_range: str, risk_filter: list[str], refresh_rate: str) -> None:
+    """渲染 UEBA 风险排行和事件详情；供 fragment 周期刷新。"""
     st.divider()
     st.subheader("🔴 异常用户 TOP10")
 
-    ranking_result = get_ueba_ranking_from_clickhouse(time_range, limit=10)
-    if not ranking_result.get("success") or not ranking_result.get("ranking"):
-        st.error("无法从 ClickHouse 获取排行数据，请检查后端服务是否正常")
+    ranking_result = get_ueba_ranking_from_clickhouse(time_range, limit=10, risk_filter=risk_filter)
+    if not ranking_result.get("success"):
+        st.error(f"无法从 ClickHouse 获取排行数据：{_format_behavior_error(ranking_result.get('error'))}")
+        return
+    if not ranking_result.get("ranking"):
+        st.info("暂无符合当前风险筛选的 UEBA 结果（等待下一轮 validation 或调整筛选条件）")
         return
 
     ranking_rows = ranking_result["ranking"]
@@ -1448,49 +1678,108 @@ def show_ueba_ranking():
         df_ranking,
         use_container_width=True,
         hide_index=True,
-        column_config={"异常评分": st.column_config.ProgressColumn("异常评分", min_value=0, max_value=1, format="%.2f")}
+        column_config={"异常评分": st.column_config.ProgressColumn("异常评分", min_value=0, max_value=1, format="%.2f")},
     )
 
-    st.divider()
-    st.subheader("📋 用户行为分析详情")
+    st.caption("上次刷新: " + datetime.now().strftime("%H:%M:%S") + f"，频率: {refresh_rate}")
 
-    # 获取真实用户名列表（来自 ClickHouse）
+    st.divider()
+    st.subheader("📋 风险登录列表")
+
     real_usernames = [row["username"] for row in ranking_rows if row.get("username")]
     if not real_usernames:
         st.warning("没有找到任何用户日志数据")
         return
 
-    selected_user = st.selectbox("选择用户查看行为分析", real_usernames)
-    # 直接调用行为分析接口（不再有 demo 回退）
-    behavior_result = analyze_behavior_from_clickhouse(
+    selected_user = st.selectbox("选择用户查看风险登录", real_usernames, key="ueba_selected_user")
+    behavior_result = _fetch_ueba_user_events(
+        time_range=time_range,
         username=selected_user,
-        start_time=(datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),
-        end_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        risk_filter=risk_filter,
+        limit=100,
     )
     if not behavior_result.get("success"):
-        st.error(f"行为分析失败：{behavior_result.get('error', '未知错误')}")
+        st.error(f"行为分析失败：{_format_behavior_error(behavior_result.get('error'))}")
         return
 
     events = behavior_result.get("events", [])
     if not events:
-        st.info("暂无行为分析数据（UEBA 验证尚未运行）")
+        st.info("该用户暂无符合当前风险筛选的登录事件")
         return
 
-    for i, event in enumerate(events):
+    event_rows = []
+    for event in events:
+        reasons = event.get("ueba_anomaly_reasons", [])
+        reason_codes = []
+        for reason in reasons:
+            if isinstance(reason, dict):
+                reason_codes.append(str(reason.get("code") or reason.get("message") or reason))
+            else:
+                reason_codes.append(str(reason))
+        event_rows.append({
+            "时间": event.get("timestamp", "-"),
+            "用户": event.get("username", "-"),
+            "风险等级": _format_ueba_risk_level(event.get("ueba_risk_level"), event.get("ueba_score")),
+            "风险评分": event.get("ueba_score", "-"),
+            "状态": event.get("validation_status", "-"),
+            "IP": event.get("source_ip", "-"),
+            "地点": event.get("location", "-"),
+            "原因": ", ".join(reason_codes[:3]),
+        })
+
+    st.dataframe(pd.DataFrame(event_rows), use_container_width=True, hide_index=True, height=360)
+
+    for event in events[:20]:
         event_time = event.get("timestamp", "-")
-        risk_level = event.get("ueba_risk_level", "-")
-        with st.expander(f"⚠️ {event_time} - {risk_level}"):
+        risk_level = _format_ueba_risk_level(event.get("ueba_risk_level"), event.get("ueba_score"))
+        with st.expander(f"⚠️ {event_time} - {risk_level} - {event.get('username', '-')}"):
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown(f"**时间**: {event_time}")
                 st.markdown(f"**用户**: {event.get('username', '-')}")
-                st.markdown(f"**风险等级**: {risk_level}")
+                st.markdown(f"**源 IP**: {event.get('source_ip', '-')}")
+                st.markdown(f"**地点**: {event.get('location', '-')}")
             with col2:
+                st.markdown(f"**风险等级**: {risk_level}")
                 st.markdown(f"**风险评分**: {event.get('ueba_score', '-')}")
                 st.markdown(f"**验证状态**: {event.get('validation_status', '-')}")
-                reasons = event.get("ueba_anomaly_reasons", [])
-                if reasons:
-                    st.markdown(f"**异常原因**: {', '.join(str(r) for r in reasons)}")
+                st.markdown(f"**运行 ID**: {event.get('validation_run_id', '-')}")
+            reasons = event.get("ueba_anomaly_reasons", [])
+            if reasons:
+                st.json(reasons)
+
+
+def show_ueba_ranking():
+    """显示 UEBA 异常用户排行（仅从 ClickHouse 读取）"""
+    st.header("👥 UEBA 异常用户排行")
+    st.markdown("基于用户行为基线，识别异常用户并排序")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"])
+    with col2:
+        risk_filter = st.multiselect(
+            "风险等级",
+            ["🔴 高危", "🟠 中危", "🟡 低危"],
+            default=["🔴 高危", "🟠 中危", "🟡 低危"],
+        )
+
+    col3, col4 = st.columns(2)
+    with col3:
+        is_running = st.toggle("🔄 实时刷新", value=True, key="ueba_realtime_refresh")
+    with col4:
+        refresh_rate = st.selectbox("刷新频率", ["5 秒", "10 秒", "30 秒"], key="ueba_refresh_rate")
+
+    refresh_seconds = _refresh_interval_seconds(refresh_rate)
+    if is_running and hasattr(st, "fragment"):
+        @st.fragment(run_every=timedelta(seconds=refresh_seconds))
+        def ueba_risk_fragment(selected_time_range: str, selected_risk_filter: list[str], selected_refresh_rate: str) -> None:
+            _render_ueba_risk_list(selected_time_range, selected_risk_filter, selected_refresh_rate)
+
+        ueba_risk_fragment(time_range, risk_filter, refresh_rate)
+    else:
+        _render_ueba_risk_list(time_range, risk_filter, refresh_rate)
+
 
 def show_security_score():
     """显示安全评分看板"""

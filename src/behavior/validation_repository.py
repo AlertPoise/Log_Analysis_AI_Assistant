@@ -151,6 +151,7 @@ class UebaValidationRepository:
         limit: int = 1000,
         exclude_already_validated: bool = False,
         baseline_model_version: str | None = None,
+        require_baseline: bool = False,
     ) -> list[ValidationTargetLog]:
         """Fetch structured source logs for later UEBA validation."""
         self._validate_time_window(start_time, end_time)
@@ -161,12 +162,14 @@ class UebaValidationRepository:
             "limit": self._validate_limit(limit),
         }
         filters = ["username != ''"]
-        if exclude_already_validated:
+        if exclude_already_validated or require_baseline:
             self._validate_required_text(
                 baseline_model_version or "",
                 "baseline_model_version",
             )
             parameters["baseline_model_version"] = baseline_model_version
+
+        if exclude_already_validated:
             filters.extend(
                 [
                     "id > 0",
@@ -180,6 +183,19 @@ class UebaValidationRepository:
                     )
                     """,
                 ]
+            )
+
+        if require_baseline:
+            filters.append(
+                f"""
+                username IN
+                (
+                    SELECT username
+                    FROM {self.database}.user_behavior_baselines
+                    WHERE model_version = %(baseline_model_version)s
+                        AND is_reliable = 1
+                )
+                """
             )
 
         sql = f"""
