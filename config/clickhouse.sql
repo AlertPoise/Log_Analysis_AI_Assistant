@@ -162,6 +162,118 @@ ORDER BY report_date
 TTL report_date + INTERVAL 365 DAY
 SETTINGS index_granularity = 8192;
 
+-- UEBA 用户行为基线表
+CREATE TABLE IF NOT EXISTS user_behavior_baselines (
+    username String,
+    sample_count UInt64,
+    is_reliable UInt8,
+    common_active_hours String,
+    common_source_ips String,
+    common_destination_ips String,
+    common_source_countries String,
+    common_source_cities String,
+    common_vpn_gateways String,
+    action_distribution String,
+    event_type_distribution String,
+    result_distribution String,
+    fail_reason_distribution String,
+    auth_method_distribution String,
+    client_software_distribution String,
+    protocol_distribution String,
+    failed_rate Float64,
+    off_hours_rate Float64,
+    unusual_ip_rate Float64,
+    avg_daily_events Float64,
+    active_day_avg_events Float64,
+    max_daily_events UInt64,
+    session_metric_summary String,
+    traffic_metric_summary String,
+    baseline_start_time DateTime,
+    baseline_end_time DateTime,
+    model_version String,
+    baseline_json String,
+    created_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (username, model_version, baseline_start_time, baseline_end_time);
+
+-- UEBA baseline 受控训练日志表
+CREATE TABLE IF NOT EXISTS ueba_baseline_training_logs (
+    dataset_id String,
+    baseline_purpose String,
+    is_active UInt8,
+    import_batch_id String,
+    id UInt64,
+    timestamp DateTime,
+    log_type String,
+    source String,
+    username String,
+    user_id Nullable(String),
+    dept Nullable(String),
+    role Nullable(String),
+    action String,
+    event_type Nullable(String),
+    result Nullable(String),
+    fail_reason Nullable(String),
+    source_ip Nullable(String),
+    destination_ip Nullable(String),
+    vpn_gateway Nullable(String),
+    src_country Nullable(String),
+    src_city Nullable(String),
+    protocol Nullable(String),
+    auth_method Nullable(String),
+    client_software Nullable(String),
+    user_agent Nullable(String),
+    session_id Nullable(String),
+    is_off_hours Nullable(Bool),
+    is_unusual_ip Nullable(Bool),
+    session_duration_sec Nullable(UInt32),
+    bytes_sent Nullable(UInt64),
+    bytes_recv Nullable(UInt64),
+    uri Nullable(String),
+    method Nullable(String),
+    status_code Nullable(UInt16),
+    response_time Nullable(Float32),
+    detail Nullable(String),
+    severity_level Nullable(String),
+    device_info Nullable(String),
+    location Nullable(String),
+    request_id Nullable(String),
+    raw_log Nullable(String),
+    parser Nullable(String),
+    parse_status Nullable(String),
+    source_table Nullable(String),
+    source_record_id Nullable(String),
+    remark Nullable(String),
+    created_by Nullable(String),
+    created_at DateTime DEFAULT now()
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (dataset_id, log_type, timestamp, username);
+
+-- UEBA validation 评分结果表
+CREATE TABLE IF NOT EXISTS ueba_validation_results (
+    validation_id String,
+    validation_run_id String,
+    source_identity String,
+    source_log_id UInt64,
+    timestamp DateTime,
+    username String,
+    log_type String,
+    request_id Nullable(String),
+    baseline_model_version String,
+    baseline_created_at Nullable(DateTime),
+    baseline_is_reliable UInt8,
+    ueba_score UInt8,
+    ueba_risk_level LowCardinality(String),
+    ueba_anomaly_reasons String,
+    validation_status LowCardinality(String),
+    validated_at DateTime,
+    error Nullable(String),
+    created_at DateTime DEFAULT now()
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (baseline_model_version, validation_run_id, log_type, timestamp, username, source_identity);
+
 CREATE MATERIALIZED VIEW IF NOT EXISTS user_behavior_mv
 TO user_behavior_stats
 AS SELECT
