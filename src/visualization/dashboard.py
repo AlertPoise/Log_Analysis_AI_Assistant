@@ -997,11 +997,17 @@ def fetch_history_logs(start_time=None, end_time=None, username=None, source_ip=
     conditions = ["username != ''"]
 
     if start_time:
-        conditions.append("toDate(timestamp) >= toDate(%(start)s)")
-        params["start"] = start_time
+        if isinstance(start_time, datetime):
+            start_str = start_time.strftime("%Y-%m-%d")
+        else:
+            start_str = str(start_time)
+        conditions.append(f"timestamp >= '{start_str} 00:00:00'")
     if end_time:
-        conditions.append("toDate(timestamp) <= toDate(%(end)s)")
-        params["end"] = end_time
+        if isinstance(end_time, datetime):
+            end_str = end_time.strftime("%Y-%m-%d")
+        else:
+            end_str = str(end_time)
+        conditions.append(f"timestamp < '{end_str} 23:59:59'")
     if username:
         conditions.append("username = %(user)s")
         params["user"] = username
@@ -1667,7 +1673,7 @@ def show_ueba_ranking():
     # 筛选栏
     col1, col2 = st.columns([1, 2])
     with col1:
-        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"], label_visibility="collapsed")
+        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"], index=2, label_visibility="collapsed")
     with col2:
         risk_filter = st.multiselect(
             "风险等级",
@@ -1678,7 +1684,7 @@ def show_ueba_ranking():
 
     ranking_result = get_ueba_ranking_from_clickhouse(time_range, limit=10)
     if not ranking_result.get("success") or not ranking_result.get("ranking"):
-        st.warning("暂无排行数据 — 请先运行 UEBA Validation (run_validation)")
+        st.warning("当前时间窗口内无用户行为数据，请尝试扩大时间范围（≥30天）或先采集日志（`python -m src.main` 会自动插入测试数据）")
         return
 
     ranking_rows = ranking_result["ranking"]
@@ -1837,7 +1843,7 @@ def show_ai_suggestions():
     # 筛选栏
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
-        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"], index=1, label_visibility="collapsed")
+        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"], index=2, label_visibility="collapsed")
     with col2:
         risk_filter = st.selectbox("风险等级", ["全部", "CRITICAL", "HIGH", "MEDIUM", "LOW"], label_visibility="collapsed")
     with col3:
@@ -1851,7 +1857,7 @@ def show_ai_suggestions():
         )
 
     if not suggestions:
-        st.info("当前窗口内无异常事件，请先运行 UEBA Validation")
+        st.info("当前时间窗口无异常事件 — 尝试选择「最近 30 天」扩大搜索范围，或确认已通过 `python -m src.main` 采集日志")
         st.markdown("""
         <div class="metric-group">
             <div class="metric-item"><div class="value">0</div><div class="label">待处置</div></div>
