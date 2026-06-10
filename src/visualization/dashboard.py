@@ -991,63 +991,75 @@ def _risk_level_to_icon(level: str) -> str:
 
 def fetch_history_logs(start_time=None, end_time=None, username=None, source_ip=None,
                        log_type="全部", status="全部"):
-    """从 ClickHouse 搜索真实历史日志"""
+    """从 ClickHouse 搜索真实历史日志（修复参数绑定和风险评分）"""
     client = get_clickhouse_client()
-    query = f"""
-        SELECT timestamp, username, log_type, source_ip, result, src_city, risk_score
-        FROM {settings.clickhouse_table}
-        WHERE 1=1
-    """
-    params = []
+    params: Dict[str, Any] = {}
+    conditions = ["username != ''"]
+
     if start_time:
-        query += " AND toDate(timestamp) >= %(start_time)s"
-        params.append(start_time)
+        conditions.append("toDate(timestamp) >= toDate(%(start)s)")
+        params["start"] = start_time
     if end_time:
-        query += " AND toDate(timestamp) <= %(end_time)s"
-        params.append(end_time)
+        conditions.append("toDate(timestamp) <= toDate(%(end)s)")
+        params["end"] = end_time
     if username:
-        query += " AND username = %(username)s"
-        params.append(username)
+        conditions.append("username = %(user)s")
+        params["user"] = username
     if source_ip:
-        query += " AND source_ip = %(source_ip)s"
-        params.append(source_ip)
-    if log_type != "全部":
-        query += " AND log_type = %(log_type)s"
-        params.append(log_type)
-    if status != "全部":
-        # 状态映射
-        if status == "成功":
-            query += " AND result = 'SUCCESS'"
-        elif status == "失败":
-            query += " AND result = 'FAIL'"
-        # 警告/阻断 暂不支持
-    query += " ORDER BY timestamp DESC LIMIT 100"
+        conditions.append("source_ip = %(ip)s")
+        params["ip"] = source_ip
+    if log_type and log_type != "全部":
+        conditions.append("log_type = %(ltype)s")
+        params["ltype"] = log_type
+    if status and status != "全部":
+        if status in ("SUCCESS", "成功"):
+            conditions.append("result = 'SUCCESS'")
+        elif status in ("FAIL", "失败"):
+            conditions.append("(result = 'FAIL' OR event_type LIKE '%FAIL%')")
+        elif status == "WARNING":
+            conditions.append("result = 'WARNING'")
+
+    query = f"""
+        SELECT
+            timestamp, username, log_type, source_ip, result, src_city,
+            is_off_hours, is_unusual_ip, event_type
+        FROM log_analysis.logs_structured
+        WHERE {' AND '.join(conditions)}
+        ORDER BY timestamp DESC
+        LIMIT 200
+    """
     try:
-        result = client.query(query, parameters=tuple(params) if params else None)
+        result = client.query(query, parameters=params)
         logs = []
         for row in result.result_rows:
-            risk = "🟢 正常"
-            if row[6] is not None:
-                score = int(row[6])
-                if score >= 80:
-                    risk = "🔴 高危"
-                elif score >= 50:
-                    risk = "🟠 中危"
-                elif score >= 20:
-                    risk = "🟡 低危"
+            # 启发式风险
+            is_fail = str(row[4] or "").upper() in ("FAIL", "FAILED") or "FAIL" in str(row[8] or "").upper()
+            is_off = row[6] in (1, True)
+            is_unusual = row[7] in (1, True)
+            risk_score_val = 0
+            if is_fail:
+                risk_score_val += 40
+            if is_unusual:
+                risk_score_val += 30
+            if is_off:
+                risk_score_val += 20
+            risk = "🔴 高危" if risk_score_val >= 60 else "🟠 中危" if risk_score_val >= 30 else "🟢 正常"
+
             logs.append({
-                "时间": row[0].strftime("%Y-%m-%d %H:%M:%S"),
-                "用户": row[1],
-                "类型": row[2],
-                "IP": row[3],
-                "状态": "✅ 成功" if row[4] == "SUCCESS" else ("❌ 失败" if row[4] == "FAIL" else "❓ 未知"),
-                "地点": row[5] or "未知",
-                "风险等级": risk
+                "时间": row[0].strftime("%Y-%m-%d %H:%M:%S") if row[0] else "-",
+                "用户": row[1] or "-",
+                "类型": row[2] or "-",
+                "IP": row[3] or "-",
+                "状态": "❌ 失败" if is_fail else "✅ 成功",
+                "地点": row[5] or "-",
+                "风险等级": risk,
             })
         client.close()
         return logs
     except Exception as e:
         logger.error(f"查询历史日志失败: {e}")
+        client.close()
+        return []
         return get_sample_search_results()
 
 def get_recent_usernames_from_clickhouse(limit: int = 20) -> List[str]:
@@ -1113,7 +1125,11 @@ def get_anomaly_users(time_range="最近 24 小时", limit=10):
 
 
 def get_ueba_ranking_from_clickhouse(time_range: str = "最近 24 小时", limit: int = 10) -> Dict[str, Any]:
-    """从 logs_structured 表聚合用户风险排行"""
+    """从 ClickHouse 获取用户风险排行。
+
+    优先查 ueba_validation_results（UEBA 验证后的真实评分），
+    无数据时降级到 logs_structured 做启发式评分（失败次数/非活跃时段/异常IP）。
+    """
     import clickhouse_connect
     time_map = {
         "最近 24 小时": 24,
@@ -1128,46 +1144,97 @@ def get_ueba_ranking_from_clickhouse(time_range: str = "最近 24 小时", limit
             username=settings.clickhouse_user,
             password=settings.clickhouse_password,
             database=settings.clickhouse_database,
-            connect_timeout=10
+            connect_timeout=10,
         )
     except Exception as e:
         logger.error(f"ClickHouse 连接失败: {e}")
         return {"success": False, "ranking": []}
 
-    query = f"""
-    SELECT
-        username,
-        max(ifNull(risk_score, 0)) / 100.0 AS score,
-        count(*) AS event_count,
-        max(toTimezone(timestamp, 'Asia/Shanghai')) AS last_event_time
-    FROM {settings.clickhouse_table}
-    WHERE timestamp >= now() - INTERVAL {hours} HOUR
-      AND username != ''
-    GROUP BY username
-    ORDER BY score DESC, event_count DESC, last_event_time DESC
-    LIMIT {limit}
-    """
+    # --- 方案 A: 从 ueba_validation_results 读取真实评分 ---
     try:
+        vr_query = f"""
+        SELECT
+            username,
+            max(ueba_score) AS score,
+            count() AS event_count,
+            max(validated_at) AS last_event_time
+        FROM {settings.clickhouse_database}.ueba_validation_results
+        WHERE validated_at >= now() - INTERVAL {hours} HOUR
+          AND username != ''
+        GROUP BY username
+        ORDER BY score DESC, event_count DESC
+        LIMIT {limit}
+        """
+        vr_result = client.query(vr_query)
+        if vr_result and vr_result.result_rows:
+            ranking = []
+            for idx, row in enumerate(vr_result.result_rows, start=1):
+                username = str(row[0]) if row[0] else ""
+                score = float(row[1]) if row[1] is not None else 0
+                event_count = int(row[2]) if row[2] is not None else 0
+                last_time = row[3]
+                last_str = last_time.strftime("%Y-%m-%d %H:%M") if last_time else ""
+                ranking.append({
+                    "rank": idx,
+                    "username": username,
+                    "score": min(score / 100.0, 1.0),
+                    "risk_level": _format_ueba_risk_level(score / 100.0),
+                    "event_count": event_count,
+                    "last_event_time": last_str,
+                })
+            client.close()
+            logger.info(f"UEBA 排行从 validation 表获取 {len(ranking)} 条")
+            return {"success": True, "ranking": ranking}
+    except Exception as e:
+        logger.debug(f"validation 表查询跳过: {e}")
+
+    # --- 方案 B: 从 logs_structured 做启发式评分 ---
+    try:
+        query = f"""
+        SELECT
+            username,
+            count() AS event_count,
+            countIf(result = 'FAIL' OR result = 'fail' OR event_type LIKE '%FAIL%') AS fail_cnt,
+            countIf(is_off_hours = 1) AS off_hours_cnt,
+            countIf(is_unusual_ip = 1) AS unusual_cnt,
+            max(timestamp) AS last_event_time
+        FROM {settings.clickhouse_database}.{settings.clickhouse_table}
+        WHERE timestamp >= now() - INTERVAL {hours} HOUR
+          AND username != ''
+        GROUP BY username
+        ORDER BY fail_cnt DESC, off_hours_cnt DESC, event_count DESC
+        LIMIT {limit}
+        """
         result = client.query(query)
         ranking = []
         for idx, row in enumerate(result.result_rows, start=1):
-            username = row[0]
-            score = float(row[1]) if row[1] is not None else 0.0
-            event_count = int(row[2]) if row[2] is not None else 0
-            last_time = row[3]
-            last_time_str = last_time.strftime("%Y-%m-%d %H:%M") if last_time else ""
+            username = str(row[0]) if row[0] else ""
+            event_count = int(row[1]) if row[1] is not None else 0
+            fail_cnt = int(row[2]) if row[2] is not None else 0
+            off_hours_cnt = int(row[3]) if row[3] is not None else 0
+            unusual_cnt = int(row[4]) if row[4] is not None else 0
+            last_time = row[5]
+            last_str = last_time.strftime("%Y-%m-%d %H:%M") if last_time else ""
+            # 启发式评分: 0.1 base + 失败率权重 + 非活跃权重 + 异常IP权重
+            heuristic = 0.1
+            if event_count > 0:
+                heuristic += (fail_cnt / event_count) * 0.5
+                heuristic += (off_hours_cnt / event_count) * 0.25
+                heuristic += (unusual_cnt / event_count) * 0.15
+            score = min(heuristic, 1.0)
             ranking.append({
                 "rank": idx,
                 "username": username,
-                "score": score,
+                "score": round(score, 4),
                 "risk_level": _format_ueba_risk_level(score),
                 "event_count": event_count,
-                "last_event_time": last_time_str,
+                "last_event_time": last_str,
             })
         client.close()
+        logger.info(f"UEBA 排行从 logs_structured 启发式获取 {len(ranking)} 条")
         return {"success": True, "ranking": ranking}
     except Exception as e:
-        logger.error(f"查询排行失败: {e}", exc_info=True)
+        logger.error(f"启发式查询排行失败: {e}", exc_info=True)
         client.close()
         return {"success": False, "ranking": []}
 
@@ -1292,6 +1359,58 @@ def get_ai_suggestions(status_filter="全部", risk_filter="全部"):
         return get_sample_ai_suggestions(status_filter, risk_filter)
 
 
+def _get_heuristic_anomaly_events(
+    start_time: str, end_time: str, limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """从 logs_structured 表做启发式异常检测（UEBA 验证未运行时降级使用）。
+
+    检测失败事件、非活跃时段事件和异常IP事件作为候选异常。
+    """
+    import clickhouse_connect
+    try:
+        ch = clickhouse_connect.get_client(
+            host=settings.clickhouse_host, port=settings.clickhouse_port,
+            username=settings.clickhouse_user, password=settings.clickhouse_password,
+            database=settings.clickhouse_database,
+        )
+        query = f"""
+        SELECT
+            id, timestamp, username, source_ip, src_country, src_city,
+            destination_ip, vpn_gateway, action, event_type, result,
+            auth_method, client_software, protocol, is_off_hours, is_unusual_ip,
+            raw_log
+        FROM log_analysis.logs_structured
+        WHERE timestamp >= %(start)s AND timestamp < %(end)s
+          AND username != ''
+          AND (result = 'FAIL' OR event_type LIKE '%FAIL%' OR is_off_hours = 1 OR is_unusual_ip = 1)
+        ORDER BY timestamp DESC
+        LIMIT {limit}
+        """
+        result = ch.query(query, parameters={"start": start_time, "end": end_time})
+        ch.close()
+        events = []
+        for row in result.result_rows:
+            cols = [c for c in result.column_names]
+            ev = dict(zip(cols, row))
+            ev["ueba_score"] = 45
+            ev["ueba_risk_level"] = "MEDIUM"
+            ev["validation_status"] = "启发式检测"
+            ev["ueba_anomaly_reasons"] = []
+            reasons = []
+            if str(ev.get("result", "")).upper() in ("FAIL", "FAILED"):
+                reasons.append("登录失败")
+            if ev.get("is_off_hours") in (1, True):
+                reasons.append("非活跃时段")
+            if ev.get("is_unusual_ip") in (1, True):
+                reasons.append("异常来源IP")
+            ev["ueba_anomaly_reasons"] = reasons
+            events.append(ev)
+        return events
+    except Exception as e:
+        logger.error(f"启发式异常检测失败: {e}")
+        return []
+
+
 def get_ueba_ai_suggestions(
     time_range: str = "最近 7 天",
     risk_filter: str = "全部",
@@ -1300,7 +1419,7 @@ def get_ueba_ai_suggestions(
     """从 UEBA 用户基线分析结果获取异常事件，调用 AI 分析后返回处置建议。
 
     流程：
-    1. 通过 behavior api 获取异常事件列表
+    1. 通过 behavior api 获取异常事件列表（或降级到启发式检测）
     2. 对每条异常事件调用 AI analyzer（使用 prompt_templates.py 模板）分析
     3. 将分析结果格式化为前端展示结构
     """
@@ -1329,8 +1448,15 @@ def get_ueba_ai_suggestions(
 
     events = behavior_result.get("events", [])
     if not events:
-        logger.info("UEBA 分析无异常事件")
-        return []
+        logger.info("UEBA 验证无异常事件，降级到 logs_structured 启发式异常检测")
+        events = _get_heuristic_anomaly_events(
+            start_time=start_time,
+            end_time=end_time,
+            limit=20,
+        )
+        if not events:
+            logger.info("启发式检测也无异常事件")
+            return []
 
     # 2. 对每条异常事件调用 AI 分析
     ai_analyzer = get_ai_analyzer()
@@ -1408,17 +1534,24 @@ def get_ueba_ai_suggestions(
 
 def search_history_logs(start_time=None, end_time=None, username=None, source_ip=None, 
                         log_type="全部", status="全部"):
-    """搜索历史日志（统一入口）"""
+    """搜索历史日志（统一入口）
+
+    优先从 ClickHouse 获取真实数据。当有 ClickHouse 连接但无数据时，
+    返回空列表（不再降级到硬编码模拟数据）。
+    """
     if STORAGE_AVAILABLE:
         try:
             data = fetch_history_logs(start_time, end_time, username, source_ip, log_type, status)
-            logger.info(f"🔍 当前显示: 实时数据 - 从 ClickHouse 获取 {len(data)} 条历史日志")
-            return data
+            if data:
+                logger.info(f"🔍 当前显示: 实时数据 - 从 ClickHouse 获取 {len(data)} 条")
+                return data
+            logger.info("🔍 ClickHouse 无匹配记录，返回空列表")
+            return []
         except Exception as e:
             logger.error(f"❌ 搜索历史日志失败: {e}")
-    
-    logger.info("🔍 当前显示: 模拟数据 - 历史查询")
-    return get_sample_search_results()
+
+    logger.info("🔍 存储模块不可用，返回空列表")
+    return []
 
 
 def create_sidebar():
@@ -1663,9 +1796,34 @@ def show_security_score():
         st.bar_chart(threat_data.set_index("威胁类型"), height=200)
 
     with report_col:
-        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📄 日报生成</div>", unsafe_allow_html=True)
-        if st.button("📊 生成今日安全简报", type="primary", use_container_width=True):
-            st.info("日报生成功能将在 Phase 4 实现，当前已通过 AI 强化基线提供异常摘要。")
+        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📄 安全简报</div>", unsafe_allow_html=True)
+
+        try:
+            import clickhouse_connect
+            ch = clickhouse_connect.get_client(
+                host=settings.clickhouse_host, port=settings.clickhouse_port,
+                username=settings.clickhouse_user, password=settings.clickhouse_password,
+                database=settings.clickhouse_database,
+            )
+            total = ch.query("SELECT count() FROM logs_structured").result_rows[0][0]
+            users = ch.query("SELECT uniq(username) FROM logs_structured WHERE username != ''").result_rows[0][0]
+            fails = ch.query("SELECT count() FROM logs_structured WHERE result='FAIL' OR event_type LIKE '%FAIL%'").result_rows[0][0]
+            ch.close()
+            brief = f"""
+<div style="background:white;border-radius:10px;padding:1rem;box-shadow:0 1px 4px rgba(0,0,0,0.05);font-size:0.85rem;line-height:1.7;">
+    📅 <strong>{datetime.now().strftime('%Y-%m-%d')}</strong><br>
+    📊 日志总量: {total:,} 条<br>
+    👥 活跃用户: {users} 人<br>
+    ❌ 失败事件: {fails} 起<br>
+    🚦 安全评分: {metrics['security_score']}/100<br>
+    🔴 高危用户: {metrics['high_risk_count']} 人<br>
+    🟠 异常事件: {metrics['anomaly_count']} 起
+</div>
+"""
+        except Exception:
+            brief = '<div style="color:#999;font-size:0.85rem;">暂无数据，请先采集日志并运行 UEBA。</div>'
+
+        st.markdown(brief, unsafe_allow_html=True)
 
 
 def show_ai_suggestions():
