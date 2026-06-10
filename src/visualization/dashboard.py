@@ -74,16 +74,17 @@ from src.behavior.api import (
     analyze_behavior_from_clickhouse,
 )
 
-# ClickHouse 客户端辅助函数
+# ClickHouse 直连辅助函数（弃用旧的 ClickHouseClient 封装，直连避免传参 bug）
 def get_clickhouse_client():
-    """获取 ClickHouse 客户端实例"""
-    return ClickHouseClient({
-        'host': settings.clickhouse_host,
-        'port': settings.clickhouse_port,
-        'username': settings.clickhouse_user,
-        'password': settings.clickhouse_password,
-        'database': settings.clickhouse_database
-    })
+    """获取 ClickHouse 原生连接客户端"""
+    import clickhouse_connect
+    return clickhouse_connect.get_client(
+        host=settings.clickhouse_host,
+        port=settings.clickhouse_port,
+        username=settings.clickhouse_user,
+        password=settings.clickhouse_password,
+        database=settings.clickhouse_database,
+    )
 
 # 设置页面配置
 st.set_page_config(
@@ -743,11 +744,6 @@ def fetch_security_metrics():
     """从 ClickHouse 获取真实安全指标数据"""
     client = get_clickhouse_client()
     
-    # 获取整体安全评分（从 daily_reports 表）
-    score_query = f"SELECT AVG(overall_score) FROM daily_reports WHERE report_date = today()"
-    score_result = client.query(score_query)
-    security_score = int(score_result.result_rows[0][0]) if score_result.result_rows and score_result.result_rows[0][0] else 75
-    
     # 获取今日异常事件数（从 anomaly_detection 表）
     anomaly_query = "SELECT COUNT(*) FROM anomaly_detection WHERE detection_time >= today()"
     anomaly_result = client.query(anomaly_query)
@@ -1288,6 +1284,9 @@ def _get_heuristic_anomaly_events(
             username=settings.clickhouse_user, password=settings.clickhouse_password,
             database=settings.clickhouse_database,
         )
+        # 注意：不能用 %(param)s 参数风格 + LIKE '%FAIL%' 混用，
+        # clickhouse-connect 内部用 Python % 格式化导致冲突。
+        # 时间参数直接 f-string 内插（值已在调用方用 strftime 格式化）
         query = f"""
         SELECT
             id, timestamp, username, source_ip, src_country, src_city,
@@ -1295,13 +1294,13 @@ def _get_heuristic_anomaly_events(
             auth_method, client_software, protocol, is_off_hours, is_unusual_ip,
             raw_log
         FROM log_analysis.logs_structured
-        WHERE timestamp >= %(start)s AND timestamp < %(end)s
+        WHERE timestamp >= '{start_time}' AND timestamp < '{end_time}'
           AND username != ''
           AND (result = 'FAIL' OR event_type LIKE '%FAIL%' OR is_off_hours = 1 OR is_unusual_ip = 1)
         ORDER BY timestamp DESC
         LIMIT {limit}
         """
-        result = ch.query(query, parameters={"start": start_time, "end": end_time})
+        result = ch.query(query)
         ch.close()
         events = []
         for row in result.result_rows:
@@ -1373,11 +1372,13 @@ def get_ueba_ai_suggestions(
             logger.info("启发式检测也无异常事件")
             return []
 
-    # 2. 对每条异常事件调用 AI 分析
+    # 2. 批量调用 AI 分析（最多分析 5 条以控制延迟，其余跳过）
+    MAX_AI_EVENTS = 5
     ai_analyzer = get_ai_analyzer()
     suggestions = []
 
     for idx, event in enumerate(events):
+        needs_ai = idx < MAX_AI_EVENTS
         username = event.get("username", "未知")
         risk_level = event.get("ueba_risk_level", "LOW")
         score = event.get("ueba_score", 0)
@@ -1386,16 +1387,15 @@ def get_ueba_ai_suggestions(
         source_ip = event.get("source_ip", "-")
         location = event.get("location", "-")
 
-        # 构造异常描述
         reason_str = ", ".join(str(r) for r in reasons) if reasons else "行为偏离基线"
         anomaly_description = (
             f"用户 {username} 在 {event_time} 触发异常：{reason_str}。"
             f"来源IP: {source_ip}，地点: {location}，风险评分: {score}，风险等级: {risk_level}。"
         )
 
-        # 调用 AI 分析（使用 ANOMALY_ANALYSIS_PROMPT 模板）
+        # 调用 AI 分析（仅前 MAX_AI_EVENTS 条调 API，其余跳过）
         ai_result = None
-        if ai_analyzer is not None:
+        if ai_analyzer is not None and needs_ai:
             try:
                 ai_result = ai_analyzer.analyze_anomaly(
                     username=username,
@@ -1422,15 +1422,14 @@ def get_ueba_ai_suggestions(
         suggestion = {
             "id": idx + 1,
             "用户": username,
-            "威胁类型": ai_result.get("threat_type", "UNKNOWN") if ai_result else "待分析",
+            "威胁类型": ai_result.get("threat_type", "待分析") if ai_result else "待分析",
             "风险等级": risk_icon,
             "异常描述": anomaly_description,
             "AI 分析": ai_result.get("description", "暂无 AI 分析") if ai_result else "暂无 AI 分析",
             "处置建议": ai_result.get("suggestion", "请人工审查") if ai_result else "请人工审查",
             "置信度": f"{min(int(score), 100)}%" if score else "-",
             "处置状态": dispose_status,
-            "生成时间": event_time.strftime("%Y-%m-%d %H:%M") if hasattr(event_time, "strftime") else str(event_time),
-            # 保留原始事件数据供后续使用
+            "生成时间": str(event_time)[:19] if event_time else "-",
             "_raw_event": event,
         }
         suggestions.append(suggestion)
@@ -1509,8 +1508,7 @@ def create_sidebar():
 
         try:
             ch = get_clickhouse_client()
-            ch.connect()
-            cnt = ch.client.query("SELECT count() FROM log_analysis.logs_structured")
+            cnt = ch.query("SELECT count() FROM log_analysis.logs_structured")
             total_logs = cnt.result_rows[0][0] if cnt.result_rows else "N/A"
             ch.close()
         except Exception:
@@ -1603,7 +1601,7 @@ def show_ueba_ranking():
         risk_filter = st.multiselect(
             "风险等级",
             ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
-            default=["CRITICAL", "HIGH", "MEDIUM"],
+            default=["CRITICAL", "HIGH", "MEDIUM", "LOW"],
             label_visibility="collapsed",
         )
 
@@ -1714,6 +1712,8 @@ def show_ueba_ranking():
         """
     st.markdown(events_html, unsafe_allow_html=True)
 
+
+
 def show_security_score():
     """显示安全评分看板"""
     st.markdown("""
@@ -1774,7 +1774,7 @@ def show_security_score():
             fails = ch.query("SELECT count() FROM logs_structured WHERE result='FAIL' OR event_type LIKE '%FAIL%'").result_rows[0][0]
             ch.close()
             brief = f"""
-<div style="background:white;border-radius:10px;padding:1rem;box-shadow:0 1px 4px rgba(0,0,0,0.05);font-size:0.85rem;line-height:1.7;">
+<div style="background:var(--bg-card);border-radius:10px;padding:1rem;box-shadow:var(--border-card);font-size:0.85rem;line-height:1.7;color:var(--text-primary);">
     📅 <strong>{datetime.now().strftime('%Y-%m-%d')}</strong><br>
     📊 日志总量: {total:,} 条<br>
     👥 活跃用户: {users} 人<br>
@@ -2039,34 +2039,83 @@ def manual_ai_analyze(anomaly_id: int, username: str, description: str, related_
         return f"AI 分析失败: {e}"
 
 def _inject_css():
-    """注入全局 CSS 样式（在 main() 内调用，避免模块级渲染冲突）"""
+    """注入全局 CSS 样式（跟随系统亮/暗模式）"""
     st.markdown("""
 <style>
+/* ---- 基础（亮色模式 / 默认） ---- */
+:root {
+    --bg-page: #f5f7fa;
+    --bg-card: #ffffff;
+    --bg-header: linear-gradient(135deg,#1a237e,#283593);
+    --text-primary: #1a237e;
+    --text-secondary: #666;
+    --text-on-header: #ffffff;
+    --border-card: 0 1px 4px rgba(0,0,0,0.06);
+    --border-card-hover: 0 2px 8px rgba(0,0,0,0.1);
+    --hr-color: #eee;
+    --badge-critical-bg: #ffebee;
+    --badge-critical-fg: #c62828;
+    --badge-high-bg: #fff3e0;
+    --badge-high-fg: #e65100;
+    --badge-medium-bg: #fffde7;
+    --badge-medium-fg: #f9a825;
+    --badge-low-bg: #e8f5e9;
+    --badge-low-fg: #2e7d32;
+    --badge-info-bg: #e3f2fd;
+    --badge-info-fg: #1565c0;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg-page: #0e1117;
+        --bg-card: #1e2028;
+        --text-primary: #e0e0e0;
+        --text-secondary: #aaa;
+        --border-card: 0 1px 4px rgba(255,255,255,0.06);
+        --border-card-hover: 0 2px 8px rgba(255,255,255,0.1);
+        --hr-color: #333;
+        --badge-critical-bg: #3e1a1a;
+        --badge-critical-fg: #ef9a9a;
+        --badge-high-bg: #3e2a1a;
+        --badge-high-fg: #ffcc80;
+        --badge-medium-bg: #3e3a1a;
+        --badge-medium-fg: #fff59d;
+        --badge-low-bg: #1a3e1a;
+        --badge-low-fg: #a5d6a7;
+        --badge-info-bg: #1a2a3e;
+        --badge-info-fg: #90caf9;
+    }
+}
+
 .main > div { padding-top:0.5rem !important; }
-.stApp { background:#f5f7fa; }
-.page-header { background:linear-gradient(135deg,#1a237e,#283593);color:white;padding:0.8rem 1.5rem;border-radius:10px;margin-bottom:1.2rem;display:flex;align-items:center;gap:0.8rem; }
-.page-header h2 { margin:0;font-weight:600;font-size:1.3rem; }
-.page-header .subtitle { font-size:0.85rem;opacity:0.85;margin-left:auto; }
-.risk-card { background:white;border-radius:10px;padding:1rem 1.2rem;box-shadow:0 1px 4px rgba(0,0,0,0.06);border-left:4px solid #e0e0e0;margin-bottom:0.6rem; }
-.risk-card:hover { box-shadow:0 2px 8px rgba(0,0,0,0.1); }
+.stApp { background:var(--bg-page); }
+.page-header { background:var(--bg-header); color:var(--text-on-header); padding:0.8rem 1.5rem; border-radius:10px; margin-bottom:1.2rem; display:flex; align-items:center; gap:0.8rem; }
+.page-header h2 { margin:0; font-weight:600; font-size:1.3rem; }
+.page-header .subtitle { font-size:0.85rem; opacity:0.85; margin-left:auto; }
+.risk-card { background:var(--bg-card); border-radius:10px; padding:1rem 1.2rem; box-shadow:var(--border-card); border-left:4px solid #e0e0e0; margin-bottom:0.6rem; }
+.risk-card:hover { box-shadow:var(--border-card-hover); }
 .risk-card.critical { border-left-color:#d32f2f; }
 .risk-card.high { border-left-color:#f57c00; }
 .risk-card.medium { border-left-color:#fbc02d; }
 .risk-card.low { border-left-color:#388e3c; }
-.risk-card .card-title { font-weight:600;font-size:0.95rem; }
-.risk-card .card-meta { font-size:0.8rem;color:#666;margin-top:0.2rem; }
-.badge { display:inline-block;padding:0.15rem 0.6rem;border-radius:12px;font-size:0.75rem;font-weight:600;text-transform:uppercase; }
-.badge.critical { background:#ffebee;color:#c62828; }
-.badge.high { background:#fff3e0;color:#e65100; }
-.badge.medium { background:#fffde7;color:#f9a825; }
-.badge.low { background:#e8f5e9;color:#2e7d32; }
-.badge.info { background:#e3f2fd;color:#1565c0; }
-.metric-group { display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1rem; }
-.metric-item { background:white;border-radius:10px;padding:0.8rem 1.2rem;flex:1;min-width:120px;box-shadow:0 1px 4px rgba(0,0,0,0.05);text-align:center; }
-.metric-item .value { font-size:1.6rem;font-weight:700;color:#1a237e; }
-.metric-item .label { font-size:0.78rem;color:#888;margin-top:0.1rem; }
-.score-ring { width:100px;height:100px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto;font-size:1.6rem;font-weight:700;color:white; }
-hr { margin:0.8rem 0;border-color:#eee; }
+.risk-card .card-title { font-weight:600; font-size:0.95rem; }
+.risk-card .card-meta { font-size:0.8rem; color:var(--text-secondary); margin-top:0.2rem; }
+.badge { display:inline-block; padding:0.15rem 0.6rem; border-radius:12px; font-size:0.75rem; font-weight:600; text-transform:uppercase; }
+.badge.critical { background:var(--badge-critical-bg); color:var(--badge-critical-fg); }
+.badge.high { background:var(--badge-high-bg); color:var(--badge-high-fg); }
+.badge.medium { background:var(--badge-medium-bg); color:var(--badge-medium-fg); }
+.badge.low { background:var(--badge-low-bg); color:var(--badge-low-fg); }
+.badge.info { background:var(--badge-info-bg); color:var(--badge-info-fg); }
+.metric-group { display:flex; gap:1rem; flex-wrap:wrap; margin-bottom:1rem; }
+.metric-item { background:var(--bg-card); border-radius:10px; padding:0.8rem 1.2rem; flex:1; min-width:120px; box-shadow:var(--border-card); text-align:center; }
+.metric-item .value { font-size:1.6rem; font-weight:700; color:var(--text-primary); }
+.metric-item .label { font-size:0.78rem; color:var(--text-secondary); margin-top:0.1rem; }
+.score-ring { width:100px; height:100px; border-radius:50%; display:flex; align-items:center; justify-content:center; margin:0 auto; font-size:1.6rem; font-weight:700; color:white; }
+hr { margin:0.8rem 0; border-color:var(--hr-color); }
+/* stMetric 文字颜色适配 */
+div[data-testid="stMetricValue"] { color:var(--text-primary) !important; }
+div[data-testid="stMetricLabel"] { color:var(--text-secondary) !important; }
+/* 正文颜色 */
+.stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown span { color:var(--text-primary); }
 </style>
 """, unsafe_allow_html=True)
 

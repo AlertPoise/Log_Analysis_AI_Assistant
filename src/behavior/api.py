@@ -17,6 +17,7 @@ from typing import Any
 from .config import UebaBaselineConfig
 from .baseline_store import BaselineStore
 from .validation_repository import UebaValidationRepository
+from ..utils.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,13 @@ def _build_repository(client: Any, database: str) -> UebaValidationRepository:
             raise RuntimeError(
                 "缺少 clickhouse_connect 依赖，请确认 requirements.txt 已安装 clickhouse-connect。"
             ) from exc
-        client = clickhouse_connect.get_client(database=database)
+        client = clickhouse_connect.get_client(
+            host=settings.clickhouse_host,
+            port=settings.clickhouse_port,
+            username=settings.clickhouse_user,
+            password=settings.clickhouse_password,
+            database=database,
+        )
     repo = UebaValidationRepository(client=client, database=database)
     repo.ensure_table()
     return repo
@@ -60,7 +67,13 @@ def _build_baseline_store(client: Any, database: str) -> BaselineStore:
             raise RuntimeError(
                 "缺少 clickhouse_connect 依赖，请确认 requirements.txt 已安装 clickhouse-connect。"
             ) from exc
-        client = clickhouse_connect.get_client(database=database)
+        client = clickhouse_connect.get_client(
+            host=settings.clickhouse_host,
+            port=settings.clickhouse_port,
+            username=settings.clickhouse_user,
+            password=settings.clickhouse_password,
+            database=database,
+        )
     store = BaselineStore(client=client, database=database)
     store.ensure_table()
     return store
