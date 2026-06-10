@@ -7,6 +7,14 @@ Streamlit 可视化仪表板
 2. 自动生成 PDF/文本简报
 3. 展示高危用户与评分
 """
+import sys
+import os
+
+# 将项目根目录添加到 Python 路径
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import streamlit as st
 from typing import Any, Dict, List
 from datetime import datetime, timedelta
@@ -21,13 +29,6 @@ from src.utils.config import settings
 import clickhouse_connect
 
 # 设置日志配置
-import sys
-import os
-
-# 将项目根目录添加到 Python 路径
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
 
 # 确保 logs 目录存在
 logs_dir = os.path.join(project_root, "logs")
