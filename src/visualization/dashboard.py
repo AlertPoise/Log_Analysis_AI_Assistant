@@ -7,6 +7,14 @@ Streamlit 可视化仪表板
 2. 自动生成 PDF/文本简报
 3. 展示高危用户与评分
 """
+import sys
+import os
+
+# 将项目根目录添加到 Python 路径（必须在其他本地导入之前）
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import streamlit as st
 from typing import Any, Dict, List
 from datetime import datetime, timedelta
@@ -19,15 +27,6 @@ import logging
 from src.ai.analyzer import AIAnalyzer
 from src.utils.config import settings
 import clickhouse_connect
-
-# 设置日志配置
-import sys
-import os
-
-# 将项目根目录添加到 Python 路径
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
 
 # 确保 logs 目录存在
 logs_dir = os.path.join(project_root, "logs")
@@ -93,98 +92,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# ==================== 全局 CSS 注入 ====================
-
-st.markdown("""
-<style>
-    /* 全局字体与背景 */
-    .main > div { padding-top: 0.5rem !important; }
-    .stApp { background: #f5f7fa; }
-    
-    /* 页面头部标题 */
-    .page-header {
-        background: linear-gradient(135deg, #1a237e 0%, #283593 100%);
-        color: white;
-        padding: 0.8rem 1.5rem;
-        border-radius: 10px;
-        margin-bottom: 1.2rem;
-        display: flex;
-        align-items: center;
-        gap: 0.8rem;
-    }
-    .page-header h2 { margin: 0; font-weight: 600; font-size: 1.3rem; }
-    .page-header .subtitle { font-size: 0.85rem; opacity: 0.85; margin-left: auto; }
-    
-    /* 风险卡片 */
-    .risk-card {
-        background: white;
-        border-radius: 10px;
-        padding: 1rem 1.2rem;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-        border-left: 4px solid #e0e0e0;
-        margin-bottom: 0.6rem;
-        transition: box-shadow 0.2s;
-    }
-    .risk-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-    .risk-card.critical { border-left-color: #d32f2f; }
-    .risk-card.high { border-left-color: #f57c00; }
-    .risk-card.medium { border-left-color: #fbc02d; }
-    .risk-card.low { border-left-color: #388e3c; }
-    .risk-card .card-title { font-weight: 600; font-size: 0.95rem; }
-    .risk-card .card-meta { font-size: 0.8rem; color: #666; margin-top: 0.2rem; }
-    
-    /* 风险等级徽标 */
-    .badge {
-        display: inline-block;
-        padding: 0.15rem 0.6rem;
-        border-radius: 12px;
-        font-size: 0.75rem;
-        font-weight: 600;
-        text-transform: uppercase;
-    }
-    .badge.critical { background: #ffebee; color: #c62828; }
-    .badge.high { background: #fff3e0; color: #e65100; }
-    .badge.medium { background: #fffde7; color: #f9a825; }
-    .badge.low { background: #e8f5e9; color: #2e7d32; }
-    .badge.info { background: #e3f2fd; color: #1565c0; }
-    
-    /* 指标组 */
-    .metric-group {
-        display: flex;
-        gap: 1rem;
-        flex-wrap: wrap;
-        margin-bottom: 1rem;
-    }
-    .metric-item {
-        background: white;
-        border-radius: 10px;
-        padding: 0.8rem 1.2rem;
-        flex: 1;
-        min-width: 120px;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-        text-align: center;
-    }
-    .metric-item .value { font-size: 1.6rem; font-weight: 700; color: #1a237e; }
-    .metric-item .label { font-size: 0.78rem; color: #888; margin-top: 0.1rem; }
-    .metric-item .delta { font-size: 0.75rem; font-weight: 600; }
-    .metric-item .delta.up { color: #d32f2f; }
-    .metric-item .delta.down { color: #2e7d32; }
-    
-    /* 评分环 */
-    .score-ring {
-        width: 100px; height: 100px; border-radius: 50%;
-        display: flex; align-items: center; justify-content: center;
-        margin: 0 auto; font-size: 1.6rem; font-weight: 700; color: white;
-    }
-    
-    /* stMetric 暗色模式兼容 */
-    div[data-testid="stMetricValue"] { font-weight: 700; }
-    
-    /* divider 柔和 */
-    hr { margin: 0.8rem 0; border-color: #eee; }
-</style>
-""", unsafe_allow_html=True)
 
 # ==================== 会话状态 ====================
 
@@ -2131,9 +2038,43 @@ def manual_ai_analyze(anomaly_id: int, username: str, description: str, related_
     except Exception as e:
         return f"AI 分析失败: {e}"
 
+def _inject_css():
+    """注入全局 CSS 样式（在 main() 内调用，避免模块级渲染冲突）"""
+    st.markdown("""
+<style>
+.main > div { padding-top:0.5rem !important; }
+.stApp { background:#f5f7fa; }
+.page-header { background:linear-gradient(135deg,#1a237e,#283593);color:white;padding:0.8rem 1.5rem;border-radius:10px;margin-bottom:1.2rem;display:flex;align-items:center;gap:0.8rem; }
+.page-header h2 { margin:0;font-weight:600;font-size:1.3rem; }
+.page-header .subtitle { font-size:0.85rem;opacity:0.85;margin-left:auto; }
+.risk-card { background:white;border-radius:10px;padding:1rem 1.2rem;box-shadow:0 1px 4px rgba(0,0,0,0.06);border-left:4px solid #e0e0e0;margin-bottom:0.6rem; }
+.risk-card:hover { box-shadow:0 2px 8px rgba(0,0,0,0.1); }
+.risk-card.critical { border-left-color:#d32f2f; }
+.risk-card.high { border-left-color:#f57c00; }
+.risk-card.medium { border-left-color:#fbc02d; }
+.risk-card.low { border-left-color:#388e3c; }
+.risk-card .card-title { font-weight:600;font-size:0.95rem; }
+.risk-card .card-meta { font-size:0.8rem;color:#666;margin-top:0.2rem; }
+.badge { display:inline-block;padding:0.15rem 0.6rem;border-radius:12px;font-size:0.75rem;font-weight:600;text-transform:uppercase; }
+.badge.critical { background:#ffebee;color:#c62828; }
+.badge.high { background:#fff3e0;color:#e65100; }
+.badge.medium { background:#fffde7;color:#f9a825; }
+.badge.low { background:#e8f5e9;color:#2e7d32; }
+.badge.info { background:#e3f2fd;color:#1565c0; }
+.metric-group { display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1rem; }
+.metric-item { background:white;border-radius:10px;padding:0.8rem 1.2rem;flex:1;min-width:120px;box-shadow:0 1px 4px rgba(0,0,0,0.05);text-align:center; }
+.metric-item .value { font-size:1.6rem;font-weight:700;color:#1a237e; }
+.metric-item .label { font-size:0.78rem;color:#888;margin-top:0.1rem; }
+.score-ring { width:100px;height:100px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto;font-size:1.6rem;font-weight:700;color:white; }
+hr { margin:0.8rem 0;border-color:#eee; }
+</style>
+""", unsafe_allow_html=True)
+
+
 def main():
     """主函数"""
     init_session_state()
+    _inject_css()
     create_sidebar()
     
     # 根据选择显示对应页面
