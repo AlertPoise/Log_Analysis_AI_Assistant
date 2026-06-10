@@ -1246,12 +1246,14 @@ def get_ueba_ranking_from_clickhouse(time_range: str = "最近 24 小时", limit
 
 
 def _format_ueba_risk_level(score: float) -> str:
-    """将 0~1 风险分映射为页面展示等级。"""
+    """将 0~1 风险分映射为英文等级（与 multiselect 选项一致）。"""
     if score >= 0.8:
-        return "🔴 高危"
+        return "CRITICAL"
     if score >= 0.5:
-        return "🟠 中危"
-    return "🟡 低危"
+        return "HIGH"
+    if score >= 0.25:
+        return "MEDIUM"
+    return "LOW"
 
 
 def _demo_ranking_to_rows(sample_data: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
@@ -1661,6 +1663,22 @@ def show_realtime_logs():
     """, unsafe_allow_html=True)
 
 
+def _rl_emoji(level: str) -> str:
+    """英文风险等级 → 带 emoji 显示标签。"""
+    mapping = {
+        "CRITICAL": "🔴 CRITICAL",
+        "HIGH": "🟠 HIGH",
+        "MEDIUM": "🟡 MEDIUM",
+        "LOW": "🟢 LOW",
+    }
+    return mapping.get(level.upper(), level)
+
+
+def _rl_css_class(level: str) -> str:
+    """英文风险等级 → CSS class。"""
+    return level.lower() if level.upper() in ("CRITICAL", "HIGH", "MEDIUM", "LOW") else "low"
+
+
 def show_ueba_ranking():
     """显示 UEBA 异常用户排行"""
     st.markdown("""
@@ -1682,28 +1700,63 @@ def show_ueba_ranking():
             label_visibility="collapsed",
         )
 
-    ranking_result = get_ueba_ranking_from_clickhouse(time_range, limit=10)
-    if not ranking_result.get("success") or not ranking_result.get("ranking"):
-        st.warning("当前时间窗口内无用户行为数据，请尝试扩大时间范围（≥30天）或先采集日志（`python -m src.main` 会自动插入测试数据）")
+    ranking_result = get_ueba_ranking_from_clickhouse(time_range, limit=20)
+    if not ranking_result.get("success"):
+        st.error(f"查询失败: {ranking_result.get('error', '未知错误')}")
+        # 加调试输出
+        try:
+            import clickhouse_connect
+            ch = clickhouse_connect.get_client(
+                host=settings.clickhouse_host, port=settings.clickhouse_port,
+                username=settings.clickhouse_user, password=settings.clickhouse_password,
+                database=settings.clickhouse_database,
+            )
+            cnt = ch.query("SELECT count() FROM log_analysis.logs_structured").result_rows[0][0]
+            ch.close()
+            st.caption(f"调试: logs_structured 表共有 {cnt} 条记录")
+        except Exception as e_debug:
+            st.caption(f"调试: ClickHouse 连接失败 — {e_debug}")
         return
 
     ranking_rows = ranking_result["ranking"]
+    if not ranking_rows:
+        st.warning("当前时间窗口内无用户行为数据，请尝试选择「最近 30 天」")
+        try:
+            import clickhouse_connect
+            ch = clickhouse_connect.get_client(
+                host=settings.clickhouse_host, port=settings.clickhouse_port,
+                username=settings.clickhouse_user, password=settings.clickhouse_password,
+                database=settings.clickhouse_database,
+            )
+            cnt = ch.query("SELECT count() FROM log_analysis.logs_structured").result_rows[0][0]
+            ch.close()
+            st.caption(f"调试: logs_structured 表共有 {cnt} 条记录 (但查询时间内无匹配)")
+        except Exception as e_debug:
+            st.caption(f"调试: ClickHouse 连接失败 — {e_debug}")
+        return
+
+    # 应用风险等级筛选
+    if risk_filter:
+        ranking_rows = [r for r in ranking_rows if r.get("risk_level", "LOW").upper() in risk_filter]
+
+    if not ranking_rows:
+        st.info(f"当前筛选条件下无匹配用户（已选风险等级: {', '.join(risk_filter)}）")
+        return
 
     # --- 用户排行卡片 ---
-    st.markdown("<div style='font-size:0.95rem;font-weight:600;margin:0.5rem 0;'>🔴 异常用户 TOP10</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:0.95rem;font-weight:600;margin:0.5rem 0;'>🔴 异常用户 TOP{len(ranking_rows)}</div>", unsafe_allow_html=True)
     cards_html = ""
     for i, r in enumerate(ranking_rows[:10]):
-        rl = r.get("risk_level", "LOW").lower()
+        rl_raw = r.get("risk_level", "LOW")
+        rl_css = _rl_css_class(rl_raw)
+        rl_label = _rl_emoji(rl_raw)
         score = r.get("score", 0)
-        if isinstance(score, float):
-            score_pct = f"{score*100:.0f}"
-        else:
-            score_pct = str(score)
+        score_pct = f"{score*100:.0f}" if isinstance(score, float) else str(score)
         cards_html += f"""
-        <div class="risk-card {rl}">
+        <div class="risk-card {rl_css}">
             <div style="display:flex;justify-content:space-between;align-items:center;">
                 <span class="card-title">#{i+1} {r.get('username', '-')}</span>
-                <span class="badge {rl}">{r.get('risk_level', 'LOW')}</span>
+                <span class="badge {rl_css}">{rl_label}</span>
             </div>
             <div class="card-meta">
                 评分 {score_pct}/100 · 事件 {r.get('event_count', 0)} 起 · 最近 {str(r.get('last_event_time', '-'))[:16]}
@@ -1711,8 +1764,6 @@ def show_ueba_ranking():
         </div>
         """
     st.markdown(cards_html, unsafe_allow_html=True)
-
-    st.markdown("<hr style='margin:0.8rem 0;border-color:#eee;'>", unsafe_allow_html=True)
 
     # --- 用户行为详情 ---
     st.markdown("<div style='font-size:0.95rem;font-weight:600;margin:0.5rem 0;'>📋 用户行为分析详情</div>", unsafe_allow_html=True)
