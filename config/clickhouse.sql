@@ -300,3 +300,26 @@ CREATE INDEX IF NOT EXISTS idx_username ON {CLICKHOUSE_TABLE} (username) TYPE bl
 CREATE INDEX IF NOT EXISTS idx_source_ip ON {CLICKHOUSE_TABLE} (source_ip) TYPE bloom_filter GRANULARITY 4;
 CREATE INDEX IF NOT EXISTS idx_action ON {CLICKHOUSE_TABLE} (action) TYPE bloom_filter GRANULARITY 4;
 CREATE INDEX IF NOT EXISTS idx_risk_level ON anomaly_detection (risk_level) TYPE bloom_filter GRANULARITY 4;
+
+-- ------------------------------------------------------------------
+-- AI 基线强化建议表
+-- 存储 AI 对用户基线的强化分析结果，用于后续评分闭环和可视化
+-- ------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS baseline_ai_refinements (
+    username String,
+    model_version String,
+    analysis_summary String,
+    pattern_type String,
+    is_baseline_stale UInt8,
+    stale_features String,
+    suggested_adjustments String,
+    new_watch_features String,
+    reinforced_baseline_delta String,
+    confidence Float64,
+    ai_platform String,
+    validated_at DateTime,
+    anomaly_event_count UInt32,
+    raw_response String,
+    created_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (username, model_version, validated_at);
