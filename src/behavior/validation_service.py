@@ -48,6 +48,7 @@ class UebaValidationService:
         sample_result_limit: int = DEFAULT_SAMPLE_RESULT_LIMIT,
         validated_at: str | None = None,
         validation_run_id: str | None = None,
+        require_baseline: bool = False,
     ) -> dict[str, Any]:
         """执行一次不保存结果的 UEBA 准线验证。"""
         return self.run(
@@ -60,6 +61,7 @@ class UebaValidationService:
             sample_size=sample_result_limit,
             validated_at=validated_at,
             validation_run_id=validation_run_id,
+            require_baseline=require_baseline,
         )
 
     def run(
@@ -73,6 +75,7 @@ class UebaValidationService:
         sample_size: int = DEFAULT_SAMPLE_SIZE,
         validated_at: str | None = None,
         validation_run_id: str | None = None,
+        require_baseline: bool = False,
     ) -> dict[str, Any]:
         """执行一次 UEBA 准线验证，可选择保存评分结果。"""
         sample_limit = self._validate_sample_size(sample_size)
@@ -92,6 +95,7 @@ class UebaValidationService:
                 limit=limit,
                 exclude_already_validated=(not dry_run and model_version is not None),
                 baseline_model_version=model_version,
+                require_baseline=require_baseline,
             )
         except Exception as exc:
             return self._summary(

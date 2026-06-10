@@ -47,8 +47,8 @@ class AcceptanceConfig:
     fixture_id: str = "ueba_fixture_v2_monthly_seed_42"
     seed: int = 42
 
-    start_time: str = "2026-05-01 00:00:00"
-    end_time: str = "2026-07-01 00:00:00"
+    start_time: str = "2026-03-01 00:00:00"
+    end_time: str = "2026-05-01 00:00:00"
     log_type: str = "vpn"
     model_version: str = "ueba_baseline_fixture_v2_monthly"
     min_sample_count: int = 20

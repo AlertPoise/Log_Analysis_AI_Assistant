@@ -21,10 +21,33 @@ SUPPORTED_MODES = (
     "new_city",
     "failed_login",
     "off_hours",
+    "medium_country",
+    "high_country_failed",
+    "critical_combo",
     "combo_anomaly",
     "mixed",
+    "risk_mix",
 )
 _SINGLE_ANOMALY_MODES = ("new_ip", "new_country", "new_city", "failed_login", "off_hours")
+_RISK_MIX_USERNAMES = (
+    "fixture_user_stable_0001",
+    "fixture_user_stable_0002",
+    "fixture_user_stable_0003",
+    "fixture_user_stable_0004",
+)
+_RISK_MIX_MODES = ("normal", "medium_country", "high_country_failed", "critical_combo")
+_STABLE_CITY_BY_INDEX = {
+    1: "北京",
+    2: "北京",
+    3: "北京",
+    4: "上海",
+    5: "上海",
+    6: "上海",
+    7: "广州",
+    8: "广州",
+    9: "杭州",
+    10: "成都",
+}
 
 
 class ContinuousLoginGenerator:
@@ -37,12 +60,14 @@ class ContinuousLoginGenerator:
         logs_per_second: int = DEFAULT_LOGS_PER_SECOND,
         mode: str = "mixed",
         username: str = "fixture_user_stable_0001",
+        usernames: list[str] | tuple[str, ...] | None = None,
         seed: int = 42,
         tick_seconds: float = 1.0,
         id_generator: MonotonicIdGenerator | None = None,
     ) -> None:
         self.writer_callback = writer_callback
-        self.username = username
+        self.usernames = _normalize_usernames(username=username, usernames=usernames)
+        self.username = self.usernames[0]
         self.seed = seed
         self.tick_seconds = _validate_tick_seconds(tick_seconds)
         self.id_generator = id_generator or MonotonicIdGenerator()
@@ -72,8 +97,9 @@ class ContinuousLoginGenerator:
         rows = []
         for offset in range(count):
             sequence = start_sequence + offset
-            row_mode = self._mode_for_sequence(active_mode, sequence)
-            rows.append(self._build_row(row_mode, sequence))
+            profile = self._profile_for_sequence(active_mode, sequence)
+            row_mode = self._mode_for_sequence(active_mode, sequence, profile)
+            rows.append(self._build_row(row_mode, sequence, profile))
         return rows
 
     def set_rate(self, logs_per_second: int) -> None:
@@ -125,6 +151,7 @@ class ContinuousLoginGenerator:
                 "shutdown": self._shutdown,
                 "logs_per_second": self._logs_per_second,
                 "mode": self._mode,
+                "usernames": list(self.usernames),
                 "generated_rows": self._generated_rows,
                 "written_rows": self._written_rows,
                 "write_errors": self._write_errors,
@@ -162,7 +189,17 @@ class ContinuousLoginGenerator:
                 "mode": self._mode,
             }
 
-    def _mode_for_sequence(self, mode: str, sequence: int) -> str:
+    def _profile_for_sequence(self, mode: str, sequence: int) -> dict[str, Any]:
+        usernames = _RISK_MIX_USERNAMES if mode == "risk_mix" and self.usernames == (self.username,) else self.usernames
+        user_position = sequence % len(usernames)
+        username = usernames[user_position]
+        profile = _baseline_profile_for_username(username)
+        profile["risk_mode"] = _RISK_MIX_MODES[user_position % len(_RISK_MIX_MODES)]
+        return profile
+
+    def _mode_for_sequence(self, mode: str, sequence: int, profile: dict[str, Any]) -> str:
+        if mode == "risk_mix":
+            return str(profile["risk_mode"])
         if mode != "mixed":
             return mode
         position = sequence % 20
@@ -172,11 +209,11 @@ class ContinuousLoginGenerator:
             return _SINGLE_ANOMALY_MODES[(sequence // 20 + position - 16) % len(_SINGLE_ANOMALY_MODES)]
         return "combo_anomaly"
 
-    def _build_row(self, mode: str, sequence: int) -> dict[str, Any]:
-        row = _normal_row(self.username, sequence, self.seed)
+    def _build_row(self, mode: str, sequence: int, profile: dict[str, Any]) -> dict[str, Any]:
+        row = _normal_row(profile, sequence, self.seed)
         if mode == "new_ip":
             row.update(source_ip=f"198.51.100.{sequence % 250 + 1}", is_unusual_ip=True)
-        elif mode == "new_country":
+        elif mode in {"new_country", "medium_country"}:
             row.update(src_country="德国", src_city="法兰克福")
         elif mode == "new_city":
             row.update(src_city="深圳")
@@ -184,14 +221,27 @@ class ContinuousLoginGenerator:
             row.update(result="FAILED", event_type="LOGIN_FAIL", fail_reason="PASSWORD_ERROR")
         elif mode == "off_hours":
             row.update(timestamp=_timestamp_for_mode(sequence, off_hours=True), is_off_hours=True)
-        elif mode == "combo_anomaly":
+        elif mode == "high_country_failed":
             row.update(
-                source_ip=f"203.0.113.{sequence % 250 + 1}",
                 src_country="德国",
-                src_city="柏林",
+                src_city="法兰克福",
                 result="FAILED",
                 event_type="LOGIN_FAIL",
                 fail_reason="PASSWORD_ERROR",
+            )
+        elif mode in {"combo_anomaly", "critical_combo"}:
+            row.update(
+                source_ip=f"203.0.113.{sequence % 250 + 1}",
+                destination_ip=f"10.255.{sequence % 250}.10",
+                src_country="德国",
+                src_city="柏林",
+                vpn_gateway="vpn-gw-tor-01",
+                result="FAILED",
+                event_type="LOGIN_FAIL",
+                fail_reason="PASSWORD_ERROR",
+                auth_method="password_only",
+                client_software="Unknown VPN Client",
+                protocol="WireGuard",
                 timestamp=_timestamp_for_mode(sequence, off_hours=True),
                 is_off_hours=True,
                 is_unusual_ip=True,
@@ -200,24 +250,29 @@ class ContinuousLoginGenerator:
             raise ValueError(f"unsupported mode: {mode!r}")
 
         row["id"] = self.id_generator.next()
-        row["raw_log"] = f"ueba_continuous_fixture mode={mode} seed={self.seed} sequence={sequence}"
+        row["raw_log"] = (
+            f"ueba_continuous_fixture mode={mode} user={row['username']} "
+            f"seed={self.seed} sequence={sequence}"
+        )
         missing = [column for column in INSERT_COLUMNS if column not in row]
         if missing:
             raise RuntimeError(f"generated row missing columns: {missing}")
         return row
 
 
-def _normal_row(username: str, sequence: int, seed: int) -> dict[str, Any]:
+def _normal_row(profile: dict[str, Any], sequence: int, seed: int) -> dict[str, Any]:
+    source_ips = profile["source_ips"]
+    destination_ips = profile["destination_ips"]
     return {
         "id": 0,
         "timestamp": _timestamp_for_mode(sequence, off_hours=False),
         "log_type": "vpn",
-        "username": username,
-        "source_ip": "10.10.1.1" if sequence % 5 else "10.10.1.2",
-        "destination_ip": "172.20.10.10" if sequence % 3 else "172.20.10.20",
+        "username": profile["username"],
+        "source_ip": source_ips[sequence % len(source_ips)],
+        "destination_ip": destination_ips[sequence % len(destination_ips)],
         "src_country": "中国",
-        "src_city": "北京",
-        "vpn_gateway": "vpn-gw-cn-01",
+        "src_city": profile["src_city"],
+        "vpn_gateway": profile["vpn_gateway"],
         "action": "LOGIN",
         "event_type": "LOGIN_SUCCESS",
         "result": "SUCCESS",
@@ -233,6 +288,44 @@ def _normal_row(username: str, sequence: int, seed: int) -> dict[str, Any]:
         "parser": "ueba_continuous_fixture",
         "raw_log": "ueba_continuous_fixture",
     }
+
+
+def _normalize_usernames(*, username: str, usernames: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    raw_values = usernames if usernames is not None else tuple(str(username or "").split(","))
+    normalized = tuple(value.strip() for value in raw_values if str(value).strip())
+    return normalized or ("fixture_user_stable_0001",)
+
+
+def _baseline_profile_for_username(username: str) -> dict[str, Any]:
+    stable_index = _stable_index(username)
+    if stable_index is None:
+        stable_index = 1
+    city = _STABLE_CITY_BY_INDEX.get(stable_index, ("北京", "上海", "广州", "杭州", "成都")[(stable_index - 1) % 5])
+    gateway = "vpn-gw-cn-02" if city == "上海" else "vpn-gw-cn-01"
+    return {
+        "username": username,
+        "source_ips": (f"10.10.{stable_index}.1", f"10.10.{stable_index}.2"),
+        "destination_ips": (
+            "172.20.10.10",
+            "172.20.10.20",
+            f"172.20.{stable_index}.30",
+            f"172.21.{stable_index}.101",
+            f"172.21.{stable_index}.102",
+        ),
+        "src_city": city,
+        "vpn_gateway": gateway,
+    }
+
+
+def _stable_index(username: str) -> int | None:
+    prefix = "fixture_user_stable_"
+    if not username.startswith(prefix):
+        return None
+    try:
+        value = int(username[len(prefix):])
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 def _timestamp_for_mode(sequence: int, *, off_hours: bool) -> str:
