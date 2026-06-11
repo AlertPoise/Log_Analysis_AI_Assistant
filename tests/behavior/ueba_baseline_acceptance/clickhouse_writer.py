@@ -257,19 +257,31 @@ def load_fixture_to_clickhouse(
 
 
 def _base_parameters(config: AcceptanceConfig) -> dict[str, Any]:
+    start_time, end_time = _clickhouse_window(config.start_time, config.end_time)
     return {
-        "start_time": config.start_time,
-        "end_time": config.end_time,
+        "start_time": start_time,
+        "end_time": end_time,
         "log_type": config.log_type,
     }
+
+
+def _clickhouse_window(start_time: str, end_time: str) -> tuple[str, str]:
+    local_offset = datetime.now().astimezone().utcoffset()
+    start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+    end_dt = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+    if local_offset:
+        start_dt -= local_offset
+        end_dt -= local_offset
+    return (
+        start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    )
 
 
 def _column_value(row: dict[str, Any], column: str) -> Any:
     value = row[column]
     if column == "timestamp" and isinstance(value, str):
-        naive_time = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-        local_offset = datetime.now().astimezone().utcoffset()
-        return naive_time + local_offset if local_offset else naive_time
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
     return value
 
 
