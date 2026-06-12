@@ -2136,6 +2136,124 @@ def show_ai_suggestions():
     </div>
     """, unsafe_allow_html=True)
 
+    # ================================================================
+    # AI 基线强化建议区块（合并到同一页面底部）
+    # ================================================================
+    st.markdown("<hr style='margin:1.2rem 0;border-color:#ddd;border-width:2px;'>", unsafe_allow_html=True)
+    st.markdown("""
+    <div class="page-header">
+        <h2>🧬 AI 基线强化</h2>
+        <span class="subtitle">大模型分析异常事件 · 生成基线优化建议</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _show_baseline_reinforcement()
+
+
+def _show_baseline_reinforcement():
+    """展示 AI 基线强化建议（从 baseline_ai_refinements 表读取）。"""
+    import clickhouse_connect
+    try:
+        ch = clickhouse_connect.get_client(
+            host=settings.clickhouse_host, port=settings.clickhouse_port,
+            username=settings.clickhouse_user, password=settings.clickhouse_password,
+            database=settings.clickhouse_database,
+        )
+        rows = ch.query("""
+            SELECT username, model_version, analysis_summary, pattern_type,
+                   is_baseline_stale, stale_features, suggested_adjustments,
+                   new_watch_features, reinforced_baseline_delta, confidence,
+                   ai_platform, validated_at, anomaly_event_count
+            FROM baseline_ai_refinements
+            ORDER BY validated_at DESC
+            LIMIT 20
+        """)
+        ch.close()
+        refinements = []
+        for row in rows.result_rows:
+            refinements.append(dict(zip(rows.column_names, row)))
+    except Exception as e:
+        st.info("暂无 AI 基线强化数据 — 请先在 VM 上运行 BaselineReinforcementService.reinforce_all_users()")
+        return
+
+    if not refinements:
+        st.info("暂无 AI 基线强化数据")
+        return
+
+    # 统计头
+    attack_count = sum(1 for r in refinements if r.get("pattern_type") == "ATTACK")
+    behavior_count = sum(1 for r in refinements if r.get("pattern_type") == "BEHAVIOR_CHANGE")
+    st.markdown(f"""
+    <div class="metric-group">
+        <div class="metric-item"><div class="value">{len(refinements)}</div><div class="label">已强化用户</div></div>
+        <div class="metric-item"><div class="value">{attack_count}</div><div class="label">攻击模式</div></div>
+        <div class="metric-item"><div class="value">{behavior_count}</div><div class="label">行为变化</div></div>
+        <div class="metric-item"><div class="value">{sum(1 for r in refinements if r.get('is_baseline_stale'))}</div><div class="label">基线过时</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 每一条强化建议用 risk-card 展示
+    for ref in refinements:
+        pt = (ref.get("pattern_type") or "UNKNOWN").upper()
+        rl_css = "critical" if pt == "ATTACK" else "high" if pt in ("BEHAVIOR_CHANGE",) else "low"
+
+        import json
+        adjustments = []
+        try:
+            raw = ref.get("suggested_adjustments", "[]")
+            adjustments = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            adjustments = []
+
+        new_features = []
+        try:
+            raw2 = ref.get("new_watch_features", "[]")
+            new_features = json.loads(raw2) if isinstance(raw2, str) else (raw2 or [])
+        except Exception:
+            new_features = []
+
+        stale_raw = ref.get("stale_features", "[]")
+        try:
+            stale_list = json.loads(stale_raw) if isinstance(stale_raw, str) else (stale_raw or [])
+        except Exception:
+            stale_list = []
+
+        adj_html = ""
+        for a in adjustments[:5]:
+            sev = (a.get("severity") or "MEDIUM").lower()
+            adj_html += f"""
+            <div style="padding:0.3rem 0;border-bottom:1px solid #eee;font-size:0.83rem;">
+                <span class="badge {sev}" style="margin-right:0.4rem;">{a.get('severity','MEDIUM')}</span>
+                <strong>{a.get('field','')}</strong>: {a.get('suggested_change','')}
+            </div>
+            """
+
+        new_feat_html = ""
+        for nf in new_features[:3]:
+            new_feat_html += f"<span class='badge info' style='margin-right:0.3rem;'>{nf.get('feature','')}: {nf.get('value','')}</span>"
+
+        confidence = ref.get("confidence", 0)
+        summary = ref.get("analysis_summary", "")
+        username = ref.get("username", "-")
+        vt = str(ref.get("validated_at", ""))[:16]
+
+        st.markdown(f"""
+        <div class="risk-card {rl_css}">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span class="card-title">🧬 {username}</span>
+                <span>
+                    <span class="badge {rl_css}">{pt}</span>
+                    <span class="badge info" style="margin-left:0.3rem;">{confidence:.0%}</span>
+                </span>
+            </div>
+            <div class="card-meta">{vt} · {ref.get('ai_platform','-')}</div>
+            <div style="margin:0.4rem 0;font-size:0.85rem;">{summary}</div>
+            {f"<div style='margin:0.2rem 0;font-size:0.8rem;color:var(--text-secondary);'>薄弱特征: {', '.join(stale_list)}</div>" if stale_list else ""}
+            {adj_html}
+            {f"<div style='margin-top:0.3rem;'>{new_feat_html}</div>" if new_feat_html else ""}
+        </div>
+        """, unsafe_allow_html=True)
+
 
 def show_history_search():
     """显示历史查询"""
