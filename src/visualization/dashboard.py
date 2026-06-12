@@ -1885,7 +1885,6 @@ def show_ueba_ranking():
     selected_user = st.selectbox("选择用户", real_usernames, label_visibility="collapsed")
     behavior_result = analyze_behavior_from_clickhouse(
         username=selected_user,
-        risk_filter=risk_filter,
         limit=100,
     )
 
