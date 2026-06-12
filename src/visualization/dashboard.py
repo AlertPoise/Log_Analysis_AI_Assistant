@@ -99,106 +99,43 @@ st.set_page_config(
 
 
 def generate_pdf_report(report_type, data=None):
-    """生成 PDF 报告"""
-    # 使用 fpdf 库生成 PDF，处理中文编码问题
+    """生成 PDF 报告，返回 bytes。非 ASCII 字符转 XML 实体。"""
     from fpdf import FPDF
-    import io
-    
-    # 创建 PDF 对象
     pdf = FPDF()
     pdf.add_page()
-    
-    # 只使用 ASCII 字符，确保不会出现编码错误
-    
-    if report_type == "security":
-        # 安全简报 PDF
-        pdf.set_font("Arial", 'B', 16)
-        pdf.cell(0, 10, "Security Report", 0, 1, 'C')
-        pdf.ln(10)
-        
-        pdf.set_font("Arial", size=12)
-        # 报告日期
-        pdf.cell(0, 10, f"Date: {datetime.now().strftime('%Y-%m-%d')}", 0, 1)
-        pdf.ln(5)
-        
-        # 整体安全评分
-        pdf.cell(0, 10, "Overall Security Score: 75/100", 0, 1)
-        pdf.ln(10)
-        
-        # 关键指标
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 10, "Key Metrics:", 0, 1)
-        pdf.set_font("Arial", size=12)
-        pdf.cell(0, 10, "- Total Logs: 125,458 (+12%)", 0, 1)
-        pdf.cell(0, 10, "- Abnormal Events: 12 (+3)", 0, 1)
-        pdf.cell(0, 10, "- High Risk Users: 5 (-2)", 0, 1)
-        pdf.cell(0, 10, "- Disposed: 8 (+5)", 0, 1)
-        pdf.ln(10)
-        
-        # 主要威胁
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 10, "Main Threats:", 0, 1)
-        pdf.set_font("Arial", size=12)
-        pdf.cell(0, 10, "1. Account Takeover: 3 cases", 0, 1)
-        pdf.cell(0, 10, "2. Abnormal Access: 15 cases", 0, 1)
-        pdf.cell(0, 10, "3. Brute Force: 8 cases", 0, 1)
-        pdf.ln(10)
-        
-        # 处置建议
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 10, "Disposal Suggestions:", 0, 1)
-        pdf.set_font("Arial", size=12)
-        pdf.cell(0, 10, "- Immediately freeze high-risk accounts", 0, 1)
-        pdf.cell(0, 10, "- Strengthen remote login verification", 0, 1)
-        pdf.cell(0, 10, "- Enable multi-factor authentication", 0, 1)
-    
-    elif report_type == "history":
-        # 历史查询结果 PDF
-        pdf.set_font("Arial", 'B', 16)
-        pdf.cell(0, 10, "History Query Report", 0, 1, 'C')
-        pdf.ln(10)
-        
-        pdf.set_font("Arial", size=12)
-        # 报告日期
-        pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 0, 1)
-        pdf.ln(10)
-        
-        # 查询结果
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 10, "Query Results:", 0, 1)
-        pdf.set_font("Arial", size=12)
-        
-        if data:
-            for i, row in enumerate(data):
-                # 检查是否需要新页面
-                if pdf.get_y() > 250:
-                    pdf.add_page()
-                    pdf.set_font("Arial", size=12)
-                # 只显示时间和ID，避免中文编码问题
-                pdf.cell(0, 10, f"{i+1}. {row['时间']} - ID: {i+1}", 0, 1)
-        else:
-            pdf.cell(0, 10, "No results found", 0, 1)
-    
-    # 保存 PDF 到内存
-    try:
-        # 尝试生成 PDF
-        pdf_output = io.BytesIO()
-        # 使用更简单的方式生成 PDF
-        pdf_output.write(pdf.output(dest='S').encode('latin-1', errors='ignore'))
-        pdf_output.seek(0)
-        return pdf_output
-    except Exception as e:
-        # 如果 PDF 生成失败，创建一个简单的 PDF
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Arial", size=12)
-        pdf.cell(0, 10, "Report Generated", 0, 1)
-        pdf.cell(0, 10, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 0, 1)
-        pdf.cell(0, 10, "PDF generation successful", 0, 1)
-        pdf_output = io.BytesIO()
-        pdf_output.write(pdf.output(dest='S').encode('latin-1', errors='ignore'))
-        pdf_output.seek(0)
-        return pdf_output
+    pdf.set_font("Helvetica", size=10)
+
+    def _safe(t: str) -> str:
+        return t.encode('ascii', errors='replace').decode('ascii')
+
+    if report_type == "history" and data:
+        pdf.set_font("Helvetica", style="B", size=14)
+        pdf.cell(0, 10, "History Query Report", new_x="LMARGIN", new_y="NEXT", align="C")
+        pdf.set_font("Helvetica", size=9)
+        pdf.cell(0, 8, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(4)
+
+        cols = ["Time", "User", "Type", "IP", "Status", "Location", "Risk"]
+        widths = [35, 25, 20, 35, 20, 25, 30]
+        pdf.set_font("Helvetica", style="B", size=8)
+        for col, w in zip(cols, widths):
+            pdf.cell(w, 7, col, border=1)
+        pdf.ln()
+
+        pdf.set_font("Helvetica", size=7)
+        for row in data[:100]:
+            if pdf.get_y() > 260:
+                pdf.add_page()
+                pdf.set_font("Helvetica", size=7)
+            vals = [_safe(str(row.get(c, "")))[:14] for c in ["时间", "用户", "类型", "IP", "状态", "地点", "风险等级"]]
+            for v, w in zip(vals, widths):
+                pdf.cell(w, 6, v, border=1)
+            pdf.ln()
+    else:
+        pdf.set_font("Helvetica", size=12)
+        pdf.cell(0, 10, "No data available", new_x="LMARGIN", new_y="NEXT")
+
+    return bytes(pdf.output())
 
 def init_session_state():
     """初始化 session state"""
@@ -1754,13 +1691,6 @@ def _render_realtime_log_list(log_type: str, is_running: bool) -> None:
 
 def show_realtime_logs():
     """显示实时日志流"""
-    st.markdown("""
-    <div class="page-header">
-        <h2>📡 实时日志流</h2>
-        <span class="subtitle">实时采集 · 秒级刷新</span>
-    </div>
-    """, unsafe_allow_html=True)
-
     # 控制栏 — 一行紧凑布局
     ctrl = st.columns([2, 2, 2, 1])
     with ctrl[0]:
@@ -1828,13 +1758,6 @@ def _rl_css_class(level: str) -> str:
 
 def show_ueba_ranking():
     """显示 UEBA 异常用户排行"""
-    st.markdown("""
-    <div class="page-header">
-        <h2>👥 UEBA 异常用户排行</h2>
-        <span class="subtitle">基于行为基线 · 识别异常用户</span>
-    </div>
-    """, unsafe_allow_html=True)
-
     # 筛选栏
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -2039,13 +1962,6 @@ def show_ueba_ranking():
 
 def show_security_score():
     """显示安全评分看板"""
-    st.markdown("""
-    <div class="page-header">
-        <h2>🛡️ 安全评分看板</h2>
-        <span class="subtitle">整体安全态势 · 实时监控</span>
-    </div>
-    """, unsafe_allow_html=True)
-
     # 指标行 (CSS metric-group 替代 st.columns + st.metric)
     metrics = get_security_metrics()
     score_color = "#d32f2f" if metrics["security_score"] < 50 else "#f57c00" if metrics["security_score"] < 75 else "#2e7d32"
@@ -2114,13 +2030,6 @@ def show_security_score():
 
 
 def show_ai_suggestions():
-    st.markdown("""
-    <div class="page-header">
-        <h2>🧠 AI 分析 + 强化基线</h2>
-        <span class="subtitle">用户基线分析 · AI 智能分析 · 基线强化建议</span>
-    </div>
-    """, unsafe_allow_html=True)
-
     # 筛选栏
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
@@ -2273,13 +2182,6 @@ def show_ai_suggestions():
     # AI 基线强化建议区块（合并到同一页面底部）
     # ================================================================
     st.markdown("<hr style='margin:1.2rem 0;border-color:#ddd;border-width:2px;'>", unsafe_allow_html=True)
-    st.markdown("""
-    <div class="page-header">
-        <h2>🧬 AI 基线强化</h2>
-        <span class="subtitle">大模型分析异常事件 · 生成基线优化建议</span>
-    </div>
-    """, unsafe_allow_html=True)
-
     _show_baseline_reinforcement()
 
 
@@ -2422,39 +2324,51 @@ def _show_baseline_reinforcement():
 
 def show_history_search():
     """显示历史查询"""
-    st.markdown("""
-    <div class="page-header">
-        <h2>🔍 历史日志查询</h2>
-        <span class="subtitle">多条件检索 · 支持导出</span>
-    </div>
-    """, unsafe_allow_html=True)
+    # 查询条件（直接展示，不折叠）
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**📅 开始日期**")
+        start_time = st.date_input("", value=datetime.now() - timedelta(days=7), label_visibility="collapsed")
+        st.markdown("**👤 用户名**")
+        try:
+            import clickhouse_connect
+            _ch = clickhouse_connect.get_client(host=settings.clickhouse_host, port=settings.clickhouse_port, username=settings.clickhouse_user, password=settings.clickhouse_password, database=settings.clickhouse_database)
+            _users = _ch.query("SELECT DISTINCT username FROM log_analysis.logs_structured WHERE username != '' ORDER BY username LIMIT 500")
+            _ch.close()
+            user_options = ["全部"] + [str(r[0]) for r in _users.result_rows if r[0]]
+        except Exception:
+            user_options = ["全部"]
+        username = st.selectbox("", user_options, label_visibility="collapsed")
+        st.markdown("**📋 日志类型**")
+        log_type = st.selectbox("", ["全部", "vpn", "api", "system", "network"], label_visibility="collapsed")
+    with col2:
+        st.markdown("**📅 结束日期**")
+        end_time = st.date_input(" ", value=datetime.now(), label_visibility="collapsed")
+        st.markdown("**🌐 IP 地址**")
+        try:
+            import clickhouse_connect
+            _ch = clickhouse_connect.get_client(host=settings.clickhouse_host, port=settings.clickhouse_port, username=settings.clickhouse_user, password=settings.clickhouse_password, database=settings.clickhouse_database)
+            _ips = _ch.query("SELECT DISTINCT source_ip FROM log_analysis.logs_structured WHERE source_ip != '' ORDER BY source_ip LIMIT 500")
+            _ch.close()
+            ip_options = ["全部"] + [str(r[0]) for r in _ips.result_rows if r[0]]
+        except Exception:
+            ip_options = ["全部"]
+        source_ip = st.selectbox("", ip_options, label_visibility="collapsed")
+        st.markdown("**📊 状态**")
+        status = st.selectbox(" ", ["全部", "SUCCESS", "FAIL", "WARNING"], label_visibility="collapsed")
 
-    # 查询条件 — 默认不展开
-    with st.expander("📋 查询条件", expanded=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            start_time = st.date_input("开始日期", value=datetime.now() - timedelta(days=7))
-            username = st.text_input("用户名", placeholder="全部用户留空", label_visibility="collapsed")
-            log_type = st.selectbox("日志类型", ["全部", "vpn", "api", "system", "network"], label_visibility="collapsed")
-        with col2:
-            end_time = st.date_input("结束日期", value=datetime.now())
-            source_ip = st.text_input("IP 地址", placeholder="全部 IP 留空", label_visibility="collapsed")
-            status = st.selectbox("状态", ["全部", "SUCCESS", "FAIL", "WARNING"], label_visibility="collapsed")
+    q_cols = st.columns([4, 1, 1])
+    with q_cols[1]:
+        search_triggered = st.button("🔍 查询", type="primary", use_container_width=True)
+    with q_cols[2]:
+        if st.button("🗑️ 重置", use_container_width=True):
+            st.rerun()
 
-        # 查询按钮行
-        q_cols = st.columns([4, 1, 1])
-        with q_cols[1]:
-            search_triggered = st.button("🔍 查询", type="primary", use_container_width=True)
-        with q_cols[2]:
-            if st.button("🗑️ 重置", use_container_width=True):
-                st.rerun()
-
-    # 查询结果
     search_results = search_history_logs(
         start_time=start_time,
         end_time=end_time,
-        username=username if username else None,
-        source_ip=source_ip if source_ip else None,
+        username=username if username and username != "全部" else None,
+        source_ip=source_ip if source_ip and source_ip != "全部" else None,
         log_type=log_type,
         status=status,
     )
@@ -2462,28 +2376,20 @@ def show_history_search():
     df_results = pd.DataFrame(search_results)
     st.dataframe(df_results, use_container_width=True, height=350)
 
-    # 摘要行
+    # 导出功能
     meta_cols = st.columns([2, 1, 1, 1])
     with meta_cols[0]:
         st.caption(f"共 {len(search_results)} 条记录")
     with meta_cols[1]:
-        if st.button("📥 CSV", use_container_width=True):
-            st.info("导出待实现")
+        csv_data = pd.DataFrame(search_results).to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 CSV", data=csv_data, file_name=f"query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
     with meta_cols[2]:
-        if st.button("📥 Excel", use_container_width=True):
-            st.info("导出待实现")
+        excel_buf = io.BytesIO()
+        pd.DataFrame(search_results).to_excel(excel_buf, index=False, engine='openpyxl')
+        st.download_button("📥 Excel", data=excel_buf.getvalue(), file_name=f"query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
     with meta_cols[3]:
-        if st.button("📄 PDF", use_container_width=True):
-            pdf_output = generate_pdf_report("history", search_results)
-            st.download_button(
-                label="下载 PDF",
-                data=pdf_output or b"",
-                file_name=f"query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                mime="application/pdf",
-            )
-
-    # 查询统计标签（non-breaking info）
-    st.caption("📈 查询统计: 结果数 {} · 高危事件 — · 涉及用户 —".format(len(search_results)))
+        pdf_data = generate_pdf_report("history", search_results)
+        st.download_button("📥 PDF", data=pdf_data or b"", file_name=f"query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf", mime="application/pdf", use_container_width=True)
 
 def manual_ai_analyze(anomaly_id: int, username: str, description: str, related_log_ids: list):
     """手动触发 AI 分析并更新 anomaly_detection 表"""
