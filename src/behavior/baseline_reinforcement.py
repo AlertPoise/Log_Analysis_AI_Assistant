@@ -548,7 +548,7 @@ class BaselineReinforcementService:
         """将 AI 强化建议写入 baseline_ai_refinements 表。"""
         self.ensure_refinements_table()
 
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
         row = {
             "username": username,
             "model_version": model_version,
@@ -569,7 +569,7 @@ class BaselineReinforcementService:
             ),
             "confidence": float(suggestions.get("confidence", 0)),
             "ai_platform": self._ai.platform if hasattr(self._ai, "platform") else "unknown",
-            "validated_at": now_str,
+            "validated_at": now_dt,
             "anomaly_event_count": int(suggestions.get("anomaly_event_count", 0) or 0),
             "raw_response": json.dumps(suggestions, ensure_ascii=False),
         }
