@@ -570,9 +570,7 @@ class BaselineReinforcementService:
             "confidence": float(suggestions.get("confidence", 0)),
             "ai_platform": self._ai.platform if hasattr(self._ai, "platform") else "unknown",
             "validated_at": now_str,
-            "anomaly_event_count": len(
-                suggestions.get("anomaly_event_count") or 0
-            ),
+            "anomaly_event_count": int(suggestions.get("anomaly_event_count", 0) or 0),
             "raw_response": json.dumps(suggestions, ensure_ascii=False),
         }
 
