@@ -1,6 +1,6 @@
 # streamlit 前端
 streamlit==1.56.0
-fpdf==1.7.2
+fpdf2>=2.8.0
 
 loguru>=0.7.2,<1.0.0
 pydantic>=2.5.0,<3.0.0
@@ -13,6 +13,9 @@ pydantic_settings
 kafka-python==2.3.0
 clickhouse-connect>=0.7.0    # ClickHouse 客户端驱动
 elasticsearch>=8.0.0         # Elasticsearch 客户端（可选，如不使用可注释）
+
+# Excel 导出
+openpyxl>=3.1.0
 
 # AI API
 openai>=1.0.0

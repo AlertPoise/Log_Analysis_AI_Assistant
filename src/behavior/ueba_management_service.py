@@ -16,6 +16,7 @@ import time
 from typing import Any
 from uuid import uuid4
 
+from ..utils.config import settings as app_settings
 from .aggregate_merger import AggregateMerger
 from .baseline_builder import BaselineBuilder
 from .baseline_store import BaselineStore
@@ -37,12 +38,12 @@ def _default_client_factory(database: str) -> Any:
     import clickhouse_connect
 
     return clickhouse_connect.get_client(
-        host=os.getenv("CLICKHOUSE_HOST", "localhost"),
-        port=int(os.getenv("CLICKHOUSE_PORT", "8123")),
-        username=os.getenv("CLICKHOUSE_USER", "default"),
-        password=os.getenv("CLICKHOUSE_PASSWORD", ""),
+        host=app_settings.clickhouse_host,
+        port=app_settings.clickhouse_port,
+        username=app_settings.clickhouse_user,
+        password=app_settings.clickhouse_password,
         database=database,
-        secure=os.getenv("CLICKHOUSE_SECURE", "false").lower() == "true",
+        secure=getattr(app_settings, 'clickhouse_secure', False),
     )
 
 

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from dataclasses import asdict
 from .utils.config import settings
 from .utils.logger import get_logger
+import clickhouse_connect
 
 # 导入存储模块
 from .storage.kafka_client import KafkaClient
@@ -32,6 +33,11 @@ from .collectors.flume import FlumeCollector
 
 # 导入 AI 模块
 from .ai.analyzer import AIAnalyzer
+
+# 导入 AI 基线强化
+from .ai.client import AIClient as ReinforcementAIClient
+from .behavior.baseline_store import BaselineStore as ReinforcementBaselineStore
+from .behavior.baseline_reinforcement import BaselineReinforcementService
 
 logger = get_logger(__name__)
 
@@ -699,6 +705,67 @@ class LogAnalysisService:
         except Exception as e:
             logger.warning(f"⚠️  AI 分析器初始化失败: {e}")
 
+    def _run_ai_reinforcement(self):
+        """自动强化有 HIGH/CRITICAL 异常事件的用户基线。"""
+        logger.info("[3.5/4] AI 基线强化...")
+        try:
+            ch = clickhouse_connect.get_client(
+                host=settings.clickhouse_host, port=settings.clickhouse_port,
+                username=settings.clickhouse_user, password=settings.clickhouse_password,
+                database=settings.clickhouse_database,
+            )
+            # 检查是否有 validation 结果
+            cnt = ch.query("SELECT count() FROM ueba_validation_results")
+            if cnt.result_rows and cnt.result_rows[0][0] == 0:
+                logger.info("  无 validation 结果，跳过 AI 强化")
+                ch.close()
+                return
+
+            # 查有 HIGH/CRITICAL 的用户
+            high_risk = ch.query("""
+                SELECT DISTINCT username FROM ueba_validation_results
+                WHERE ueba_risk_level IN ('HIGH','CRITICAL') AND username != ''
+            """)
+            users = [str(r[0]) for r in high_risk.result_rows if r[0]]
+            if not users:
+                logger.info("  无高风险用户，跳过 AI 强化")
+                ch.close()
+                return
+
+            config = settings.current_ai_config
+            ai = ReinforcementAIClient(
+                api_key=config["api_key"],
+                platform=config["platform"],
+                model=config.get("model"),
+            )
+            bs = ReinforcementBaselineStore(client=ch, database=settings.clickhouse_database)
+            service = BaselineReinforcementService(
+                clickhouse_client=ch, ai_client=ai, baseline_store=bs,
+            )
+
+            end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            start = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+            for user in users:
+                try:
+                    r = service.reinforce_user(
+                        username=user,
+                        model_version="ueba_baseline_v1",
+                        start_time=start,
+                        end_time=end,
+                    )
+                    if r.get("success"):
+                        logger.info(f"  ✓ {user}: 强化完成")
+                    else:
+                        logger.info(f"  - {user}: {r.get('reason')}")
+                except Exception as e:
+                    logger.warning(f"  ⚠️  {user}: 强化失败 - {e}")
+
+            ch.close()
+            logger.info(f"  ✓ AI 基线强化完成，处理 {len(users)} 个用户")
+        except Exception as e:
+            logger.warning(f"  ⚠️  AI 基线强化跳过: {e}")
+
     def start_dashboard(self):
         """启动 Streamlit Dashboard"""
         logger.info("[4/4] 启动 Streamlit Dashboard...")
@@ -736,6 +803,9 @@ class LogAnalysisService:
 
         # 3. 初始化 AI 分析模块
         self.init_ai()
+
+        # 3.5 AI 基线强化（自动强化有 HIGH/CRITICAL 事件的用户）
+        self._run_ai_reinforcement()
 
         # 4. 启动 Streamlit Dashboard
         self.start_dashboard()

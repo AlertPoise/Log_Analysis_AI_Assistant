@@ -285,7 +285,7 @@ class BaselineReinforcementService:
             username, model_version=model_version
         )
         if baseline is None:
-            logger.info("reinforce_user[%s]: baseline 不存在（%s）", username, model_version)
+            logger.info("reinforce_user[{}]: baseline 不存在（{}）", username, model_version)
             return {
                 "success": False,
                 "username": username,
@@ -304,7 +304,7 @@ class BaselineReinforcementService:
         )
 
         if not anomalies:
-            logger.info("reinforce_user[%s]: 窗口内无高风险事件", username)
+            logger.info("reinforce_user[{}]: 窗口内无高风险事件", username)
             return {
                 "success": True,
                 "username": username,
@@ -332,7 +332,7 @@ class BaselineReinforcementService:
                 temperature=0.2,
             )
         except Exception as exc:
-            logger.exception("reinforce_user[%s]: AI API 调用失败", username)
+            logger.exception("reinforce_user[{}]: AI API 调用失败", username)
             return {
                 "success": False,
                 "username": username,
@@ -356,7 +356,7 @@ class BaselineReinforcementService:
         self._save_refinement(username, model_version, suggestions)
 
         logger.info(
-            "reinforce_user[%s]: 强化完成 — pattern=%s, confidence=%.2f",
+            "reinforce_user[{}]: 强化完成 — pattern={}, confidence={:.2f}",
             username,
             suggestions.get("pattern_type", "UNKNOWN"),
             suggestions.get("confidence", 0),
@@ -402,7 +402,7 @@ class BaselineReinforcementService:
             logger.info("reinforce_all_users: 窗口内无高风险用户")
             return []
 
-        logger.info("reinforce_all_users: 发现 %d 个高风险用户，开始强化", len(users))
+        logger.info("reinforce_all_users: 发现 {} 个高风险用户，开始强化", len(users))
 
         results: list[dict[str, Any]] = []
         for username in users:
@@ -417,7 +417,7 @@ class BaselineReinforcementService:
 
         success_count = sum(1 for r in results if r.get("success"))
         logger.info(
-            "reinforce_all_users: %d/%d 完成", success_count, len(results)
+            "reinforce_all_users: {}/{} 完成", success_count, len(results)
         )
         return results
 
@@ -548,7 +548,7 @@ class BaselineReinforcementService:
         """将 AI 强化建议写入 baseline_ai_refinements 表。"""
         self.ensure_refinements_table()
 
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
         row = {
             "username": username,
             "model_version": model_version,
@@ -569,10 +569,8 @@ class BaselineReinforcementService:
             ),
             "confidence": float(suggestions.get("confidence", 0)),
             "ai_platform": self._ai.platform if hasattr(self._ai, "platform") else "unknown",
-            "validated_at": now_str,
-            "anomaly_event_count": len(
-                suggestions.get("anomaly_event_count") or 0
-            ),
+            "validated_at": now_dt,
+            "anomaly_event_count": int(suggestions.get("anomaly_event_count", 0) or 0),
             "raw_response": json.dumps(suggestions, ensure_ascii=False),
         }
 
