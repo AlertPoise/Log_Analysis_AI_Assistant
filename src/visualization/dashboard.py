@@ -1195,6 +1195,18 @@ UEBA_RISK_OPTION_CODES = {
 }
 
 
+def _resolve_ueba_time_window(time_range: str) -> tuple[str, str]:
+    """将页面时间范围选项转为 (start_time, end_time) 字符串。"""
+    now = datetime.now()
+    if time_range == "最近 24 小时":
+        start = now - timedelta(hours=24)
+    elif time_range == "最近 7 天":
+        start = now - timedelta(days=7)
+    else:  # 最近 30 天
+        start = now - timedelta(days=30)
+    return start.strftime("%Y-%m-%d %H:%M:%S"), now.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _selected_ueba_risk_codes(risk_filter: list[str] | tuple[str, ...] | None) -> set[str]:
     """把 UEBA 页面风险多选映射为内部风险等级集合。"""
     if not risk_filter:
@@ -1227,24 +1239,15 @@ def get_ueba_ranking_from_clickhouse(
     limit: int = 10,
     risk_filter: list[str] | tuple[str, ...] | None = None,
 ) -> Dict[str, Any]:
-    """通过 behavior API 获取 UEBA 用户排行，保持页面原有返回结构。"""
-    start_time, end_time = _resolve_ueba_time_window(time_range)
-    selected_codes = _selected_ueba_risk_codes(risk_filter)
-    query_limit = max(limit * 5, 50)
+    """从 ClickHouse 获取用户风险排行（validation 优先 → 启发式降级）。"""
+    time_map = {"最近 24 小时": 24, "最近 7 天": 24 * 7, "最近 30 天": 24 * 30}
+    hours = time_map.get(time_range, 24)
     client = None
     try:
         client = _get_behavior_clickhouse_client()
-        result = get_behavior_dashboard_data(
-            client=client,
-            database=settings.clickhouse_database,
-            connect_timeout=10,
-        )
     except Exception as exc:
-        logger.error(f"查询 UEBA 排行失败: {exc}", exc_info=True)
+        logger.error(f"ClickHouse 连接失败: {exc}")
         return {"success": False, "ranking": [], "error": str(exc)}
-    finally:
-        if client is not None:
-            client.close()
 
     # --- 方案 A: 从 ueba_validation_results 读取真实评分 ---
     try:
@@ -1334,34 +1337,6 @@ def get_ueba_ranking_from_clickhouse(
         client.close()
         return {"success": False, "ranking": []}
 
-    ranking = []
-    for row in result.get("ranking", []):
-        risk_code = str(row.get("risk_level") or "LOW").upper()
-        if risk_code not in selected_codes:
-            continue
-        score_100 = float(row.get("max_score") or 0)
-        last_time = row.get("latest_validated_at")
-        if hasattr(last_time, "strftime"):
-            last_time_str = last_time.strftime("%Y-%m-%d %H:%M")
-        else:
-            last_time_str = str(last_time or "")[:16]
-        ranking.append({
-            "rank": len(ranking) + 1,
-            "username": row.get("username", ""),
-            "score": max(0.0, min(score_100 / 100.0, 1.0)),
-            "risk_code": risk_code,
-            "risk_level": _format_ueba_risk_level(risk_code, score_100),
-            "event_count": int(row.get("event_count") or 0),
-            "last_event_time": last_time_str,
-        })
-        if len(ranking) >= limit:
-            break
-    return {
-        "success": True,
-        "ranking": ranking,
-        "filters": result.get("filters", {}),
-        "empty_reason": result.get("meta", {}).get("empty_reason"),
-    }
 
 def _format_ueba_risk_level(score: float) -> str:
     """将 0~1 风险分映射为英文等级（与 multiselect 选项一致）。"""
