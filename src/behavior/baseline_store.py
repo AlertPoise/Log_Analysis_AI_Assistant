@@ -241,6 +241,60 @@ class BaselineStore:
                 pass
         return row
 
+    def get_user_refinements(
+        self,
+        username: str,
+        model_version: str | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """查询某个用户的最新 AI 强化建议。
+
+        Args:
+            username: 用户名。
+            model_version: 可选的模型版本过滤。
+            limit: 最多返回的强化记录数。
+
+        Returns:
+            强化建议行字典列表，按 validated_at 降序。
+        """
+        database = self.database
+        parameters: dict[str, Any] = {"username": username}
+        model_filter = ""
+        if model_version is not None:
+            model_filter = "AND model_version = %(model_version)s"
+            parameters["model_version"] = model_version
+
+        sql = f"""
+        SELECT
+            username,
+            model_version,
+            pattern_type,
+            stale_features,
+            suggested_adjustments,
+            new_watch_features,
+            reinforced_baseline_delta,
+            confidence,
+            validated_at
+        FROM {database}.baseline_ai_refinements
+        WHERE username = %(username)s
+            {model_filter}
+        ORDER BY validated_at DESC
+        LIMIT {limit}
+        """
+        rows = self._execute_query(sql, parameters)
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            entry: dict[str, Any] = dict(row)
+            for field in ("stale_features", "suggested_adjustments", "new_watch_features", "reinforced_baseline_delta"):
+                val = entry.get(field)
+                if isinstance(val, str):
+                    try:
+                        entry[field] = json.loads(val)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            result.append(entry)
+        return result
+
     # ------------------------------------------------------------------
     # 只读查询方法
     # ------------------------------------------------------------------
