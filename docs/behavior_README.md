@@ -190,6 +190,15 @@ sample_count < 20  → 不可靠基线
 | `validation_status` | 评分状态 | `VALIDATED` 表示正常评分，`NO_BASELINE` 表示无可用基线，`UNRELIABLE_BASELINE` 表示基线样本不足 |
 | `baseline_model_version` | 基线版本 | 用于确认评分所依据的基线版本 |
 
+在原有评分字段基础上，API 和 Dashboard 会追加基于 `ueba_anomaly_reasons` 的规则风险归因展示字段：
+
+- `risk_category`：风险归因分类编码。
+- `risk_category_name`：风险归因分类中文名称。
+- `risk_summary`：简短风险说明。
+- `risk_evidence_codes`：参与归因判断的原始异常原因 code。
+
+这些字段用于解释 UEBA 风险原因，不替代 `ueba_score`，不替代 `ueba_risk_level`，不使用机器学习模型，也不代表真实攻击检测结论。
+
 示例：
 
 ```text

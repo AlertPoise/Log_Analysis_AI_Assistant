@@ -1157,6 +1157,13 @@ UEBA_RISK_OPTION_CODES = {
     "🟡 低危": {"LOW"},
 }
 
+UEBA_DASHBOARD_DEMO_USERS = (
+    "fixture_user_stable_0001",
+    "fixture_user_stable_0002",
+    "fixture_user_stable_0003",
+    "fixture_user_stable_0004",
+)
+
 
 def _resolve_ueba_time_window(time_range: str) -> tuple[str, str]:
     """将页面时间范围选项转为 (start_time, end_time) 字符串。"""
@@ -1183,6 +1190,15 @@ def _selected_ueba_risk_codes(risk_filter: list[str] | tuple[str, ...] | None) -
 def _ueba_event_matches_risk(event: Dict[str, Any], selected_codes: set[str]) -> bool:
     """判断单条 UEBA 事件是否符合页面风险筛选。"""
     return str(event.get("ueba_risk_level") or "").upper() in selected_codes
+
+
+def _dashboard_demo_user_filter_sql() -> str:
+    users = ", ".join(f"'{username}'" for username in UEBA_DASHBOARD_DEMO_USERS)
+    return f"username IN ({users})"
+
+
+def _is_dashboard_demo_user(username: Any) -> bool:
+    return str(username or "") in UEBA_DASHBOARD_DEMO_USERS
 
 
 def _get_behavior_clickhouse_client():
@@ -1223,6 +1239,7 @@ def get_ueba_ranking_from_clickhouse(
         FROM {settings.clickhouse_database}.ueba_validation_results
         WHERE validated_at >= now() - INTERVAL {hours} HOUR
           AND username != ''
+          AND {_dashboard_demo_user_filter_sql()}
         GROUP BY username
         ORDER BY score DESC, event_count DESC
         LIMIT {limit}
@@ -1263,6 +1280,7 @@ def get_ueba_ranking_from_clickhouse(
         FROM {settings.clickhouse_database}.{settings.clickhouse_table}
         WHERE timestamp >= now() - INTERVAL {hours} HOUR
           AND username != ''
+          AND {_dashboard_demo_user_filter_sql()}
         GROUP BY username
         ORDER BY fail_cnt DESC, off_hours_cnt DESC, event_count DESC
         LIMIT {limit}
@@ -1756,6 +1774,16 @@ def _rl_css_class(level: str) -> str:
     return level.lower() if level.upper() in ("CRITICAL", "HIGH", "MEDIUM", "LOW") else "low"
 
 
+def _ueba_risk_type_label(event: Dict[str, Any]) -> str:
+    """UEBA 风险归因类型展示值。"""
+    return str(event.get("risk_category_name") or "未分类")
+
+
+def _ueba_risk_summary(event: Dict[str, Any]) -> str:
+    """UEBA 风险归因摘要展示值。"""
+    return str(event.get("risk_summary") or "")
+
+
 def show_ueba_ranking():
     """显示 UEBA 异常用户排行"""
     # 筛选栏
@@ -1904,6 +1932,8 @@ def show_ueba_ranking():
         rl_label = _rl_emoji(rl_raw)
         ts = str(ev.get("timestamp", "-"))[:16]
         score = ev.get("ueba_score", "-")
+        risk_type = _ueba_risk_type_label(ev)
+        risk_summary = _ueba_risk_summary(ev)
         reasons = ev.get("ueba_anomaly_reasons", [])
         # 格式化异常原因：取每条 reason 的 message，而非完整 dict
         if reasons and isinstance(reasons, list):
@@ -1924,15 +1954,8 @@ def show_ueba_ranking():
         # 折叠按钮（始终显示两行摘要）
         header_col1, header_col2 = st.columns([5, 1])
         with header_col1:
-            _has_ai = bool(reasons and isinstance(reasons, list) and any("AI_REINFORCE" in (r.get("code","") if isinstance(r,dict) else "") for r in reasons))
-            btn_label = f"⚠️ {ts}  {rl_label}  评分 {score}  ·  {status}"
-            st.markdown(f"""
-            <div style="padding:0.4rem 0;font-size:0.9rem;cursor:pointer;border-bottom:1px solid #eee;">
-                <span class="badge {rl_css}" style="margin-right:0.4rem;">{rl_label}</span>
-                <strong>{ts}</strong>  评分 {score}  ·  {status}  ·  {reason_text[:55]}{'...' if len(reason_text)>55 else ''}
-                {' <span class="badge info">🧠 AI</span>' if _has_ai else ''}
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"**{rl_label}**  {ts}  评分 {score}  ·  {status}")
+            st.markdown(f"风险类型：{risk_type}")
         with header_col2:
             btn_key = f"ev_expand_{selected_user}_{start_idx + idx}"
             if st.button("🔼" if is_expanded else "🔽", key=btn_key, use_container_width=True):
@@ -1971,12 +1994,15 @@ def show_ueba_ranking():
             det_cols = st.columns(2)
             det_data = [("来源IP", source_ip), ("目标IP", dest_ip), ("国家", country), ("城市", city),
                         ("VPN网关", vpn), ("认证方式", auth), ("协议", proto), ("动作", action),
-                        ("事件类型", event_type), ("结果", result), ("评分", score), ("状态", status)]
+                        ("事件类型", event_type), ("结果", result), ("评分", score), ("状态", status),
+                        ("风险类型", risk_type)]
             for i, (label, val) in enumerate(det_data):
                 with det_cols[i % 2]:
                     st.markdown(f"**{label}:** {val}")
             if ai_badges:
                 st.markdown(ai_badges, unsafe_allow_html=True)
+            if risk_summary:
+                st.markdown(f"**风险摘要:** {risk_summary}")
             st.markdown(f"**异常原因:** {reason_text}")
 
 
@@ -2081,7 +2107,10 @@ def show_ai_suggestions():
     try:
         result = analyze_behavior_from_clickhouse(start_time=start, end_time=end)
         if result.get("success"):
-            events_raw = result.get("events", [])
+            events_raw = [
+                ev for ev in result.get("events", [])
+                if _is_dashboard_demo_user(ev.get("username"))
+            ]
     except Exception:
         pass
 
@@ -2173,6 +2202,8 @@ def show_ai_suggestions():
                 ai_txt = ev.get("AI 分析", "暂无")[:200]
                 suggestion_txt = ev.get("处置建议", "请人工审查")[:200]
                 score = ev.get("置信度", "-")
+                risk_type = _ueba_risk_type_label(ev)
+                risk_summary = _ueba_risk_summary(ev)
 
                 st.markdown(f"""
                 <div class="risk-card {rl}" style="margin:0.3rem 0 0.3rem 1.5rem;">
@@ -2181,6 +2212,8 @@ def show_ai_suggestions():
                         <span style="font-size:0.8rem;color:var(--text-secondary);">评分 {score}</span>
                     </div>
                     <div style="font-size:0.83rem;margin-top:0.3rem;line-height:1.5;">
+                        <div><strong>风险类型:</strong> {risk_type}</div>
+                        {f'<div><strong>风险摘要:</strong> {risk_summary}</div>' if risk_summary else ''}
                         <div><strong>📝</strong> {desc}</div>
                         <div style="margin-top:0.15rem;"><strong>🧠</strong> {ai_txt}</div>
                         <div style="margin-top:0.15rem;"><strong>💡</strong> {suggestion_txt}</div>

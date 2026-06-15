@@ -17,6 +17,7 @@ from typing import Any
 
 from .config import UebaBaselineConfig
 from .baseline_store import BaselineStore
+from .risk_classifier import classify_ueba_risk
 from .validation_repository import UebaValidationRepository
 from ..utils.config import settings
 
@@ -130,6 +131,17 @@ def _parse_reasons(value: Any) -> list[dict[str, Any]]:
         except (json.JSONDecodeError, TypeError):
             pass
     return []
+
+
+def _attach_risk_classification(item: dict[str, Any]) -> dict[str, Any]:
+    """Append rule-based UEBA risk attribution fields."""
+    reasons = item.get("ueba_anomaly_reasons") or []
+    reason_codes = [
+        reason.get("code") if isinstance(reason, dict) else reason
+        for reason in reasons
+    ] if isinstance(reasons, list) else reasons
+    item.update(classify_ueba_risk(reason_codes))
+    return item
 
 
 def _safe_parse_json(value: Any) -> dict[str, Any] | list[Any]:
@@ -556,7 +568,7 @@ def get_user_validation_detail(
     for row in rows:
         reason_raw = row.get("ueba_anomaly_reasons")
         reason_parsed = _parse_reasons(reason_raw)
-        events.append({
+        events.append(_attach_risk_classification({
             "validation_id": row.get("validation_id"),
             "validation_run_id": row.get("validation_run_id"),
             "source_identity": row.get("source_identity"),
@@ -573,7 +585,7 @@ def get_user_validation_detail(
             "reason_count": len(reason_parsed),
             "ueba_anomaly_reasons": reason_parsed,
             "error": row.get("error"),
-        })
+        }))
 
     try:
         events = _enrich_events_with_source_logs(events, repo)
@@ -789,7 +801,7 @@ def get_recent_risk_events(
     events: list[dict[str, Any]] = []
     for row in rows:
         reason_parsed = _parse_reasons(row.get("ueba_anomaly_reasons"))
-        events.append({
+        events.append(_attach_risk_classification({
             "validation_id": row.get("validation_id"),
             "validation_run_id": row.get("validation_run_id"),
             "timestamp": row.get("timestamp"),
@@ -803,7 +815,7 @@ def get_recent_risk_events(
             "validated_at": row.get("validated_at"),
             "reason_count": len(reason_parsed),
             "ueba_anomaly_reasons": reason_parsed,
-        })
+        }))
 
     try:
         events = _enrich_events_with_source_logs(events, repo)
@@ -876,7 +888,7 @@ def query_validation_events(
     events: list[dict[str, Any]] = []
     for row in rows:
         reason_parsed = _parse_reasons(row.get("ueba_anomaly_reasons"))
-        events.append({
+        events.append(_attach_risk_classification({
             "validation_id": row.get("validation_id"),
             "validation_run_id": row.get("validation_run_id"),
             "timestamp": row.get("timestamp"),
@@ -890,7 +902,7 @@ def query_validation_events(
             "validated_at": row.get("validated_at"),
             "reason_count": len(reason_parsed),
             "ueba_anomaly_reasons": reason_parsed,
-        })
+        }))
 
     try:
         events = _enrich_events_with_source_logs(events, repo)

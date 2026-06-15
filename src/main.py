@@ -360,6 +360,9 @@ class LogAnalysisService:
             self._run_ueba_recent_validation(
                 config.model_version,
                 run_id_prefix="main_bootstrap_initial",
+                start_time=config.start_time,
+                end_time=config.end_time,
+                log_type=config.log_type,
             )
             self._start_ueba_continuous_generation(config)
         except Exception as e:
@@ -520,16 +523,25 @@ class LogAnalysisService:
             f"reliable={details.get('reliable_user_count')}, logs={details.get('total_log_count')}"
         )
 
-    def _run_ueba_recent_validation(self, model_version: str, *, run_id_prefix: str) -> dict[str, Any]:
-        """对最近 24 小时日志执行一次 UEBA validation 并写入结果表。"""
+    def _run_ueba_recent_validation(
+        self,
+        model_version: str,
+        *,
+        run_id_prefix: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        log_type: str = "vpn",
+    ) -> dict[str, Any]:
+        """执行一次 UEBA validation 并写入结果表；默认使用最近 24 小时窗口。"""
         from src.behavior.baseline_store import BaselineStore
         from src.behavior.validation_repository import UebaValidationRepository
         from src.behavior.validation_service import UebaValidationService
 
-        end_dt = datetime.now() + timedelta(seconds=5)
-        start_dt = end_dt - timedelta(hours=24)
-        start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        if start_time is None or end_time is None:
+            end_dt = datetime.now() + timedelta(seconds=5)
+            start_dt = end_dt - timedelta(hours=24)
+            start_time = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+            end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
         validation_limit = int(os.getenv("UEBA_MAIN_VALIDATION_LIMIT", "5000"))
         validation_run_id = f"{run_id_prefix}_{int(time.time())}"
 
@@ -545,7 +557,7 @@ class LogAnalysisService:
             result = service.run(
                 start_time=start_time,
                 end_time=end_time,
-                log_type="vpn",
+                log_type=log_type,
                 model_version=model_version,
                 limit=validation_limit,
                 dry_run=False,
