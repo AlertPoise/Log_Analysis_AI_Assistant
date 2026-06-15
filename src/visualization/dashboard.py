@@ -140,7 +140,7 @@ def generate_pdf_report(report_type, data=None):
 def init_session_state():
     """初始化 session state"""
     if "current_page" not in st.session_state:
-        st.session_state.current_page = "安全评分看板"
+        st.session_state.current_page = "风险评分看板"
     if "logs_data" not in st.session_state:
         st.session_state.logs_data = []
     if "anomaly_users" not in st.session_state:
@@ -1637,7 +1637,7 @@ def create_sidebar():
         pages = [
             ("实时日志流", "📡"),
             ("UEBA 异常排行", "👥"),
-            ("安全评分看板", "🛡️"),
+            ("风险评分看板", "🛡️"),
             ("AI分析+强化基线", "🧠"),
             ("历史查询", "🔍"),
         ]
@@ -1982,7 +1982,7 @@ def show_ueba_ranking():
 
 
 def show_security_score():
-    """显示安全评分看板"""
+    """显示风险评分看板"""
     # 指标行 (CSS metric-group 替代 st.columns + st.metric)
     metrics = get_security_metrics()
     score_color = "#d32f2f" if metrics["security_score"] < 50 else "#f57c00" if metrics["security_score"] < 75 else "#2e7d32"
@@ -1992,7 +1992,7 @@ def show_security_score():
             <div class="score-ring" style="background:conic-gradient({score_color} {metrics['security_score']}%, #eee {metrics['security_score']}%);">
                 <span style="background:#1a237e;width:80px;height:80px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;">{metrics['security_score']}</span>
             </div>
-            <div class="label">安全评分</div>
+            <div class="label">风险评分</div>
         </div>
         <div class="metric-item"><div class="value">{metrics['anomaly_count']}</div><div class="label">今日异常事件</div></div>
         <div class="metric-item"><div class="value">{metrics['high_risk_count']}</div><div class="label">高危用户数</div></div>
@@ -2003,7 +2003,7 @@ def show_security_score():
     # 趋势 + 分布
     trend_col, dist_col = st.columns([3, 2])
     with trend_col:
-        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📈 安全评分趋势（近7天）</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📈 风险趋势（近7天）</div>", unsafe_allow_html=True)
         score_data = get_security_trend(days=7)
         st.line_chart(score_data.set_index("日期")["安全评分"], height=200)
 
@@ -2012,42 +2012,35 @@ def show_security_score():
         risk_data = get_risk_distribution()
         st.bar_chart(risk_data.set_index("风险等级"), height=200)
 
-    # 威胁类型 + 日报
-    threat_col, report_col = st.columns([1, 1])
-    with threat_col:
-        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>🎯 威胁类型统计</div>", unsafe_allow_html=True)
-        threat_data = get_threat_stats()
-        st.bar_chart(threat_data.set_index("威胁类型"), height=200)
+    # 风险简报
+    st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📄 风险简报</div>", unsafe_allow_html=True)
 
-    with report_col:
-        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📄 安全简报</div>", unsafe_allow_html=True)
-
-        try:
-            import clickhouse_connect
-            ch = clickhouse_connect.get_client(
-                host=settings.clickhouse_host, port=settings.clickhouse_port,
-                username=settings.clickhouse_user, password=settings.clickhouse_password,
-                database=settings.clickhouse_database,
-            )
-            total = ch.query("SELECT count() FROM logs_structured").result_rows[0][0]
-            users = ch.query("SELECT uniq(username) FROM logs_structured WHERE username != ''").result_rows[0][0]
-            validated = ch.query("SELECT count() FROM ueba_validation_results").result_rows[0][0]
-            ch.close()
-            brief = f"""
+    try:
+        import clickhouse_connect
+        ch = clickhouse_connect.get_client(
+            host=settings.clickhouse_host, port=settings.clickhouse_port,
+            username=settings.clickhouse_user, password=settings.clickhouse_password,
+            database=settings.clickhouse_database,
+        )
+        total = ch.query("SELECT count() FROM logs_structured").result_rows[0][0]
+        users = ch.query("SELECT uniq(username) FROM logs_structured WHERE username != ''").result_rows[0][0]
+        validated = ch.query("SELECT count() FROM ueba_validation_results").result_rows[0][0]
+        ch.close()
+        brief = f"""
 <div style="background:var(--bg-card);border-radius:10px;padding:1rem;box-shadow:var(--border-card);font-size:0.85rem;line-height:1.7;color:var(--text-primary);">
     📅 <strong>{datetime.now().strftime('%Y-%m-%d')}</strong><br>
     📊 日志总量: {total:,} 条<br>
     👥 活跃用户: {users} 人<br>
     ✅ 已评分事件: {int(validated or 0):,} 条<br>
-    🚦 安全评分: {metrics['security_score']}/100<br>
+    🚦 风险评分: {metrics['security_score']}/100<br>
     🔴 高危用户: {metrics['high_risk_count']} 人<br>
     🟠 异常事件: {metrics['anomaly_count']} 起
 </div>
 """
-        except Exception:
-            brief = '<div style="color:#999;font-size:0.85rem;">暂无数据，请先采集日志并运行 UEBA。</div>'
+    except Exception:
+        brief = '<div style="color:#999;font-size:0.85rem;">暂无数据，请先采集日志并运行 UEBA。</div>'
 
-        st.markdown(brief, unsafe_allow_html=True)
+    st.markdown(brief, unsafe_allow_html=True)
 
 
 def _save_human_feedback(username: str, model_version: str, stale_feature: str, decision: int):
@@ -2601,7 +2594,7 @@ def main():
         show_realtime_logs()
     elif st.session_state.current_page == "UEBA 异常排行":
         show_ueba_ranking()
-    elif st.session_state.current_page == "安全评分看板":
+    elif st.session_state.current_page == "风险评分看板":
         show_security_score()
     elif st.session_state.current_page == "AI分析+强化基线":
         show_ai_suggestions()
