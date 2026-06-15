@@ -2060,13 +2060,15 @@ def _save_human_feedback(username: str, model_version: str, stale_feature: str, 
 
 
 def show_ai_suggestions():
-    col1, col2, col3 = st.columns([1, 1, 1])
+    col1, col2 = st.columns(2)
     with col1:
-        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"], index=2, label_visibility="collapsed")
+        st.markdown("**📅 时间范围**")
+        time_range = st.selectbox("", ["最近 24 小时", "最近 7 天", "最近 30 天"], index=2, label_visibility="collapsed")
+        st.markdown("**⚠️ 风险等级**")
+        risk_filter = st.selectbox(" ", ["全部", "CRITICAL", "HIGH", "MEDIUM", "LOW"], label_visibility="collapsed")
     with col2:
-        risk_filter = st.selectbox("风险等级", ["全部", "CRITICAL", "HIGH", "MEDIUM", "LOW"], label_visibility="collapsed")
-    with col3:
-        status_filter = st.selectbox("处置状态", ["全部", "待处置", "无基线", "基线不可靠"], label_visibility="collapsed")
+        st.markdown("**📋 处置状态**")
+        status_filter = st.selectbox("  ", ["全部", "待处置", "无基线", "基线不可靠"], label_visibility="collapsed")
 
     # 只获取事件数据（不调 AI API），秒出
     from collections import defaultdict
@@ -2155,32 +2157,6 @@ def show_ai_suggestions():
             </div>
             """, unsafe_allow_html=True)
 
-            # 三键反馈
-            fb_key = f"fb_{username}"
-            fb_done_key = f"fb_done_{username}"
-            if fb_done_key not in st.session_state:
-                st.session_state[fb_done_key] = False
-
-            if st.session_state[fb_done_key]:
-                st.success("✅ 感谢反馈！")
-            else:
-                fb_cols = st.columns([1, 1, 1, 3])
-                with fb_cols[0]:
-                    if st.button("✅ 确认违规", key=f"{fb_key}_confirm", use_container_width=True):
-                        _save_human_feedback(username, "ueba_baseline_v1", "general", 1)
-                        st.session_state[fb_done_key] = True
-                        st.rerun()
-                with fb_cols[1]:
-                    if st.button("❌ 误报", key=f"{fb_key}_fp", use_container_width=True):
-                        _save_human_feedback(username, "ueba_baseline_v1", "general", 2)
-                        st.session_state[fb_done_key] = True
-                        st.rerun()
-                with fb_cols[2]:
-                    if st.button("⏭️ 跳过", key=f"{fb_key}_skip", use_container_width=True):
-                        st.session_state[fb_done_key] = True
-                        st.rerun()
-            st.markdown("<hr style='margin:0.3rem 0;border-color:#eee;'>", unsafe_allow_html=True)
-
         # 展开显示事件列表
         expand_key_u = f"ai_ev_expand_{username}"
         if expand_key_u not in st.session_state:
@@ -2252,10 +2228,25 @@ def _show_baseline_reinforcement():
             ORDER BY validated_at DESC
             LIMIT 20
         """)
-        ch.close()
         refinements = []
+        seen = set()
+        processed = set()
         for row in rows.result_rows:
-            refinements.append(dict(zip(rows.column_names, row)))
+            r = dict(zip(rows.column_names, row))
+            u = str(r.get("username", ""))
+            if u and u not in seen:
+                seen.add(u)
+                refinements.append(r)
+
+        # 排除已有人工反馈的用户
+        try:
+            fb_rows = ch.query("SELECT DISTINCT username FROM log_analysis.human_feedback")
+            for row in fb_rows.result_rows:
+                processed.add(str(row[0]))
+        except Exception:
+            pass
+        refinements = [r for r in refinements if r.get("username", "") not in processed]
+        ch.close()
     except Exception:
         refinements = []
 
@@ -2314,6 +2305,11 @@ def _show_baseline_reinforcement():
         </div>
         """, unsafe_allow_html=True)
 
+    # 排除本次会话中已反馈的用户
+    if "fb_processed_users" not in st.session_state:
+        st.session_state.fb_processed_users = set()
+    refinements = [r for r in refinements if r.get("username", "") not in st.session_state.fb_processed_users]
+
     # 每一条强化建议展示
     for ref in refinements:
         pt = (ref.get("pattern_type") or "UNKNOWN").upper()
@@ -2365,6 +2361,28 @@ def _show_baseline_reinforcement():
                 """, unsafe_allow_html=True)
             for nf in new_features[:3]:
                 st.markdown(f"<span class='badge info'>{nf.get('feature','')}: {nf.get('value','')}</span>", unsafe_allow_html=True)
+
+        # 双键反馈（确认违规 / 误报）
+        fb_uid = f"fb_{ref.get('validated_at','')}_{username}"
+        if st.session_state.get(fb_uid, False):
+            st.success(f"✅ 已处理 — {username}")
+        else:
+            fb_cols = st.columns([1, 1, 4])
+            with fb_cols[0]:
+                if st.button("✅ 确认违规", key=f"{fb_uid}_ok", use_container_width=True):
+                    _save_human_feedback(username, ref.get("model_version", "ueba_baseline_v1"), "general", 1)
+                    st.session_state[fb_uid] = True
+                    st.session_state.fb_processed_users.add(username)
+                    st.success("✅ 已提交确认，正在刷新...")
+                    st.rerun()
+            with fb_cols[1]:
+                if st.button("❌ 误报", key=f"{fb_uid}_fp", use_container_width=True):
+                    _save_human_feedback(username, ref.get("model_version", "ueba_baseline_v1"), "general", 2)
+                    st.session_state[fb_uid] = True
+                    st.session_state.fb_processed_users.add(username)
+                    st.success("✅ 已提交误报，正在刷新...")
+                    st.rerun()
+        st.markdown("<hr style='margin:0.3rem 0;border-color:#eee;'>", unsafe_allow_html=True)
 
 
 def show_history_search():
