@@ -721,7 +721,7 @@ class LogAnalysisService:
             """)
             users = [str(r[0]) for r in high_risk.result_rows if r[0]]
             if not users:
-                logger.info("  无高风险用户，跳过 AI 强化")
+                logger.info("  validation 尚未产生 HIGH/CRITICAL 用户（持续验证启动后自动产生），跳过本次强化")
                 ch.close()
                 return
 
