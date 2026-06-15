@@ -429,6 +429,22 @@ class UebaScoreCalculator:
                     evidence={"stale_features": sorted(stale_set)},
                 )
 
+        # 正常行为折扣：如果用户有强化建议但当前事件本身异常原因很少，
+        # 说明 AI 过度加分了，AI 强化部分打 9 折
+        # 统计当前事件中非 AI 的异常原因数
+        non_ai_count = sum(1 for r in reasons if "AI_REINFORCE" not in r.code and r.score_delta > 0)
+        ai_total = sum(r.score_delta for r in reasons if "AI_REINFORCE" in r.code)
+        if stale_set and non_ai_count <= 2 and ai_total > 0:
+            discount = -int(ai_total * 0.1)  # 减掉 AI 部分的 10%
+            if discount < 0:
+                self._add_reason(
+                    reasons,
+                    code="AI_REINFORCE_DISCOUNT",
+                    message=f"AI 强化折扣：用户整体行为较正常，AI 加分打 9 折（-{abs(discount)}分）",
+                    score_delta=discount,
+                    evidence={"non_ai_reason_count": non_ai_count, "ai_total": ai_total, "discount_pct": 10},
+                )
+
     def _build_result(
         self,
         *,

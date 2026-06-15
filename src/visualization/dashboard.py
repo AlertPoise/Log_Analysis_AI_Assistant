@@ -1967,26 +1967,17 @@ def show_ueba_ranking():
                             seen.add(code)
                             ai_badges += f"<span class='badge info' style='margin-right:0.3rem;'>🧠 {code} +{score_delta}</span>"
 
-            st.markdown(f"""
-            <div class="risk-card {rl_css}" style="margin-top:-0.3rem;">
-                <div style="font-size:0.85rem;line-height:1.8;display:grid;grid-template-columns:1fr 1fr;gap:0.2rem 1rem;">
-                    <div><strong>来源IP:</strong> {source_ip}</div>
-                    <div><strong>目标IP:</strong> {dest_ip}</div>
-                    <div><strong>国家:</strong> {country}</div>
-                    <div><strong>城市:</strong> {city}</div>
-                    <div><strong>VPN网关:</strong> {vpn}</div>
-                    <div><strong>认证方式:</strong> {auth}</div>
-                    <div><strong>协议:</strong> {proto}</div>
-                    <div><strong>动作:</strong> {action}</div>
-                    <div><strong>事件类型:</strong> {event_type}</div>
-                    <div><strong>结果:</strong> {result}</div>
-                    <div><strong>评分:</strong> {score}</div>
-                    <div><strong>状态:</strong> {status}</div>
-                </div>
-                {f"<div style='margin-top:0.3rem;'>{ai_badges}</div>" if ai_badges else ""}
-                <div style="font-size:0.85rem;margin-top:0.3rem;color:var(--text-secondary);"><strong>异常原因:</strong> {reason_text}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            # 用原生组件展示详情，避免 HTML 渲染问题
+            det_cols = st.columns(2)
+            det_data = [("来源IP", source_ip), ("目标IP", dest_ip), ("国家", country), ("城市", city),
+                        ("VPN网关", vpn), ("认证方式", auth), ("协议", proto), ("动作", action),
+                        ("事件类型", event_type), ("结果", result), ("评分", score), ("状态", status)]
+            for i, (label, val) in enumerate(det_data):
+                with det_cols[i % 2]:
+                    st.markdown(f"**{label}:** {val}")
+            if ai_badges:
+                st.markdown(ai_badges, unsafe_allow_html=True)
+            st.markdown(f"**异常原因:** {reason_text}")
 
 
 
