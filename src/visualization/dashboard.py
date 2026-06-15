@@ -1905,18 +1905,32 @@ def show_ueba_ranking():
         ts = str(ev.get("timestamp", "-"))[:16]
         score = ev.get("ueba_score", "-")
         reasons = ev.get("ueba_anomaly_reasons", [])
-        reason_text = "; ".join(str(r) for r in reasons) if reasons else "—"
+        # 格式化异常原因：取每条 reason 的 message，而非完整 dict
+        if reasons and isinstance(reasons, list):
+            readable = []
+            for r in reasons:
+                if isinstance(r, dict):
+                    readable.append(r.get("message", str(r)))
+                else:
+                    readable.append(str(r))
+            reason_text = "; ".join(readable)
+        elif isinstance(reasons, str):
+            reason_text = reasons[:120]
+        else:
+            reason_text = "—"
         status = ev.get("validation_status", "-")
         is_expanded = (st.session_state[expand_key] == idx)
 
         # 折叠按钮（始终显示两行摘要）
         header_col1, header_col2 = st.columns([5, 1])
         with header_col1:
+            _has_ai = bool(reasons and isinstance(reasons, list) and any("AI_REINFORCE" in (r.get("code","") if isinstance(r,dict) else "") for r in reasons))
             btn_label = f"⚠️ {ts}  {rl_label}  评分 {score}  ·  {status}"
             st.markdown(f"""
             <div style="padding:0.4rem 0;font-size:0.9rem;cursor:pointer;border-bottom:1px solid #eee;">
                 <span class="badge {rl_css}" style="margin-right:0.4rem;">{rl_label}</span>
-                <strong>{ts}</strong>  评分 {score}  ·  {status}  ·  {reason_text[:60]}{'...' if len(reason_text)>60 else ''}
+                <strong>{ts}</strong>  评分 {score}  ·  {status}  ·  {reason_text[:55]}{'...' if len(reason_text)>55 else ''}
+                {' <span class="badge info">🧠 AI</span>' if _has_ai else ''}
             </div>
             """, unsafe_allow_html=True)
         with header_col2:
@@ -1938,6 +1952,21 @@ def show_ueba_ranking():
             event_type = ev.get("event_type", "-")
             result = ev.get("result", "-")
 
+            # 检查是否有 AI 强化加分
+            has_ai_boost = False
+            ai_badges = ""
+            if reasons and isinstance(reasons, list):
+                ai_items = [r for r in reasons if isinstance(r, dict) and "AI_REINFORCE" in r.get("code", "")]
+                if ai_items:
+                    has_ai_boost = True
+                    seen = set()
+                    for r in ai_items[:4]:
+                        code = r.get("code", "").replace("AI_REINFORCE_", "").replace("_", " ").title()
+                        score_delta = r.get("score_delta", 0)
+                        if code not in seen:
+                            seen.add(code)
+                            ai_badges += f"<span class='badge info' style='margin-right:0.3rem;'>🧠 {code} +{score_delta}</span>"
+
             st.markdown(f"""
             <div class="risk-card {rl_css}" style="margin-top:-0.3rem;">
                 <div style="font-size:0.85rem;line-height:1.8;display:grid;grid-template-columns:1fr 1fr;gap:0.2rem 1rem;">
@@ -1954,6 +1983,7 @@ def show_ueba_ranking():
                     <div><strong>评分:</strong> {score}</div>
                     <div><strong>状态:</strong> {status}</div>
                 </div>
+                {f"<div style='margin-top:0.3rem;'>{ai_badges}</div>" if ai_badges else ""}
                 <div style="font-size:0.85rem;margin-top:0.3rem;color:var(--text-secondary);"><strong>异常原因:</strong> {reason_text}</div>
             </div>
             """, unsafe_allow_html=True)

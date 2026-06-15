@@ -81,6 +81,8 @@ BASELINE_REINFORCEMENT_SYSTEM_PROMPT = """你是一位资深 UEBA（用户实体
 
 BASELINE_REINFORCEMENT_PROMPT = """分析以下用户的行为基线数据和近期异常事件，生成基线强化建议。
 
+**重要：所有输出内容必须使用中文，包括 analysis_summary、suggested_adjustments 中的 reason、current_value、suggested_change，以及 new_watch_features 中的 action 等字段。**
+
 ## 当前用户基线
 
 ```json
