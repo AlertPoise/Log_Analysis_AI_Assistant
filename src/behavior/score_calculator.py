@@ -31,6 +31,7 @@ class UebaScoreCalculator:
         validated_at: str | None = None,
         validation_run_id: str = "default_validation_run",
         refinements: list[dict[str, Any]] | None = None,
+        false_positive_count: int = 0,
     ) -> UebaValidationResult:
         """Calculate a validation result for one target log."""
         effective_model_version = model_version or (baseline.model_version if baseline else None)
@@ -155,7 +156,7 @@ class UebaScoreCalculator:
 
         # AI 强化规则：根据用户的强化建议额外加分
         if refinements:
-            self._apply_ai_reinforced_rules(reasons, target_log, baseline, refinements)
+            self._apply_ai_reinforced_rules(reasons, target_log, baseline, refinements, false_positive_count)
 
         score += sum(reason.score_delta for reason in reasons if reason.code != "UNRELIABLE_BASELINE")
         score = self._clamp_score(score)
@@ -338,6 +339,7 @@ class UebaScoreCalculator:
         target_log: ValidationTargetLog,
         baseline: UserBaseline,
         refinements: list[dict[str, Any]],
+        false_positive_count: int = 0,
     ) -> None:
         """根据 AI 强化建议，对匹配薄弱特征的事件额外加分。
 
@@ -428,6 +430,39 @@ class UebaScoreCalculator:
                     score_delta=5,
                     evidence={"stale_features": sorted(stale_set)},
                 )
+
+        # 正常行为折扣：如果用户有强化建议但当前事件本身异常原因很少，
+        # 说明 AI 过度加分了，AI 强化部分打 9 折
+        # 统计当前事件中非 AI 的异常原因数
+        non_ai_count = sum(1 for r in reasons if "AI_REINFORCE" not in r.code and r.score_delta > 0)
+        ai_total = sum(r.score_delta for r in reasons if "AI_REINFORCE" in r.code)
+        if stale_set and non_ai_count <= 2 and ai_total > 0:
+            discount = -int(ai_total * 0.1)  # 减掉 AI 部分的 10%
+            if discount < 0:
+                self._add_reason(
+                    reasons,
+                    code="AI_REINFORCE_DISCOUNT",
+                    message=f"AI 强化折扣：用户整体行为较正常，AI 加分打 9 折（-{abs(discount)}分）",
+                    score_delta=discount,
+                    evidence={"non_ai_reason_count": non_ai_count, "ai_total": ai_total, "discount_pct": 10},
+                )
+
+        # 置信度衰减：根据人工反馈的误报次数调整 AI 加分
+        if false_positive_count > 0:
+            fp_multiplier = {1: 0.8, 2: 0.5}.get(false_positive_count, 0.0)
+            ai_reasons = [r for r in reasons if "AI_REINFORCE" in r.code and r.score_delta > 0]
+            for r in ai_reasons:
+                original = r.score_delta
+                adjusted = max(1, int(original * fp_multiplier))
+                reduction = adjusted - original
+                if reduction < 0:
+                    self._add_reason(
+                        reasons,
+                        code="AI_REINFORCE_FP_DECAY",
+                        message=f"人工反馈：该用户被标记 {false_positive_count} 次误报，AI 加分调整 ({original}→{adjusted})",
+                        score_delta=reduction,
+                        evidence={"false_positive_count": false_positive_count, "multiplier": fp_multiplier},
+                    )
 
     def _build_result(
         self,

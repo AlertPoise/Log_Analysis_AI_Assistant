@@ -140,7 +140,7 @@ def generate_pdf_report(report_type, data=None):
 def init_session_state():
     """初始化 session state"""
     if "current_page" not in st.session_state:
-        st.session_state.current_page = "安全评分看板"
+        st.session_state.current_page = "风险评分看板"
     if "logs_data" not in st.session_state:
         st.session_state.logs_data = []
     if "anomaly_users" not in st.session_state:
@@ -1637,7 +1637,7 @@ def create_sidebar():
         pages = [
             ("实时日志流", "📡"),
             ("UEBA 异常排行", "👥"),
-            ("安全评分看板", "🛡️"),
+            ("风险评分看板", "🛡️"),
             ("AI分析+强化基线", "🧠"),
             ("历史查询", "🔍"),
         ]
@@ -1967,31 +1967,22 @@ def show_ueba_ranking():
                             seen.add(code)
                             ai_badges += f"<span class='badge info' style='margin-right:0.3rem;'>🧠 {code} +{score_delta}</span>"
 
-            st.markdown(f"""
-            <div class="risk-card {rl_css}" style="margin-top:-0.3rem;">
-                <div style="font-size:0.85rem;line-height:1.8;display:grid;grid-template-columns:1fr 1fr;gap:0.2rem 1rem;">
-                    <div><strong>来源IP:</strong> {source_ip}</div>
-                    <div><strong>目标IP:</strong> {dest_ip}</div>
-                    <div><strong>国家:</strong> {country}</div>
-                    <div><strong>城市:</strong> {city}</div>
-                    <div><strong>VPN网关:</strong> {vpn}</div>
-                    <div><strong>认证方式:</strong> {auth}</div>
-                    <div><strong>协议:</strong> {proto}</div>
-                    <div><strong>动作:</strong> {action}</div>
-                    <div><strong>事件类型:</strong> {event_type}</div>
-                    <div><strong>结果:</strong> {result}</div>
-                    <div><strong>评分:</strong> {score}</div>
-                    <div><strong>状态:</strong> {status}</div>
-                </div>
-                {f"<div style='margin-top:0.3rem;'>{ai_badges}</div>" if ai_badges else ""}
-                <div style="font-size:0.85rem;margin-top:0.3rem;color:var(--text-secondary);"><strong>异常原因:</strong> {reason_text}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            # 用原生组件展示详情，避免 HTML 渲染问题
+            det_cols = st.columns(2)
+            det_data = [("来源IP", source_ip), ("目标IP", dest_ip), ("国家", country), ("城市", city),
+                        ("VPN网关", vpn), ("认证方式", auth), ("协议", proto), ("动作", action),
+                        ("事件类型", event_type), ("结果", result), ("评分", score), ("状态", status)]
+            for i, (label, val) in enumerate(det_data):
+                with det_cols[i % 2]:
+                    st.markdown(f"**{label}:** {val}")
+            if ai_badges:
+                st.markdown(ai_badges, unsafe_allow_html=True)
+            st.markdown(f"**异常原因:** {reason_text}")
 
 
 
 def show_security_score():
-    """显示安全评分看板"""
+    """显示风险评分看板"""
     # 指标行 (CSS metric-group 替代 st.columns + st.metric)
     metrics = get_security_metrics()
     score_color = "#d32f2f" if metrics["security_score"] < 50 else "#f57c00" if metrics["security_score"] < 75 else "#2e7d32"
@@ -2001,7 +1992,7 @@ def show_security_score():
             <div class="score-ring" style="background:conic-gradient({score_color} {metrics['security_score']}%, #eee {metrics['security_score']}%);">
                 <span style="background:#1a237e;width:80px;height:80px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;">{metrics['security_score']}</span>
             </div>
-            <div class="label">安全评分</div>
+            <div class="label">风险评分</div>
         </div>
         <div class="metric-item"><div class="value">{metrics['anomaly_count']}</div><div class="label">今日异常事件</div></div>
         <div class="metric-item"><div class="value">{metrics['high_risk_count']}</div><div class="label">高危用户数</div></div>
@@ -2012,7 +2003,7 @@ def show_security_score():
     # 趋势 + 分布
     trend_col, dist_col = st.columns([3, 2])
     with trend_col:
-        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📈 安全评分趋势（近7天）</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📈 风险趋势（近7天）</div>", unsafe_allow_html=True)
         score_data = get_security_trend(days=7)
         st.line_chart(score_data.set_index("日期")["安全评分"], height=200)
 
@@ -2021,152 +2012,160 @@ def show_security_score():
         risk_data = get_risk_distribution()
         st.bar_chart(risk_data.set_index("风险等级"), height=200)
 
-    # 威胁类型 + 日报
-    threat_col, report_col = st.columns([1, 1])
-    with threat_col:
-        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>🎯 威胁类型统计</div>", unsafe_allow_html=True)
-        threat_data = get_threat_stats()
-        st.bar_chart(threat_data.set_index("威胁类型"), height=200)
+    # 风险简报
+    st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📄 风险简报</div>", unsafe_allow_html=True)
 
-    with report_col:
-        st.markdown("<div style='font-size:0.9rem;font-weight:600;margin-bottom:0.3rem;'>📄 安全简报</div>", unsafe_allow_html=True)
-
-        try:
-            import clickhouse_connect
-            ch = clickhouse_connect.get_client(
-                host=settings.clickhouse_host, port=settings.clickhouse_port,
-                username=settings.clickhouse_user, password=settings.clickhouse_password,
-                database=settings.clickhouse_database,
-            )
-            total = ch.query("SELECT count() FROM logs_structured").result_rows[0][0]
-            users = ch.query("SELECT uniq(username) FROM logs_structured WHERE username != ''").result_rows[0][0]
-            validated = ch.query("SELECT count() FROM ueba_validation_results").result_rows[0][0]
-            ch.close()
-            brief = f"""
+    try:
+        import clickhouse_connect
+        ch = clickhouse_connect.get_client(
+            host=settings.clickhouse_host, port=settings.clickhouse_port,
+            username=settings.clickhouse_user, password=settings.clickhouse_password,
+            database=settings.clickhouse_database,
+        )
+        total = ch.query("SELECT count() FROM logs_structured").result_rows[0][0]
+        users = ch.query("SELECT uniq(username) FROM logs_structured WHERE username != ''").result_rows[0][0]
+        validated = ch.query("SELECT count() FROM ueba_validation_results").result_rows[0][0]
+        ch.close()
+        brief = f"""
 <div style="background:var(--bg-card);border-radius:10px;padding:1rem;box-shadow:var(--border-card);font-size:0.85rem;line-height:1.7;color:var(--text-primary);">
     📅 <strong>{datetime.now().strftime('%Y-%m-%d')}</strong><br>
     📊 日志总量: {total:,} 条<br>
     👥 活跃用户: {users} 人<br>
     ✅ 已评分事件: {int(validated or 0):,} 条<br>
-    🚦 安全评分: {metrics['security_score']}/100<br>
+    🚦 风险评分: {metrics['security_score']}/100<br>
     🔴 高危用户: {metrics['high_risk_count']} 人<br>
     🟠 异常事件: {metrics['anomaly_count']} 起
 </div>
 """
-        except Exception:
-            brief = '<div style="color:#999;font-size:0.85rem;">暂无数据，请先采集日志并运行 UEBA。</div>'
+    except Exception:
+        brief = '<div style="color:#999;font-size:0.85rem;">暂无数据，请先采集日志并运行 UEBA。</div>'
 
-        st.markdown(brief, unsafe_allow_html=True)
+    st.markdown(brief, unsafe_allow_html=True)
+
+
+def _save_human_feedback(username: str, model_version: str, stale_feature: str, decision: int):
+    """保存人工反馈到 ClickHouse human_feedback 表。"""
+    try:
+        import clickhouse_connect
+        ch = clickhouse_connect.get_client(
+            host=settings.clickhouse_host, port=settings.clickhouse_port,
+            username=settings.clickhouse_user, password=settings.clickhouse_password,
+            database=settings.clickhouse_database,
+        )
+        ch.insert("human_feedback", [[username, model_version, stale_feature, decision, "dashboard_user"]],
+                  column_names=["username", "model_version", "stale_feature", "decision", "reviewer"])
+        ch.close()
+    except Exception as e:
+        logger.error(f"保存反馈失败: {e}")
 
 
 def show_ai_suggestions():
-    # 筛选栏
-    col1, col2, col3 = st.columns([1, 1, 1])
+    col1, col2 = st.columns(2)
     with col1:
-        time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"], index=2, label_visibility="collapsed")
+        st.markdown("**📅 时间范围**")
+        time_range = st.selectbox("", ["最近 24 小时", "最近 7 天", "最近 30 天"], index=2, label_visibility="collapsed")
+        st.markdown("**⚠️ 风险等级**")
+        risk_filter = st.selectbox(" ", ["全部", "CRITICAL", "HIGH", "MEDIUM", "LOW"], label_visibility="collapsed")
     with col2:
-        risk_filter = st.selectbox("风险等级", ["全部", "CRITICAL", "HIGH", "MEDIUM", "LOW"], label_visibility="collapsed")
-    with col3:
-        status_filter = st.selectbox("处置状态", ["全部", "待处置", "无基线", "基线不可靠"], label_visibility="collapsed")
+        st.markdown("**📋 处置状态**")
+        status_filter = st.selectbox("  ", ["全部", "待处置", "无基线", "基线不可靠"], label_visibility="collapsed")
 
-    # 缓存：相同筛选条件下 1 小时内复用结果（首次加载约 30~60 秒，后续秒开）
-    cache_key = f"ai_cache"
-    cache_meta_key = f"ai_cache_meta"
-    CACHE_TTL_SEC = 3600
+    # 只获取事件数据（不调 AI API），秒出
+    from collections import defaultdict
+    from src.behavior.api import analyze_behavior_from_clickhouse
+    time_map = {"最近 24 小时": 24, "最近 7 天": 24 * 7, "最近 30 天": 24 * 30}
+    hours = time_map.get(time_range, 24 * 7)
+    start = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    events_raw = []
+    try:
+        result = analyze_behavior_from_clickhouse(start_time=start, end_time=end)
+        if result.get("success"):
+            events_raw = result.get("events", [])
+    except Exception:
+        pass
 
-    use_cache = False
-    if cache_key in st.session_state and cache_meta_key in st.session_state:
-        ct, cr, crf, csf = st.session_state[cache_meta_key]
-        if (datetime.now() - ct).seconds < CACHE_TTL_SEC and cr == time_range and crf == risk_filter and csf == status_filter:
-            use_cache = True
-
-    if use_cache:
-        suggestions = st.session_state[cache_key]
-    else:
-        with st.spinner(f"正在分析异常事件 ({time_range})..."):
-            try:
-                suggestions = get_ueba_ai_suggestions(
-                    time_range=time_range,
-                    risk_filter=risk_filter,
-                    status_filter=status_filter,
-                )
-            except Exception as e:
-                logger.error(f"AI 分析异常: {e}")
-                suggestions = []
-        # 无论成功失败都存缓存，避免重复调用
-        st.session_state[cache_key] = suggestions
-        st.session_state[cache_meta_key] = (datetime.now(), time_range, risk_filter, status_filter)
-
-    if not suggestions:
-        st.info("当前时间窗口无异常事件 — 尝试选择「最近 30 天」扩大搜索范围，或确认已通过 `python -m src.main` 采集日志")
+    if not events_raw:
+        st.info("当前时间窗口无异常事件 — 尝试选择「最近 30 天」扩大搜索范围")
         return
 
-    # ---- 用户级概览（按用户分组） ----
-    from collections import defaultdict
-    user_groups: dict[str, list] = defaultdict(list)
-    for s in suggestions:
-        user_groups[s.get("用户", "未知")].append(s)
+    user_events: dict[str, list] = defaultdict(list)
+    for ev in events_raw:
+        user_events[ev.get("username", "未知")].append(ev)
 
-    # 风险等级排序（兼容中文图标和英文）
-    risk_score_map = {"🔴 高危": 0, "🟠 中危": 1, "🟡 低危": 2, "CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-    def _rl_score(rl: str) -> int:
-        for k, v in risk_score_map.items():
-            if k in str(rl).upper():
-                return v
-        return 9
-    sorted_users = sorted(user_groups.keys(), key=lambda u: min(_rl_score(s.get("风险等级", "LOW")) for s in user_groups[u]))
+    risk_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    def _user_max_risk(u: str) -> int:
+        return min((risk_order.get(ev.get("ueba_risk_level", "LOW"), 9) for ev in user_events[u]), default=9)
+    sorted_users = sorted(user_events.keys(), key=_user_max_risk)
 
-    # 用户下拉筛选
-    all_users_option = "全部用户"
-    user_options = [all_users_option] + sorted_users
-    sel_user = st.selectbox("👤 筛选用户", user_options, label_visibility="collapsed", key="ai_user_filter")
+    sel_user = st.selectbox("👤 筛选用户", ["全部用户"] + sorted_users, label_visibility="collapsed", key="ai_user_filter")
 
-    # 统计数据
-    total_users = len(user_groups)
-    total_events = len(suggestions)
-    st.markdown(f"<div style='display:flex;justify-content:space-between;font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.5rem;'><span>共 {total_users} 个用户 · {total_events} 条异常事件</span></div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='display:flex;justify-content:space-between;font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.5rem;'><span>共 {len(user_events)} 个用户 · {len(events_raw)} 条异常事件</span></div>", unsafe_allow_html=True)
 
-    # 展开状态
-    expand_key = "ai_user_expand"
-    if expand_key not in st.session_state:
-        st.session_state[expand_key] = None
-
+    # 每个用户一张卡片 + AI 按钮
     for username in sorted_users:
-        if sel_user != all_users_option and username != sel_user:
+        if sel_user != "全部用户" and username != sel_user:
             continue
 
-        items = user_groups[username]
-        max_rl = min((_rl_score(s.get("风险等级", "LOW")) for s in items), default=9)
+        events = user_events[username]
+        max_rl = _user_max_risk(username)
         rl_css = "critical" if max_rl <= 0 else "high" if max_rl <= 1 else "medium" if max_rl <= 2 else "low"
         rl_label = "CRITICAL" if max_rl <= 0 else "HIGH" if max_rl <= 1 else "MEDIUM" if max_rl <= 2 else "LOW"
-        latest_ts = max(s.get("生成时间", "") for s in items)
-        def _parse_conf(v: str) -> int:
-            raw = str(v).replace("%", "").strip()
-            return int(raw) if raw.isdigit() else 0
-        latest_score = max((_parse_conf(s.get("置信度", "0")) for s in items), default=0)
-        has_ai = any(s.get("AI 分析") and "暂无" not in s.get("AI 分析","") for s in items)
-        is_expanded = (st.session_state[expand_key] == username)
+        score_max = max((int(ev.get("ueba_score", 0) or 0) for ev in events), default=0)
+        ai_key = f"ai_result_{username}"
+        ai_done = ai_key in st.session_state
 
-        # 用户概览卡片（Streamlit 原生组件）
         with st.container():
             c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
             with c1:
                 st.markdown(f"**👤 {username}**  ")
             with c2:
-                st.markdown(f"<span class='badge {rl_css}'>{rl_label}</span>  {len(items)} 条", unsafe_allow_html=True)
+                st.markdown(f"<span class='badge {rl_css}'>{rl_label}</span>  {len(events)} 条", unsafe_allow_html=True)
             with c3:
-                if has_ai:
-                    st.markdown("<span class='badge info'>🧬 已强化</span>", unsafe_allow_html=True)
+                if ai_done:
+                    st.markdown("<span class='badge info'>🧠 已分析</span>", unsafe_allow_html=True)
             with c4:
-                btn_label = "🔼" if is_expanded else "🔽"
-                if st.button(btn_label, key=f"ai_u_{username}", use_container_width=True):
-                    st.session_state[expand_key] = None if is_expanded else username
-                    st.rerun()
-        st.caption(f"最近 {latest_ts[:10]} · 最高评分 {latest_score}")
+                if st.button("🤖 AI", key=f"ai_btn_{username}", use_container_width=True, type="primary"):
+                    with st.spinner(f"正在调用 AI 分析 {username}..."):
+                        desc = "; ".join(
+                            f"[{str(ev.get('timestamp',''))[:16]}]({ev.get('ueba_risk_level','-')}) "
+                            for ev in events[:10]
+                        )
+                        result = analyze_anomaly_with_ai(
+                            username=username,
+                            anomaly_description=f"用户 {username} 近期 {len(events)} 条异常事件。{desc}",
+                        )
+                        st.session_state[ai_key] = result
+                        st.rerun()
+        st.caption(f"最高评分 {score_max}")
 
-        # 展开后显示该用户的事件列表 + AI 分析
-        if is_expanded:
-            for ev in items[:10]:
+        # 显示 AI 结果
+        if ai_done:
+            r = st.session_state[ai_key]
+            rl = (r.get("risk_level", "MEDIUM")).lower()
+            st.markdown(f"""
+            <div class="risk-card {rl}" style="margin-top:0.3rem;">
+                <div style="display:flex;justify-content:space-between;">
+                    <span class="card-title">🤖 AI 分析 — {username}</span>
+                    <span class="badge {rl}">{r.get('risk_level','MEDIUM')}</span>
+                </div>
+                <div style="font-size:0.85rem;margin-top:0.3rem;">
+                    <div><strong>威胁:</strong> {r.get('threat_type','-')}</div>
+                    <div style="margin-top:0.15rem;"><strong>分析:</strong> {r.get('description','-')}</div>
+                    <div style="margin-top:0.15rem;"><strong>建议:</strong> {r.get('suggestion','-')}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # 展开显示事件列表
+        expand_key_u = f"ai_ev_expand_{username}"
+        if expand_key_u not in st.session_state:
+            st.session_state[expand_key_u] = False
+        if st.button("📋 查看事件详情" if not st.session_state[expand_key_u] else "🔼 收起事件", key=f"ev_toggle_{username}"):
+            st.session_state[expand_key_u] = not st.session_state[expand_key_u]
+            st.rerun()
+        if st.session_state[expand_key_u]:
+            for ev in events[:10]:
                 rl = "critical" if ev.get("风险等级") in ("CRITICAL",) else "high" if ev.get("风险等级") in ("HIGH",) else "medium"
                 ts = ev.get("生成时间", "")[:16]
                 threat = ev.get("威胁类型", "待分析")
@@ -2194,17 +2193,13 @@ def show_ai_suggestions():
 
     # 处置统计
     st.markdown("<hr style='margin:0.8rem 0;border-color:#eee;'>", unsafe_allow_html=True)
-    stat_counts = {"待处置": 0, "无基线": 0, "基线不可靠": 0}
-    for s in suggestions:
-        sts = s.get("处置状态", "")
-        if sts in stat_counts:
-            stat_counts[sts] += 1
+    stat_validated = sum(1 for ev in events_raw if ev.get("validation_status") == "VALIDATED")
+    stat_no_baseline = sum(1 for ev in events_raw if ev.get("validation_status") == "NO_BASELINE")
     st.markdown(f"""
     <div class="metric-group">
-        <div class="metric-item"><div class="value">{stat_counts['待处置']}</div><div class="label">待处置</div></div>
-        <div class="metric-item"><div class="value">{stat_counts['无基线']}</div><div class="label">无基线</div></div>
-        <div class="metric-item"><div class="value">{stat_counts['基线不可靠']}</div><div class="label">基线不可靠</div></div>
-        <div class="metric-item"><div class="value">{total_events}</div><div class="label">总计</div></div>
+        <div class="metric-item"><div class="value">{stat_validated}</div><div class="label">已验证</div></div>
+        <div class="metric-item"><div class="value">{stat_no_baseline}</div><div class="label">无基线</div></div>
+        <div class="metric-item"><div class="value">{len(events_raw)}</div><div class="label">总计</div></div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2233,10 +2228,25 @@ def _show_baseline_reinforcement():
             ORDER BY validated_at DESC
             LIMIT 20
         """)
-        ch.close()
         refinements = []
+        seen = set()
+        processed = set()
         for row in rows.result_rows:
-            refinements.append(dict(zip(rows.column_names, row)))
+            r = dict(zip(rows.column_names, row))
+            u = str(r.get("username", ""))
+            if u and u not in seen:
+                seen.add(u)
+                refinements.append(r)
+
+        # 排除已有人工反馈的用户
+        try:
+            fb_rows = ch.query("SELECT DISTINCT username FROM log_analysis.human_feedback")
+            for row in fb_rows.result_rows:
+                processed.add(str(row[0]))
+        except Exception:
+            pass
+        refinements = [r for r in refinements if r.get("username", "") not in processed]
+        ch.close()
     except Exception:
         refinements = []
 
@@ -2295,6 +2305,11 @@ def _show_baseline_reinforcement():
         </div>
         """, unsafe_allow_html=True)
 
+    # 排除本次会话中已反馈的用户
+    if "fb_processed_users" not in st.session_state:
+        st.session_state.fb_processed_users = set()
+    refinements = [r for r in refinements if r.get("username", "") not in st.session_state.fb_processed_users]
+
     # 每一条强化建议展示
     for ref in refinements:
         pt = (ref.get("pattern_type") or "UNKNOWN").upper()
@@ -2346,6 +2361,28 @@ def _show_baseline_reinforcement():
                 """, unsafe_allow_html=True)
             for nf in new_features[:3]:
                 st.markdown(f"<span class='badge info'>{nf.get('feature','')}: {nf.get('value','')}</span>", unsafe_allow_html=True)
+
+        # 双键反馈（确认违规 / 误报）
+        fb_uid = f"fb_{ref.get('validated_at','')}_{username}"
+        if st.session_state.get(fb_uid, False):
+            st.success(f"✅ 已处理 — {username}")
+        else:
+            fb_cols = st.columns([1, 1, 4])
+            with fb_cols[0]:
+                if st.button("✅ 确认违规", key=f"{fb_uid}_ok", use_container_width=True):
+                    _save_human_feedback(username, ref.get("model_version", "ueba_baseline_v1"), "general", 1)
+                    st.session_state[fb_uid] = True
+                    st.session_state.fb_processed_users.add(username)
+                    st.success("✅ 已提交确认，正在刷新...")
+                    st.rerun()
+            with fb_cols[1]:
+                if st.button("❌ 误报", key=f"{fb_uid}_fp", use_container_width=True):
+                    _save_human_feedback(username, ref.get("model_version", "ueba_baseline_v1"), "general", 2)
+                    st.session_state[fb_uid] = True
+                    st.session_state.fb_processed_users.add(username)
+                    st.success("✅ 已提交误报，正在刷新...")
+                    st.rerun()
+        st.markdown("<hr style='margin:0.3rem 0;border-color:#eee;'>", unsafe_allow_html=True)
 
 
 def show_history_search():
@@ -2575,7 +2612,7 @@ def main():
         show_realtime_logs()
     elif st.session_state.current_page == "UEBA 异常排行":
         show_ueba_ranking()
-    elif st.session_state.current_page == "安全评分看板":
+    elif st.session_state.current_page == "风险评分看板":
         show_security_score()
     elif st.session_state.current_page == "AI分析+强化基线":
         show_ai_suggestions()

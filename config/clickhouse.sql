@@ -323,3 +323,18 @@ CREATE TABLE IF NOT EXISTS baseline_ai_refinements (
     created_at DateTime DEFAULT now()
 ) ENGINE = ReplacingMergeTree(created_at)
 ORDER BY (username, model_version, validated_at);
+
+-- ------------------------------------------------------------------
+-- 人工反馈表
+-- 用于记录安全分析师对 AI 分析结果的反馈（确认违规/误报）
+-- 累计误报次数决定 AI 强化置信度衰减
+-- ------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS human_feedback (
+    username String,
+    model_version String,
+    stale_feature String,
+    decision UInt8,
+    reviewer String,
+    created_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (username, stale_feature);
