@@ -714,14 +714,7 @@ class LogAnalysisService:
                 username=settings.clickhouse_user, password=settings.clickhouse_password,
                 database=settings.clickhouse_database,
             )
-            # 检查是否有 validation 结果
-            cnt = ch.query("SELECT count() FROM ueba_validation_results")
-            if cnt.result_rows and cnt.result_rows[0][0] == 0:
-                logger.info("  无 validation 结果，跳过 AI 强化")
-                ch.close()
-                return
-
-            # 查有 HIGH/CRITICAL 的用户
+            # 查有 HIGH/CRITICAL 的用户（无数据时自然跳过）
             high_risk = ch.query("""
                 SELECT DISTINCT username FROM ueba_validation_results
                 WHERE ueba_risk_level IN ('HIGH','CRITICAL') AND username != ''
