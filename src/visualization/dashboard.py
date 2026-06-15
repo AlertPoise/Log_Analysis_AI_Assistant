@@ -2050,8 +2050,23 @@ def show_security_score():
         st.markdown(brief, unsafe_allow_html=True)
 
 
+def _save_human_feedback(username: str, model_version: str, stale_feature: str, decision: int):
+    """保存人工反馈到 ClickHouse human_feedback 表。"""
+    try:
+        import clickhouse_connect
+        ch = clickhouse_connect.get_client(
+            host=settings.clickhouse_host, port=settings.clickhouse_port,
+            username=settings.clickhouse_user, password=settings.clickhouse_password,
+            database=settings.clickhouse_database,
+        )
+        ch.insert("human_feedback", [[username, model_version, stale_feature, decision, "dashboard_user"]],
+                  column_names=["username", "model_version", "stale_feature", "decision", "reviewer"])
+        ch.close()
+    except Exception as e:
+        logger.error(f"保存反馈失败: {e}")
+
+
 def show_ai_suggestions():
-    # 筛选栏
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
         time_range = st.selectbox("时间范围", ["最近 24 小时", "最近 7 天", "最近 30 天"], index=2, label_visibility="collapsed")
@@ -2060,104 +2075,128 @@ def show_ai_suggestions():
     with col3:
         status_filter = st.selectbox("处置状态", ["全部", "待处置", "无基线", "基线不可靠"], label_visibility="collapsed")
 
-    # 缓存：相同筛选条件下 1 小时内复用结果（首次加载约 30~60 秒，后续秒开）
-    cache_key = f"ai_cache"
-    cache_meta_key = f"ai_cache_meta"
-    CACHE_TTL_SEC = 3600
+    # 只获取事件数据（不调 AI API），秒出
+    from collections import defaultdict
+    from src.behavior.api import analyze_behavior_from_clickhouse
+    time_map = {"最近 24 小时": 24, "最近 7 天": 24 * 7, "最近 30 天": 24 * 30}
+    hours = time_map.get(time_range, 24 * 7)
+    start = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    events_raw = []
+    try:
+        result = analyze_behavior_from_clickhouse(start_time=start, end_time=end)
+        if result.get("success"):
+            events_raw = result.get("events", [])
+    except Exception:
+        pass
 
-    use_cache = False
-    if cache_key in st.session_state and cache_meta_key in st.session_state:
-        ct, cr, crf, csf = st.session_state[cache_meta_key]
-        if (datetime.now() - ct).seconds < CACHE_TTL_SEC and cr == time_range and crf == risk_filter and csf == status_filter:
-            use_cache = True
-
-    if use_cache:
-        suggestions = st.session_state[cache_key]
-    else:
-        with st.spinner(f"正在分析异常事件 ({time_range})..."):
-            try:
-                suggestions = get_ueba_ai_suggestions(
-                    time_range=time_range,
-                    risk_filter=risk_filter,
-                    status_filter=status_filter,
-                )
-            except Exception as e:
-                logger.error(f"AI 分析异常: {e}")
-                suggestions = []
-        # 无论成功失败都存缓存，避免重复调用
-        st.session_state[cache_key] = suggestions
-        st.session_state[cache_meta_key] = (datetime.now(), time_range, risk_filter, status_filter)
-
-    if not suggestions:
-        st.info("当前时间窗口无异常事件 — 尝试选择「最近 30 天」扩大搜索范围，或确认已通过 `python -m src.main` 采集日志")
+    if not events_raw:
+        st.info("当前时间窗口无异常事件 — 尝试选择「最近 30 天」扩大搜索范围")
         return
 
-    # ---- 用户级概览（按用户分组） ----
-    from collections import defaultdict
-    user_groups: dict[str, list] = defaultdict(list)
-    for s in suggestions:
-        user_groups[s.get("用户", "未知")].append(s)
+    user_events: dict[str, list] = defaultdict(list)
+    for ev in events_raw:
+        user_events[ev.get("username", "未知")].append(ev)
 
-    # 风险等级排序（兼容中文图标和英文）
-    risk_score_map = {"🔴 高危": 0, "🟠 中危": 1, "🟡 低危": 2, "CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-    def _rl_score(rl: str) -> int:
-        for k, v in risk_score_map.items():
-            if k in str(rl).upper():
-                return v
-        return 9
-    sorted_users = sorted(user_groups.keys(), key=lambda u: min(_rl_score(s.get("风险等级", "LOW")) for s in user_groups[u]))
+    risk_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    def _user_max_risk(u: str) -> int:
+        return min((risk_order.get(ev.get("ueba_risk_level", "LOW"), 9) for ev in user_events[u]), default=9)
+    sorted_users = sorted(user_events.keys(), key=_user_max_risk)
 
-    # 用户下拉筛选
-    all_users_option = "全部用户"
-    user_options = [all_users_option] + sorted_users
-    sel_user = st.selectbox("👤 筛选用户", user_options, label_visibility="collapsed", key="ai_user_filter")
+    sel_user = st.selectbox("👤 筛选用户", ["全部用户"] + sorted_users, label_visibility="collapsed", key="ai_user_filter")
 
-    # 统计数据
-    total_users = len(user_groups)
-    total_events = len(suggestions)
-    st.markdown(f"<div style='display:flex;justify-content:space-between;font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.5rem;'><span>共 {total_users} 个用户 · {total_events} 条异常事件</span></div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='display:flex;justify-content:space-between;font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.5rem;'><span>共 {len(user_events)} 个用户 · {len(events_raw)} 条异常事件</span></div>", unsafe_allow_html=True)
 
-    # 展开状态
-    expand_key = "ai_user_expand"
-    if expand_key not in st.session_state:
-        st.session_state[expand_key] = None
-
+    # 每个用户一张卡片 + AI 按钮
     for username in sorted_users:
-        if sel_user != all_users_option and username != sel_user:
+        if sel_user != "全部用户" and username != sel_user:
             continue
 
-        items = user_groups[username]
-        max_rl = min((_rl_score(s.get("风险等级", "LOW")) for s in items), default=9)
+        events = user_events[username]
+        max_rl = _user_max_risk(username)
         rl_css = "critical" if max_rl <= 0 else "high" if max_rl <= 1 else "medium" if max_rl <= 2 else "low"
         rl_label = "CRITICAL" if max_rl <= 0 else "HIGH" if max_rl <= 1 else "MEDIUM" if max_rl <= 2 else "LOW"
-        latest_ts = max(s.get("生成时间", "") for s in items)
-        def _parse_conf(v: str) -> int:
-            raw = str(v).replace("%", "").strip()
-            return int(raw) if raw.isdigit() else 0
-        latest_score = max((_parse_conf(s.get("置信度", "0")) for s in items), default=0)
-        has_ai = any(s.get("AI 分析") and "暂无" not in s.get("AI 分析","") for s in items)
-        is_expanded = (st.session_state[expand_key] == username)
+        score_max = max((int(ev.get("ueba_score", 0) or 0) for ev in events), default=0)
+        ai_key = f"ai_result_{username}"
+        ai_done = ai_key in st.session_state
 
-        # 用户概览卡片（Streamlit 原生组件）
         with st.container():
             c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
             with c1:
                 st.markdown(f"**👤 {username}**  ")
             with c2:
-                st.markdown(f"<span class='badge {rl_css}'>{rl_label}</span>  {len(items)} 条", unsafe_allow_html=True)
+                st.markdown(f"<span class='badge {rl_css}'>{rl_label}</span>  {len(events)} 条", unsafe_allow_html=True)
             with c3:
-                if has_ai:
-                    st.markdown("<span class='badge info'>🧬 已强化</span>", unsafe_allow_html=True)
+                if ai_done:
+                    st.markdown("<span class='badge info'>🧠 已分析</span>", unsafe_allow_html=True)
             with c4:
-                btn_label = "🔼" if is_expanded else "🔽"
-                if st.button(btn_label, key=f"ai_u_{username}", use_container_width=True):
-                    st.session_state[expand_key] = None if is_expanded else username
-                    st.rerun()
-        st.caption(f"最近 {latest_ts[:10]} · 最高评分 {latest_score}")
+                if st.button("🤖 AI", key=f"ai_btn_{username}", use_container_width=True, type="primary"):
+                    with st.spinner(f"正在调用 AI 分析 {username}..."):
+                        desc = "; ".join(
+                            f"[{str(ev.get('timestamp',''))[:16]}]({ev.get('ueba_risk_level','-')}) "
+                            for ev in events[:10]
+                        )
+                        result = analyze_anomaly_with_ai(
+                            username=username,
+                            anomaly_description=f"用户 {username} 近期 {len(events)} 条异常事件。{desc}",
+                        )
+                        st.session_state[ai_key] = result
+                        st.rerun()
+        st.caption(f"最高评分 {score_max}")
 
-        # 展开后显示该用户的事件列表 + AI 分析
-        if is_expanded:
-            for ev in items[:10]:
+        # 显示 AI 结果
+        if ai_done:
+            r = st.session_state[ai_key]
+            rl = (r.get("risk_level", "MEDIUM")).lower()
+            st.markdown(f"""
+            <div class="risk-card {rl}" style="margin-top:0.3rem;">
+                <div style="display:flex;justify-content:space-between;">
+                    <span class="card-title">🤖 AI 分析 — {username}</span>
+                    <span class="badge {rl}">{r.get('risk_level','MEDIUM')}</span>
+                </div>
+                <div style="font-size:0.85rem;margin-top:0.3rem;">
+                    <div><strong>威胁:</strong> {r.get('threat_type','-')}</div>
+                    <div style="margin-top:0.15rem;"><strong>分析:</strong> {r.get('description','-')}</div>
+                    <div style="margin-top:0.15rem;"><strong>建议:</strong> {r.get('suggestion','-')}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # 三键反馈
+            fb_key = f"fb_{username}"
+            fb_done_key = f"fb_done_{username}"
+            if fb_done_key not in st.session_state:
+                st.session_state[fb_done_key] = False
+
+            if st.session_state[fb_done_key]:
+                st.success("✅ 感谢反馈！")
+            else:
+                fb_cols = st.columns([1, 1, 1, 3])
+                with fb_cols[0]:
+                    if st.button("✅ 确认违规", key=f"{fb_key}_confirm", use_container_width=True):
+                        _save_human_feedback(username, "ueba_baseline_v1", "general", 1)
+                        st.session_state[fb_done_key] = True
+                        st.rerun()
+                with fb_cols[1]:
+                    if st.button("❌ 误报", key=f"{fb_key}_fp", use_container_width=True):
+                        _save_human_feedback(username, "ueba_baseline_v1", "general", 2)
+                        st.session_state[fb_done_key] = True
+                        st.rerun()
+                with fb_cols[2]:
+                    if st.button("⏭️ 跳过", key=f"{fb_key}_skip", use_container_width=True):
+                        st.session_state[fb_done_key] = True
+                        st.rerun()
+            st.markdown("<hr style='margin:0.3rem 0;border-color:#eee;'>", unsafe_allow_html=True)
+
+        # 展开显示事件列表
+        expand_key_u = f"ai_ev_expand_{username}"
+        if expand_key_u not in st.session_state:
+            st.session_state[expand_key_u] = False
+        if st.button("📋 查看事件详情" if not st.session_state[expand_key_u] else "🔼 收起事件", key=f"ev_toggle_{username}"):
+            st.session_state[expand_key_u] = not st.session_state[expand_key_u]
+            st.rerun()
+        if st.session_state[expand_key_u]:
+            for ev in events[:10]:
                 rl = "critical" if ev.get("风险等级") in ("CRITICAL",) else "high" if ev.get("风险等级") in ("HIGH",) else "medium"
                 ts = ev.get("生成时间", "")[:16]
                 threat = ev.get("威胁类型", "待分析")
@@ -2185,17 +2224,13 @@ def show_ai_suggestions():
 
     # 处置统计
     st.markdown("<hr style='margin:0.8rem 0;border-color:#eee;'>", unsafe_allow_html=True)
-    stat_counts = {"待处置": 0, "无基线": 0, "基线不可靠": 0}
-    for s in suggestions:
-        sts = s.get("处置状态", "")
-        if sts in stat_counts:
-            stat_counts[sts] += 1
+    stat_validated = sum(1 for ev in events_raw if ev.get("validation_status") == "VALIDATED")
+    stat_no_baseline = sum(1 for ev in events_raw if ev.get("validation_status") == "NO_BASELINE")
     st.markdown(f"""
     <div class="metric-group">
-        <div class="metric-item"><div class="value">{stat_counts['待处置']}</div><div class="label">待处置</div></div>
-        <div class="metric-item"><div class="value">{stat_counts['无基线']}</div><div class="label">无基线</div></div>
-        <div class="metric-item"><div class="value">{stat_counts['基线不可靠']}</div><div class="label">基线不可靠</div></div>
-        <div class="metric-item"><div class="value">{total_events}</div><div class="label">总计</div></div>
+        <div class="metric-item"><div class="value">{stat_validated}</div><div class="label">已验证</div></div>
+        <div class="metric-item"><div class="value">{stat_no_baseline}</div><div class="label">无基线</div></div>
+        <div class="metric-item"><div class="value">{len(events_raw)}</div><div class="label">总计</div></div>
     </div>
     """, unsafe_allow_html=True)
 

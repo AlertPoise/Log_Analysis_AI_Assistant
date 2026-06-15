@@ -123,8 +123,9 @@ class UebaValidationService:
         unreliable_baseline_count = 0
         failed_count = 0
         row_errors: list[str] = []
-        # 缓存每个用户的强化建议，避免重复查询
+        # 缓存每个用户的强化建议 + 误报次数
         _refinements_cache: dict[str, list[dict[str, Any]]] = {}
+        _fp_cache: dict[str, int] = {}
 
         def _get_refinements(username: str) -> list[dict[str, Any]]:
             if username not in _refinements_cache:
@@ -151,6 +152,20 @@ class UebaValidationService:
 
             refinements = _get_refinements(target_log.username)
 
+            # 查询误报次数（缓存）
+            uname = target_log.username
+            if uname not in _fp_cache:
+                try:
+                    db = self.validation_repository.database
+                    rows = self.validation_repository._execute_query(
+                        f"SELECT count() FROM {db}.human_feedback WHERE username = %(u)s AND decision = 2",
+                        {"u": uname},
+                    )
+                    _fp_cache[uname] = int(rows[0][0]) if rows else 0
+                except Exception:
+                    _fp_cache[uname] = 0
+            fp_count = _fp_cache[uname]
+
             result = self.score_calculator.calculate(
                 target_log,
                 baseline,
@@ -158,6 +173,7 @@ class UebaValidationService:
                 validated_at=validated_at,
                 validation_run_id=effective_validation_run_id,
                 refinements=refinements,
+                false_positive_count=fp_count,
             )
             results.append(result)
 
