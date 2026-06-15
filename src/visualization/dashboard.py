@@ -2207,34 +2207,10 @@ def _show_baseline_reinforcement():
         refinements = []
         for row in rows.result_rows:
             refinements.append(dict(zip(rows.column_names, row)))
-    except Exception as e:
-        st.info("暂无 AI 基线强化数据 — 请先在 VM 上运行 BaselineReinforcementService.reinforce_all_users()")
-        return
+    except Exception:
+        refinements = []
 
-    if not refinements:
-        st.info("暂无 AI 基线强化数据")
-        return
-
-    # 用户筛选
-    usernames = sorted(set(r.get("username", "") for r in refinements if r.get("username")))
-    all_user_opt = "全部用户"
-    user_opts = [all_user_opt] + usernames
-    sel_user = st.selectbox("👤 筛选用户", user_opts, label_visibility="collapsed", key="reinforce_user_filter")
-    if sel_user != all_user_opt:
-        refinements = [r for r in refinements if r.get("username") == sel_user]
-
-    # 统计头（基于筛选后的数据）
-    attack_count = sum(1 for r in refinements if r.get("pattern_type") == "ATTACK")
-    behavior_count = sum(1 for r in refinements if r.get("pattern_type") == "BEHAVIOR_CHANGE")
-    st.markdown(f"""
-    <div class="metric-group">
-        <div class="metric-item"><div class="value">{len(refinements)}</div><div class="label">强化记录</div></div>
-        <div class="metric-item"><div class="value">{attack_count}</div><div class="label">攻击模式</div></div>
-        <div class="metric-item"><div class="value">{behavior_count}</div><div class="label">行为变化</div></div>
-        <div class="metric-item"><div class="value">{sum(1 for r in refinements if r.get('is_baseline_stale'))}</div><div class="label">基线过时</div></div>
-    </div>
-    """, unsafe_allow_html=True)
-
+    # 按钮始终显示（即使无数据也能手动触发）
     st.caption("💡 AI 强化在 `python -m src.main` 启动时自动执行，也可点下方按钮手动触发")
     # 操作按钮行
     btn_cols = st.columns([1, 1, 3])
@@ -2270,6 +2246,24 @@ def _show_baseline_reinforcement():
                     st.rerun()
                 except Exception as e:
                     st.error(f"AI 强化失败: {e}")
+
+    # 有数据时才展示统计 + 筛选 + 卡片
+    if refinements:
+        usernames = sorted(set(r.get("username", "") for r in refinements if r.get("username")))
+        sel_user = st.selectbox("👤 筛选用户", ["全部用户"] + usernames, label_visibility="collapsed", key="reinforce_user_filter")
+        if sel_user != "全部用户":
+            refinements = [r for r in refinements if r.get("username") == sel_user]
+
+        attack_count = sum(1 for r in refinements if r.get("pattern_type") == "ATTACK")
+        behavior_count = sum(1 for r in refinements if r.get("pattern_type") == "BEHAVIOR_CHANGE")
+        st.markdown(f"""
+        <div class="metric-group">
+            <div class="metric-item"><div class="value">{len(refinements)}</div><div class="label">强化记录</div></div>
+            <div class="metric-item"><div class="value">{attack_count}</div><div class="label">攻击模式</div></div>
+            <div class="metric-item"><div class="value">{behavior_count}</div><div class="label">行为变化</div></div>
+            <div class="metric-item"><div class="value">{sum(1 for r in refinements if r.get('is_baseline_stale'))}</div><div class="label">基线过时</div></div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # 每一条强化建议展示
     for ref in refinements:
