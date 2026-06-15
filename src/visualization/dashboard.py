@@ -2257,9 +2257,11 @@ def _show_baseline_reinforcement():
                     config = settings.current_ai_config
                     ai = AIClient(api_key=config["api_key"], platform=config["platform"], model=config.get("model"))
                     bs = BaselineStore(client=ch, database=settings.clickhouse_database)
+                    _mv = ch.query("SELECT model_version FROM log_analysis.user_behavior_baselines ORDER BY created_at DESC LIMIT 1")
+                    _model_version = str(_mv.result_rows[0][0]) if _mv.result_rows else "ueba_baseline_v1"
                     svc = BaselineReinforcementService(clickhouse_client=ch, ai_client=ai, baseline_store=bs)
                     results = svc.reinforce_all_users(
-                        model_version="ueba_baseline_v1",
+                        model_version=_model_version,
                         start_time=(datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
                         end_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     )

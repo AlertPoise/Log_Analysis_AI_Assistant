@@ -732,6 +732,11 @@ class LogAnalysisService:
                 ch.close()
                 return
 
+            # 自动检测 model_version
+            mv_row = ch.query("SELECT model_version FROM log_analysis.user_behavior_baselines ORDER BY created_at DESC LIMIT 1")
+            model_version = str(mv_row.result_rows[0][0]) if mv_row.result_rows else "ueba_baseline_v1"
+            logger.info(f"  检测到 model_version: {model_version}")
+
             config = settings.current_ai_config
             ai = ReinforcementAIClient(
                 api_key=config["api_key"],
@@ -750,7 +755,7 @@ class LogAnalysisService:
                 try:
                     r = service.reinforce_user(
                         username=user,
-                        model_version="ueba_baseline_v1",
+                        model_version=model_version,
                         start_time=start,
                         end_time=end,
                     )
