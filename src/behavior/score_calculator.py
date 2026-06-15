@@ -8,7 +8,7 @@ coordinate batch validation workflows.
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Iterable
+from typing import Any, Iterable
 
 from .schemas import CountRatioItem, UserBaseline
 from .validation_schemas import ScoreReason, UebaValidationResult, ValidationTargetLog
@@ -30,6 +30,7 @@ class UebaScoreCalculator:
         model_version: str | None = None,
         validated_at: str | None = None,
         validation_run_id: str = "default_validation_run",
+        refinements: list[dict[str, Any]] | None = None,
     ) -> UebaValidationResult:
         """Calculate a validation result for one target log."""
         effective_model_version = model_version or (baseline.model_version if baseline else None)
@@ -151,6 +152,10 @@ class UebaScoreCalculator:
                 score_delta=20,
                 evidence={"is_unusual_ip": True, "baseline_unusual_ip_rate": baseline.unusual_ip_rate},
             )
+
+        # AI 强化规则：根据用户的强化建议额外加分
+        if refinements:
+            self._apply_ai_reinforced_rules(reasons, target_log, baseline, refinements)
 
         score += sum(reason.score_delta for reason in reasons if reason.code != "UNRELIABLE_BASELINE")
         score = self._clamp_score(score)
@@ -322,6 +327,107 @@ class UebaScoreCalculator:
                 "baseline_failed_rate": baseline.failed_rate,
             },
         )
+
+    # ------------------------------------------------------------------
+    # AI 强化规则
+    # ------------------------------------------------------------------
+
+    def _apply_ai_reinforced_rules(
+        self,
+        reasons: list[ScoreReason],
+        target_log: ValidationTargetLog,
+        baseline: UserBaseline,
+        refinements: list[dict[str, Any]],
+    ) -> None:
+        """根据 AI 强化建议，对匹配薄弱特征的事件额外加分。
+
+        加分映射（可根据实际数据调整）：
+        - common_source_ips / source_ip     → +15
+        - auth_method_distribution           → +10
+        - common_source_cities / cities      → +10
+        - common_source_countries / countries → +10
+        - common_active_hours / off_hours     → +8
+        - unusual_ip_rate / is_unusual_ip     → +8
+        - failed_rate / 登录失败              → +5
+        """
+        stale_set: set[str] = set()
+        for ref in refinements:
+            raw = ref.get("stale_features", [])
+            if isinstance(raw, list):
+                for f in raw:
+                    stale_set.add(str(f).lower())
+
+        if not stale_set:
+            return
+
+        # 逐个检查当前日志是否命中薄弱特征
+        if "common_source_ips" in stale_set or "source_ip" in stale_set:
+            self._add_reason(
+                reasons,
+                code="AI_REINFORCE_SOURCE_IP",
+                message="AI 强化：source_ip 属于之前标记的薄弱特征",
+                score_delta=15,
+                evidence={"stale_features": sorted(stale_set)},
+            )
+
+        if "auth_method_distribution" in stale_set or "auth_method" in stale_set:
+            self._add_reason(
+                reasons,
+                code="AI_REINFORCE_AUTH_METHOD",
+                message="AI 强化：auth_method 属于之前标记的薄弱特征",
+                score_delta=10,
+                evidence={"stale_features": sorted(stale_set)},
+            )
+
+        if any(k in stale_set for k in ("common_source_cities", "source_city", "cities")):
+            self._add_reason(
+                reasons,
+                code="AI_REINFORCE_CITY",
+                message="AI 强化：来源城市属于之前标记的薄弱特征",
+                score_delta=10,
+                evidence={"stale_features": sorted(stale_set)},
+            )
+
+        if any(k in stale_set for k in ("common_source_countries", "source_country", "countries")):
+            self._add_reason(
+                reasons,
+                code="AI_REINFORCE_COUNTRY",
+                message="AI 强化：来源国家属于之前标记的薄弱特征",
+                score_delta=10,
+                evidence={"stale_features": sorted(stale_set)},
+            )
+
+        if any(k in stale_set for k in ("common_active_hours", "off_hours", "off_hours_rate")):
+            if target_log.is_off_hours:
+                self._add_reason(
+                    reasons,
+                    code="AI_REINFORCE_OFF_HOURS",
+                    message="AI 强化：非活跃时段属于之前标记的薄弱特征",
+                    score_delta=8,
+                    evidence={"stale_features": sorted(stale_set)},
+                )
+
+        if any(k in stale_set for k in ("unusual_ip_rate", "is_unusual_ip", "unusual_ip")):
+            if target_log.is_unusual_ip:
+                self._add_reason(
+                    reasons,
+                    code="AI_REINFORCE_UNUSUAL_IP",
+                    message="AI 强化：异常 IP 属于之前标记的薄弱特征",
+                    score_delta=8,
+                    evidence={"stale_features": sorted(stale_set)},
+                )
+
+        if "failed_rate" in stale_set:
+            result = (target_log.result or "").upper()
+            event_type = (target_log.event_type or "").upper()
+            if result in {"FAILED", "FAIL"} or "LOGIN_FAIL" in event_type:
+                self._add_reason(
+                    reasons,
+                    code="AI_REINFORCE_FAILED",
+                    message="AI 强化：登录失败属于之前标记的薄弱特征",
+                    score_delta=5,
+                    evidence={"stale_features": sorted(stale_set)},
+                )
 
     def _build_result(
         self,

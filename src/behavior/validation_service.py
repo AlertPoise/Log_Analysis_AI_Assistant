@@ -123,6 +123,18 @@ class UebaValidationService:
         unreliable_baseline_count = 0
         failed_count = 0
         row_errors: list[str] = []
+        # 缓存每个用户的强化建议，避免重复查询
+        _refinements_cache: dict[str, list[dict[str, Any]]] = {}
+
+        def _get_refinements(username: str) -> list[dict[str, Any]]:
+            if username not in _refinements_cache:
+                try:
+                    _refinements_cache[username] = self.baseline_store.get_user_refinements(
+                        username, model_version=model_version, limit=1
+                    )
+                except Exception:
+                    _refinements_cache[username] = []
+            return _refinements_cache[username]
 
         for target_log in target_logs:
             try:
@@ -137,12 +149,15 @@ class UebaValidationService:
             elif not baseline.is_reliable:
                 unreliable_baseline_count += 1
 
+            refinements = _get_refinements(target_log.username)
+
             result = self.score_calculator.calculate(
                 target_log,
                 baseline,
                 model_version=model_version or (baseline.model_version if baseline else None),
                 validated_at=validated_at,
                 validation_run_id=effective_validation_run_id,
+                refinements=refinements,
             )
             results.append(result)
 
